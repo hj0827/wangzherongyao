@@ -1,0 +1,54 @@
+extends SceneTree
+
+const Arena = preload("res://scripts/game/arena.gd")
+
+var arena: Node3D
+var viewport: SubViewport
+
+func _initialize() -> void:
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
+	DisplayServer.window_set_position(Vector2i(5200, 3200))
+	Engine.max_fps = 15
+	viewport = SubViewport.new()
+	viewport.size = Vector2i(1600, 900)
+	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	root.add_child(viewport)
+	var config := {
+		"mode": "duel",
+		"humans": [{"id": "p1", "name": "苍刃", "team": "blue", "hero_type": "blade"}],
+		"bot_fill": true,
+		"bot_ai": true,
+	}
+	arena = Arena.new()
+	arena.configure({"config": config, "authoritative": true, "local_owner": "p1"})
+	viewport.add_child(arena)
+	_run()
+
+func _shot(file_name: String) -> void:
+	await RenderingServer.frame_post_draw
+	var img: Image = viewport.get_texture().get_image()
+	img.save_png(ProjectSettings.globalize_path("res://shots/%s.png" % file_name))
+	print("SHOT ", file_name, " ", img.get_size())
+
+func _run() -> void:
+	await create_timer(1.2).timeout
+	arena.hud.visible = false
+	arena._mouse_valid = false
+	var hero: Dictionary = arena.sim.get_hero_by_player("p1")
+	hero.pos = Vector2(0.0, 0.0)
+	arena.zoom = 5.5
+	arena._update_camera(1.0, true)
+	await create_timer(0.6).timeout
+	await _shot("hero_back")
+
+	hero.facing = Vector2(-0.7071, -0.7071)
+	await create_timer(0.6).timeout
+	await _shot("hero_front")
+
+	arena.hud.visible = true
+	arena.zoom = 19.0
+	arena._update_camera(1.0, true)
+	await create_timer(0.4).timeout
+	await _shot("hero_hud")
+
+	quit()
