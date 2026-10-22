@@ -82,6 +82,40 @@ godot --path godot --script res://tools/menu_shot.gd
 > Windows 下若命令行里 `APPDATA` 为空，启动 Godot 前请显式设置，
 > 否则 `user://` 会退化到工作目录，生成类似 `godot/Godot/app_userdata/` 的垃圾目录。
 
+## 开发约定
+
+### 1. 先写测试，再写实现（TDD）
+
+`tests/run_tests.gd` 会自动发现 `godot/tests/test_*.gd`，**新增测试文件即生效**，不需要注册清单。
+`test_base.gd` 是基类，不参与执行。
+
+标准流程：
+
+1. 在 `godot/tests/` 下新建 `test_<功能>.gd`，`extends "res://tests/test_base.gd"`；
+2. 写一条**会失败**的断言，跑一次确认它红（证明测试真的能抓到问题，不是恒真）；
+3. 写实现，跑到绿；
+4. **做一次变异验证**：把关键代码改回错误写法，确认测试变红，再改回来。
+   静默失效的 bug（`tsc`/构建/渲染都不报错的那类）必须靠这一步兜住。
+
+可用断言：`check(cond, msg)`、`eq/ne(a, b, msg)`、`gt/lt(a, b, msg)`、`near(a, b, eps, msg)`。
+
+### 2. 新建文件时先判断：入库还是忽略
+
+写文件之前先问一句「这是过程文件吗？」，再决定放哪：
+
+| 类型 | 例子 | 处理 |
+| --- | --- | --- |
+| 运行时源码 / 场景 / 着色器 / 测试 | `scripts/**`、`sim/**`、`tests/test_*.gd` | 入库 |
+| 运行时资产 | `assets/**` | 入库 |
+| 可复用的验收工具 | `tools/*_shot.gd`、`tools/perf_check.gd` | 入库 |
+| 一次性诊断探针 | `tools/probe_*.gd`、`tools/grab_*.gd` | **忽略**（规则已就绪） |
+| 脚本产出物 | `shots/**`、`build/**` | **忽略** |
+| 对着截图做的临时裁剪/比对 | `.crop*`、`*.orig` | **忽略** |
+| 可重新生成的源料 | `sources/**` | **忽略** |
+
+判断依据只有一条：**队友 clone 下来需不需要它才能跑起来 / 复现问题**。
+不需要，就别入库；不确定就先按忽略处理，规则集中在 `.gitignore` 里，改一处即可。
+
 ## 打包 Android
 
 ```cmd
@@ -103,6 +137,8 @@ godot --headless --path godot --export-debug "Android" build/android/fenghuo-gor
 | 编辑器缓存 | `godot/.godot/` | 约 350MB，Godot 自动生成 |
 | 验收截图 | `godot/shots/` | 约 365MB，跑脚本即重生成 |
 | 构建产物 | `godot/build/`, `*.apk`, `*.aab` | 约 84MB，CI/本地重新导出 |
+| 一次性诊断探针 | `godot/tools/probe_*.gd`, `godot/tools/grab_*.gd` | 依赖本地现场，跑完即弃 |
+| 临时分析产物 | `.crop*`, `*.orig`, `*.rej` | 对着截图裁剪/比对的一次性文件 |
 | 日志 | `*.log` | 运行时产物 |
 | Python 字节码 | `__pycache__/` | 工具脚本副作用 |
 | 生成源料 | `sources/` | 与成品重复，可重新生成 |

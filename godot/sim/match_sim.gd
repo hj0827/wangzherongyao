@@ -297,13 +297,16 @@ func _apply_human_inputs(dt: float) -> void:
 			continue
 		var aim: Vector2 = input.get("aim", Vector2.ZERO)
 		var aim_vector: Vector2 = aim - entity.pos
-		if aim_vector.length() > 0.6:
-			entity.facing = aim_vector.normalized()
 		var move: Vector2 = input.get("move", Vector2.ZERO)
 		if move.length() > 1.0:
 			move = move.normalized()
 		if move.length() > 0.01:
+			# 移动时朝向移动方向：点击移动经常是「往身后走」，若还朝着准星就成了倒着走。
+			# 站住时才看向准星；技能与普攻随后各自把 facing 改回目标方向，瞄准手感不变。
+			entity.facing = move.normalized()
 			_move_hero(entity, move, dt)
+		elif aim_vector.length() > 0.6:
+			entity.facing = aim_vector.normalized()
 		if bool(input.get("skill_q", false)):
 			_cast_q(entity, aim)
 		if bool(input.get("skill_e", false)):

@@ -183,7 +183,7 @@ func _show_menu() -> void:
 	for text in ["30 HZ 权威模拟", "4 位原创英雄", "AI 智能补位"]:
 		chips.add_child(_chip(text))
 
-	var hint_text := "WASD 移动   ·   左键 / 空格 普攻   ·   Q / E 技能"
+	var hint_text := "左键 点击移动   ·   右键 / 空格 普攻   ·   Q / E 技能"
 	if touch_mode:
 		hint_text = "左侧摇杆移动   ·   按住攻击   ·   技能自动索敌   ·   双指缩放"
 	var hint := _make_label(hint_text, 15 if touch_mode else 13, Color(0.62, 0.7, 0.76, 0.85))

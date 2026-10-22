@@ -25,6 +25,12 @@ const NET_BUFFER_LIMIT := 16
 const BLUE := Color(0.22, 0.6, 1.0)
 const RED := Color(1.0, 0.32, 0.26)
 const GOLD := Color(1.0, 0.8, 0.38)
+# 点击移动的到达判定（世界单位）。英雄碰撞半径 0.5~0.65，取 0.3 让「站到那个点」自然收住，
+# 又不会因为步长（speed*TICK ≈ 0.2）越过目标而在点上来回抽搐。
+const MOVE_ARRIVE_EPS := 0.3
+# 绿色移动指示环的呼吸幅度 / 频率
+const MOVE_MARKER_PULSE := 0.06
+const MOVE_MARKER_PULSE_HZ := 7.0
 
 var config: Dictionary = {}
 var mode := "duel"
@@ -75,12 +81,13 @@ var _camera_shake := 0.0
 var touch_mode := false
 var _mouse_ground := Vector2.ZERO
 var _mouse_valid := false
+# 点击移动的目标点。每次左键点击都整份覆盖 —— 「以最后一次点击为准」就是靠这里，
+# 不存在排队或叠加，点十次只有最后一个生效。
 var _move_target := Vector2.ZERO
 var _move_target_valid := false
-var _move_target_entity := -1
-var _click_attack := false
 var move_marker: Node3D
 var move_material: StandardMaterial3D
+var _move_marker_pulse := 0.0
 var _touch_move := Vector2.ZERO
 var _touch_attack := false
 var _touch_aim := Vector2.ZERO
@@ -140,6 +147,7 @@ func _ready() -> void:
 	add_child(_effects_root)
 	_build_camera()
 	_build_aim_marker()
+	_build_move_marker()
 	_build_ambient_particles()
 
 	if sim != null:
@@ -207,6 +215,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			zoom = maxf(14.0, zoom - 2.0)
 		elif mouse.pressed and mouse.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			zoom = minf(34.0, zoom + 2.0)
+		elif mouse.pressed and not touch_mode and mouse.button_index == MOUSE_BUTTON_LEFT:
+			# 左键点地 = 走到那个点。用事件自带的坐标而不是缓存的 _mouse_ground，
+			# 否则「先点、鼠标同一帧还在上一帧位置」时点偏一点点。
+			if _project_ground(mouse.position):
+				_set_move_target(_mouse_ground)
 	if event is InputEventKey:
 		var key := event as InputEventKey
 		if key.pressed and not key.echo and key.keycode == KEY_ESCAPE:
@@ -291,6 +304,7 @@ func _open_pause() -> void:
 		_pinch_distance = -1.0
 	_touch_move = Vector2.ZERO
 	_touch_attack = false
+	_move_target_valid = false
 	_local_input.move = Vector2.ZERO
 	_local_input.attack = false
 	hud.show_pause(true, online)
@@ -366,6 +380,7 @@ func _process(delta: float) -> void:
 	_sync_structures(current_snapshot, false)
 	_update_camera(delta, false)
 	_update_aim_marker()
+	_update_move_marker(delta)
 	_hud_timer += delta
 	if _hud_timer >= 0.05 and hud != null:
 		_hud_timer = 0.0
@@ -375,16 +390,23 @@ func _gather_input() -> void:
 	if touch_mode:
 		_gather_touch_input()
 		return
-	var move := Vector2.ZERO
+	var keys := Vector2.ZERO
 	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
-		move += Vector2(0, -1)
+		keys += Vector2(0, -1)
 	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
-		move += Vector2(0, 1)
+		keys += Vector2(0, 1)
 	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-		move += Vector2(-1, 0)
+		keys += Vector2(-1, 0)
 	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-		move += Vector2(1, 0)
-	move = InputAssist.camera_relative_move(move, _camera_forward_2d())
+		keys += Vector2(1, 0)
+	keys = InputAssist.camera_relative_move(keys, _camera_forward_2d())
+	var move := Vector2.ZERO
+	if keys.length() > 0.01:
+		# 键盘一动就把点击目标作废，否则两套输入会互相拉扯（人往前、点在后）。
+		_move_target_valid = false
+		move = keys
+	else:
+		move = _click_move_vector()
 	var q_down := Input.is_key_pressed(KEY_Q)
 	var e_down := Input.is_key_pressed(KEY_E)
 	if (q_down and not _prev_q) or _queued_q:
@@ -396,7 +418,64 @@ func _gather_input() -> void:
 	_local_input.move = move
 	if _mouse_valid:
 		_local_input.aim = _mouse_ground
-	_local_input.attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_key_pressed(KEY_SPACE)
+	# 左键已经让给「走到那」，普攻改到右键 / 空格。
+	_local_input.attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or Input.is_key_pressed(KEY_SPACE)
+
+# 点击移动：算出本 tick 该走的向量。
+# 返回值长度可能小于 1（模拟侧只在 >1 时才归一化），一步能走完时按剩余距离缩短。
+# 注意：真正让英雄收住的是 MOVE_ARRIVE_EPS，不是这个分支 —— 输入读的是上一 tick
+# 的快照（滞后约 speed*TICK ≈ 0.21m），所以 eps 刻意大于一帧步长，这样即使位置
+# 滞后一帧也不会越过目标点。只有在速度足够高（step > eps）时这个分支才生效。
+func _click_move_vector() -> Vector2:
+	if not _move_target_valid:
+		return Vector2.ZERO
+	var local := _snapshot_local_hero()
+	if local.is_empty() or not bool(local.get("alive", true)):
+		_move_target_valid = false
+		return Vector2.ZERO
+	var from := InputAssist.entity_position(local)
+	var to_target := _move_target - from
+	var distance := to_target.length()
+	if distance <= MOVE_ARRIVE_EPS:
+		_move_target_valid = false
+		return Vector2.ZERO
+	var step := _effective_speed(local) * TICK
+	if distance <= step:
+		return to_target / step
+	return to_target / distance
+
+# 复刻模拟侧的移速修正（疾跑 / 减速），用来算「最后一步走多远」。
+# 直接用基础速度会在加速时把最后一步估短，导致在目标点上来回跨。
+func _effective_speed(local: Dictionary) -> float:
+	var speed := maxf(float(local.get("speed", 6.0)), 0.1)
+	if float(local.get("haste_timer", 0.0)) > 0.0:
+		speed *= 1.4
+	if float(local.get("slow_timer", 0.0)) > 0.0:
+		speed *= 0.65
+	return speed
+
+func _set_move_target(point: Vector2) -> void:
+	# 边界必须与 match_sim._clamp_position 用同一条（BOUNDS - radius）。
+	# 之前用固定 0.2 的魔法数：目标能停在 57.80，而英雄最多走到 57.45（radius 0.55），
+	# 差 0.35 > MOVE_ARRIVE_EPS(0.30) → 永远进不了到达判定，目标永不失效，
+	# 人物贴着边界原地踏步、走路动画一直播。
+	var limit := maxf(MapData.BOUNDS - _move_edge_radius(), 0.0)
+	_move_target = Vector2(clampf(point.x, -limit, limit), clampf(point.y, -limit, limit))
+	_move_target_valid = true
+	_move_marker_pulse = 0.0
+	if move_marker != null:
+		move_marker.position = Vector3(_move_target.x, 0.09, _move_target.y)
+
+# 算可走边界时用的半径。取快照里的真实值，但夹在 [0.65, 1.5]：
+#  - 下限 0.65 是 hero_defs 里最大的英雄半径，兜住「客机快照 radius 缺失 / 被清洗成 0」
+#    的情况（否则目标落到 57.8，客机一直发 move 输入，host 侧贴边原地踏步）；
+#  - 上限 1.5 兜住被恶意放大的 radius，否则目标会被钳到地图中央。
+# 比真实半径保守的那 0.1m 在 58m 的地图上肉眼无感，代价远小于「永远到不了」。
+func _move_edge_radius() -> float:
+	var local := _snapshot_local_hero()
+	if local.is_empty():
+		return 0.65
+	return clampf(float(local.get("radius", 0.0)), 0.65, 1.5)
 
 func _gather_touch_input() -> void:
 	if _queued_q:
@@ -435,23 +514,29 @@ func _consume_skill_queue() -> void:
 	_queued_e = false
 
 func _update_mouse_ground() -> void:
+	_project_ground(get_viewport().get_mouse_position())
+
+# 把屏幕坐标投到地面平面（y = 0），成功则刷新 _mouse_ground / _mouse_valid。
+# 触摸瞄准、鼠标悬停、左键点地都走这一条，避免三处各写一遍射线求交。
+func _project_ground(screen_pos: Vector2) -> bool:
 	if camera == null:
-		return
-	var mouse_pos := get_viewport().get_mouse_position()
-	var origin := camera.project_ray_origin(mouse_pos)
-	var direction := camera.project_ray_normal(mouse_pos)
-	var plane := Plane(Vector3.UP, 0.0)
-	var hit: Variant = plane.intersects_ray(origin, direction)
-	if hit != null:
-		var point: Vector3 = hit
-		_mouse_ground = Vector2(point.x, point.z)
-		_mouse_valid = true
+		return false
+	var origin := camera.project_ray_origin(screen_pos)
+	var direction := camera.project_ray_normal(screen_pos)
+	var hit: Variant = Plane(Vector3.UP, 0.0).intersects_ray(origin, direction)
+	if hit == null:
+		return false
+	var point: Vector3 = hit
+	_mouse_ground = Vector2(point.x, point.z)
+	_mouse_valid = true
+	return true
 
 func receive_snapshot(data: Dictionary) -> void:
 	current_snapshot = data
 	# 入队供 jitter buffer 回放。深拷贝是必要的：同一份 Dictionary 后续会被复用。
 	_snapshot_buffer.append({
 		"at": float(Time.get_ticks_msec()) / 1000.0,
+		"st": float(data.get("time", 0.0)),
 		"snapshot": data.duplicate(true),
 	})
 	while _snapshot_buffer.size() > NET_BUFFER_LIMIT:
@@ -462,21 +547,21 @@ func receive_snapshot(data: Dictionary) -> void:
 		hud.update_snapshot(current_snapshot)
 
 # 在缓冲里挑出「渲染时刻」所在的两格，并算出插值进度。
-# now 可注入以便离线测试（生产环境不传，用真实时钟）。
-func _select_render_snapshot(now := -1.0) -> void:
+func _select_render_snapshot() -> void:
 	if _snapshot_buffer.is_empty():
 		return
-	if now < 0.0:
-		now = float(Time.get_ticks_msec()) / 1000.0
-	var render_time := now - NET_RENDER_DELAY
+	# 服务端当前时刻用最新快照的时间戳近似（快照自带 "time"）。
+	# 用服务端时钟而不是本地到达时钟，区间长度才恒等于服务端的推送间隔，
+	# 网络抖动只改变缓冲深度，不改变插值速度。
+	var latest: Dictionary = _snapshot_buffer[_snapshot_buffer.size() - 1]
+	var render_st := float(latest.get("st", 0.0)) - NET_RENDER_DELAY
 	var cur_index := -1
 	for i in _snapshot_buffer.size():
-		if float(_snapshot_buffer[i].get("at", 0.0)) >= render_time:
+		if float(_snapshot_buffer[i].get("st", 0.0)) >= render_st:
 			cur_index = i
 			break
 	if cur_index < 0:
 		# 缓冲里全是旧快照（刚开局/严重延迟）：用最新的，不插值。
-		var latest: Dictionary = _snapshot_buffer[_snapshot_buffer.size() - 1]
 		_render_snapshot = latest.get("snapshot", {})
 		_render_prev_positions.clear()
 		_render_alpha = 1.0
@@ -496,10 +581,9 @@ func _select_render_snapshot(now := -1.0) -> void:
 		_render_prev_positions[int(e.get("id", -1))] = Vector2(
 			float(e.get("x", 0.0)), float(e.get("y", 0.0))
 		)
-	var prev_at := float(prev_entry.get("at", 0.0))
-	var cur_at := float(cur_entry.get("at", 0.0))
-	# 渲染时刻由固定延迟决定，与快照何时到达无关；区间长度就是服务端的推送间隔。
-	_render_alpha = clampf((render_time - prev_at) / maxf(cur_at - prev_at, 0.001), 0.0, 1.0)
+	var prev_st := float(prev_entry.get("st", 0.0))
+	var cur_st := float(cur_entry.get("st", 0.0))
+	_render_alpha = clampf((render_st - prev_st) / maxf(cur_st - prev_st, 0.0001), 0.0, 1.0)
 
 func apply_remote_input(peer_id: int, input: Dictionary) -> void:
 	if sim != null:
@@ -628,6 +712,55 @@ func _build_aim_marker() -> void:
 	dot.material_override = material
 	dot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	aim_marker.add_child(dot)
+
+# 点击移动的落点指示：绿色呼吸环。
+# 只做「我要走到这儿」的反馈，颜色刻意跟金色准星（攻击/瞄准）区分开。
+func _build_move_marker() -> void:
+	move_marker = Node3D.new()
+	move_marker.name = "MoveMarker"
+	move_marker.visible = false
+	add_child(move_marker)
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.5
+	torus.outer_radius = 0.6
+	torus.rings = 36
+	torus.ring_segments = 6
+	ring.mesh = torus
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	# 不用 ADD：草地是亮色的，加色叠加会把绿色洗成白色，指示环就没了辨识度。
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.albedo_color = Color(0.24, 0.95, 0.42, 0.85)
+	material.emission_enabled = true
+	material.emission = Color(0.2, 0.95, 0.4)
+	material.emission_energy_multiplier = 2.0
+	move_material = material
+	ring.material_override = material
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	move_marker.add_child(ring)
+	# 中心小十字：远看是一个点，近看能认出环心在哪
+	for i in 2:
+		var tick := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(0.34, 0.02, 0.06) if i == 0 else Vector3(0.06, 0.02, 0.34)
+		tick.mesh = box
+		tick.material_override = material
+		tick.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		move_marker.add_child(tick)
+
+func _update_move_marker(delta: float) -> void:
+	if move_marker == null:
+		return
+	var show := _move_target_valid and not touch_mode
+	move_marker.visible = show
+	if not show:
+		return
+	move_marker.position = Vector3(_move_target.x, 0.09, _move_target.y)
+	_move_marker_pulse += delta
+	var pulse := 1.0 + sin(_move_marker_pulse * TAU * MOVE_MARKER_PULSE_HZ) * MOVE_MARKER_PULSE
+	move_marker.scale = Vector3(pulse, 1.0, pulse)
 
 func _build_environment() -> void:
 	var world := WorldEnvironment.new()

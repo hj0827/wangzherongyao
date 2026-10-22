@@ -9,8 +9,20 @@ const RED := Color(1.0, 0.32, 0.26)
 const GOLD := Color(1.0, 0.78, 0.32)
 const MANA := Color(0.28, 0.56, 1.0)
 const FONT_PATH := "res://assets/fonts/NotoSansSC.ttf"
+# --- 英雄 / 小兵 的体型 ---
+# 王者荣耀官方「王者世界」身高表：男英雄 176–197cm（李白 184、韩信 185、廉颇 190），
+# 女英雄 165–180，主流按 180cm 算；普通小兵约 150cm（鲁班 149、李元芳 152 常被形容
+# 「和小兵差不多高」）。也就是说**设定身高比只有 1.2 : 1**，远没有很多人以为的 2~3 倍。
+# 游戏里之所以一眼分得出，靠的不是身高：小兵体型窄（肩宽约英雄 5 成）、穿统一兵种配色、
+# 没有名字与描边；而且王者荣耀镜头很近，英雄约占屏高 1/6。
+# 我们的相机 zoom 21 下英雄只占屏高 ~6%，1.2 的身高差在屏幕上不到 10 个像素，
+# 再叠加小兵用的是 Q 版大头模型，两者视觉体量几乎一样 —— 这才是「分不出英雄和小兵」的根因。
+# 所以按「屏幕可辨识」取值：英雄 2.4 : 小兵 1.15 ≈ 2.1 : 1，并把小兵横向收窄到 0.9，
+# 等效于王者荣耀「英雄明显大一号、小兵又瘦又整齐」的观感。
+# 想严格照设定身高比（1.2:1）时，把 MINION_HEIGHT 改成 HERO_HEIGHT / 1.2 即可。
 const HERO_HEIGHT := 2.4
-const MINION_HEIGHT := 1.35
+const MINION_HEIGHT := 1.15
+const MINION_GIRTH := 0.9
 
 const UAL1 := preload("res://assets/animations/ual1.glb")
 const UAL2 := preload("res://assets/animations/ual2.glb")
@@ -72,6 +84,13 @@ const HERO_SETUPS := {
 
 const LOOPING_CLIPS := ["Idle", "Jog_Fwd", "Sprint", "Sword_Idle", "Spell_Simple_Idle", "Idle_Shield"]
 
+# 移动动画在 1.0 倍速下对应的「地面速度」（m/s）。UAL 的动作是原地循环，
+# 本身没有米/秒语义，这个值是观感标定：速度 6.4 的英雄约等于 2 倍速播放，
+# 步频落在 4 步/秒上下。低于它就滑步（像被拖着走），高于它就变成鬼畜。
+const LOCO_REF_SPEED := 3.2
+const LOCO_RATE_MIN := 1.0
+const LOCO_RATE_MAX := 2.2
+
 const ANIM_ATTACK := {
 	"blade": "Sword_Regular_A",
 	"mage": "Spell_Simple_Shoot",
@@ -113,6 +132,8 @@ var shield_ratio := 0.0
 var level := 1
 var moving := false
 var haste := false
+var unit_speed := 0.0
+var _locomotion_rate := 1.0
 var idle_anim := "Idle"
 var _target_position := Vector3.ZERO
 var _initialized := false
@@ -122,6 +143,9 @@ var _last_target := Vector3.ZERO
 var _prev_pos := Vector3.ZERO
 var _cur_pos := Vector3.ZERO
 var _has_pos := false
+# 上一帧的插值进度。变小说明进入了新的一格（tick / 快照区间推进），
+# 用来识别「这一格位置没变 = 实体已经站住」。
+var _last_alpha := 1.0
 
 var bar_root: Node3D
 var bar_mesh: MeshInstance3D
@@ -190,14 +214,16 @@ func _build_minion() -> void:
 	var fitted := ModelUtils.fit_scene(scene, MINION_HEIGHT)
 	fitted.name = "Model"
 	model_root = fitted
+	# 只压横轴：小兵要瘦，但不改身高（fit_scene 已经把高度对齐到 MINION_HEIGHT）。
+	model_root.scale = Vector3(MINION_GIRTH, 1.0, MINION_GIRTH)
 	add_child(model_root)
 	for node in model_root.find_children("*", "AnimationPlayer", true, false):
 		var player := node as AnimationPlayer
 		if player:
 			animation_players.append(player)
 			player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
-	_add_ring(0.5)
-	_add_health_bar(MINION_HEIGHT + 0.18, 0.8)
+	_add_ring(0.44)
+	_add_health_bar(MINION_HEIGHT + 0.16, 0.62)
 	_set_anim("Idle", true)
 
 func _add_ring(radius: float) -> void:
@@ -374,6 +400,9 @@ func _equip_weapon(setup_data: Dictionary) -> void:
 
 func set_snapshot(data: Dictionary, delta: float, alpha: float = 1.0, prev_xy: Vector2 = Vector2(INF, INF)) -> void:
 	var target := Vector3(float(data.get("x", 0.0)), 0.0, float(data.get("y", 0.0)))
+	# alpha 变小 = 进入新的一格（tick / 快照区间推进）。
+	var wrapped := alpha + 0.0001 < _last_alpha
+	_last_alpha = alpha
 	if prev_xy.x < 1.0e9:
 		# jitter buffer 模式：上一格位置由调用方显式给出。
 		# 回放时可能一次跳过多个快照，「上一次调用的位置」已经不可信。
@@ -399,12 +428,25 @@ func set_snapshot(data: Dictionary, delta: float, alpha: float = 1.0, prev_xy: V
 			# 若无条件推进 _prev_pos，插值区间会被每帧重置，轨迹退化成一帧一跳（即抖动）。
 			_prev_pos = _cur_pos
 			_cur_pos = target
+		elif wrapped:
+			# 进了新的一格但位置没变 = 实体已经站住。
+			# 这时必须把插值区间收拢到 _cur_pos：否则 _prev_pos 会永远停在
+			# 停步前那一格，而 alpha 每帧照旧在 0→1 回绕，位置就在这两点之间
+			# 来回扫（幅度 = 最后一格的位移），肉眼就是「人一停下场景就开始抖」。
+			_prev_pos = _cur_pos
 		position = _prev_pos.lerp(_cur_pos, clampf(alpha, 0.0, 1.0))
-	if target.distance_to(_last_target) > 0.004:
-		moving = bool(data.get("moving", true))
+	# moving 取快照里的权威值。以前用「本帧 target 是否变化」来推断，
+	# 但 target 只在模拟 tick 时才变，同一 tick 内的后续渲染帧距离恒为 0，
+	# moving 于是在 30Hz 上 true/false 反复翻转：_update_locomotion 每帧
+	# 在 Jog 和 Idle 之间切一次，player.play() 每次从头开始 —— 腿永远停在
+	# 第一帧，人靠位置平移前进，看起来就是「被拖着走」，而且每帧重播动画
+	# 本身也是 CPU 热点。
+	if data.has("moving"):
+		moving = bool(data["moving"]) and not dead
 	else:
-		moving = false
+		moving = target.distance_to(_last_target) > 0.004
 	_last_target = target
+	unit_speed = float(data.get("speed", unit_speed))
 
 	var facing: Vector2 = Vector2(float(data.get("facing_x", 0.0)), float(data.get("facing_y", 1.0)))
 	if facing.length() > 0.1 and not dead:
@@ -519,6 +561,24 @@ func _update_locomotion() -> void:
 	if moving:
 		target_anim = "Sprint" if haste else "Jog_Fwd"
 	_set_anim(target_anim, true)
+	_apply_locomotion_rate(moving)
+
+# 移动动画的播放速率跟随真实移动速度：速率固定时，速度越快的单位
+# 脚底打滑越严重（模型在冰上滑行 = 用户说的「拖着走」）。
+# 上限 2.2 倍，再快腿就会糊成一团。
+func locomotion_rate_for(active: bool) -> float:
+	if not active:
+		return 1.0
+	return clampf(unit_speed / LOCO_REF_SPEED, LOCO_RATE_MIN, LOCO_RATE_MAX)
+
+func _apply_locomotion_rate(active: bool) -> void:
+	var rate := locomotion_rate_for(active)
+	if is_equal_approx(rate, _locomotion_rate):
+		return
+	_locomotion_rate = rate
+	for player in animation_players:
+		if player:
+			player.speed_scale = rate
 
 func _set_anim(anim_name: String, loop: bool) -> void:
 	if anim_name == current_animation:
@@ -527,20 +587,17 @@ func _set_anim(anim_name: String, loop: bool) -> void:
 	for player in animation_players:
 		if player == null:
 			continue
-		if kind == "minion" and player == null:
-			continue
 		if player.has_animation(anim_name):
 			player.play(anim_name, 0.16)
-			if player.get_animation(anim_name).loop_mode != Animation.LOOP_LINEAR:
-				# one-shots are held by the action timer, not by looping
-				pass
-			if not loop:
-				player.speed_scale = 1.0
 		else:
 			if kind == "minion":
 				var fallback := _minion_fallback(anim_name)
 				if fallback != "" and player.has_animation(fallback):
 					player.play(fallback, 0.16)
+		# 一次性动作（攻击/技能/受击）始终按原速播放；
+		# 移动动画的倍速由 _apply_locomotion_rate 覆盖。
+		player.speed_scale = 1.0
+	_locomotion_rate = 1.0
 
 func _minion_fallback(anim_name: String) -> String:
 	if anim_name == "Death01":

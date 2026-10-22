@@ -101,8 +101,105 @@ func test_teleport_snaps_without_sliding() -> void:
 	near(view.position.x, 40.0, 0.0001, "teleport must snap to destination")
 	view.free()
 
-# 对照实验（变异验证）：证明 test_interpolated_motion_has_uniform_step 不是恒真。
-# 这里手写旧实现的指数平滑 position.lerp(target, delta*rate)，
+# --- 走路动画（「拖着走」的回归守卫）---
+#
+# 症状：人物在走，但腿完全不动，像被拖着平移；同时整个游戏掉到 27fps 并抖动。
+# 根因：moving 原先靠「本帧 target 是否变化」推断，而 target 只在模拟 tick
+# 时变，同一 tick 内的后续渲染帧距离恒为 0，moving 于是在 30Hz 上反复翻转。
+# _update_locomotion 每帧在 Jog / Idle 之间切一次，player.play() 每次从头
+# 开始，腿永远停在第一帧；每帧对全部单位重播动画还把帧率拖垮。
+
+func test_moving_flag_survives_same_tick_repeats() -> void:
+	var view = UnitVisual.new()
+	var snap := _snap(Vector2.ZERO)
+	snap["moving"] = true
+	view.set_snapshot(snap, FRAME, 0.0)
+	check(view.moving, "snapshot moving=true must apply on the first frame")
+	view.set_snapshot(snap, FRAME, 0.5)
+	check(view.moving, "same-tick repeat must not flip moving to false")
+	view.set_snapshot(snap, FRAME, 0.9)
+	check(view.moving, "same-tick repeat must not flip moving to false (3rd)")
+	var stop := _snap(Vector2.ZERO)
+	stop["moving"] = false
+	view.set_snapshot(stop, FRAME, 1.0)
+	check(not view.moving, "moving=false from snapshot must apply immediately")
+	view.free()
+
+func test_locomotion_clip_does_not_flip_between_frames() -> void:
+	var view = UnitVisual.new()
+	var snap := _snap(Vector2.ZERO)
+	snap["moving"] = true
+	snap["speed"] = 6.4
+	view.set_snapshot(snap, FRAME, 0.0)
+	view.process_visual(FRAME)
+	var clip: String = view.current_animation
+	eq(clip, "Jog_Fwd", "moving snapshot should select the jog clip")
+	for i in 6:
+		view.set_snapshot(snap, FRAME, 0.1 * float(i + 1))
+		view.process_visual(FRAME)
+		eq(view.current_animation, clip, "locomotion clip must not flip between frames")
+	view.free()
+
+func test_locomotion_rate_scales_with_unit_speed() -> void:
+	# 动画倍速跟随真实速度，否则速度快的单位会脚底打滑（拖行感）。
+	var slow = UnitVisual.new()
+	slow.unit_speed = 3.2
+	var fast = UnitVisual.new()
+	fast.unit_speed = 6.4
+	var crawl = UnitVisual.new()
+	crawl.unit_speed = 0.4
+	near(slow.locomotion_rate_for(true), 1.0, 0.001, "reference speed plays at 1.0x")
+	near(fast.locomotion_rate_for(true), 2.0, 0.001, "double speed plays at 2.0x")
+	near(crawl.locomotion_rate_for(true), 1.0, 0.001, "very slow units clamp to 1.0x")
+	near(fast.locomotion_rate_for(false), 1.0, 0.001, "idle always plays at 1.0x")
+	slow.free()
+	fast.free()
+	crawl.free()
+
+func test_stopped_entity_does_not_oscillate() -> void:
+	# 症状：人一停下，整个画面开始抖（相机刚性跟随，所以人物抖 = 画面抖）。
+	# 根因：停下后 target 不再前进，但 _prev_pos 还停在停步前那一格，
+	# 而 alpha 每帧照旧在 0→1 回绕，位置就在这两点之间来回扫，
+	# 幅度正好等于最后一格的位移 —— 60fps 下约 6 个像素，非常明显。
+	var view = UnitVisual.new()
+	var pos := Vector2(3.0, -2.0)
+	# 走到 pos：先给出前一格，再给 pos，建立 prev->cur 区间
+	view.set_snapshot(_snap(pos - Vector2(SPEED * TICK, 0.0)), FRAME, 0.0)
+	view.set_snapshot(_snap(pos), FRAME, 0.0)
+	view.set_snapshot(_snap(pos), FRAME, 0.5)
+	# 之后模拟位置不再变，但 alpha 继续回绕
+	var samples: Array = []
+	for i in 24:
+		view.set_snapshot(_snap(pos), FRAME, float(i % 4) * 0.25)
+		samples.append(view.position.x)
+	var mn: float = samples[0]
+	var mx: float = samples[0]
+	for v in samples:
+		mn = minf(mn, float(v))
+		mx = maxf(mx, float(v))
+	lt(mx - mn, 0.0005, "stopped entity must not oscillate between prev and cur")
+	near(view.position.x, pos.x, 0.0005, "stopped entity must settle on the sim position")
+	view.free()
+
+func test_oscillation_guard_is_not_vacuous() -> void:
+	# 变异验证：用旧实现（不收敛插值区间）跑同一段输入，必然出现往复。
+	var view = UnitVisual.new()
+	var pos := Vector2(3.0, -2.0)
+	var prev := pos - Vector2(SPEED * TICK, 0.0)
+	view.set_snapshot(_snap(prev), FRAME, 0.0)
+	view.set_snapshot(_snap(pos), FRAME, 0.0)
+	var mn := 1.0e9
+	var mx := -1.0e9
+	for i in 24:
+		var alpha := float(i % 4) * 0.25
+		# 旧实现：无条件 lerp(prev, cur, alpha)，区间从不收拢
+		view.position = Vector3(prev.x, 0.0, prev.y).lerp(Vector3(pos.x, 0.0, pos.y), alpha)
+		mn = minf(mn, view.position.x)
+		mx = maxf(mx, view.position.x)
+	gt(mx - mn, 0.05, "legacy interpolation must visibly oscillate after stopping")
+	view.free()
+
+# 对照实验（变异验证）：证明 test_interpolated_motion_has_uniform_step 不是恒真。# 这里手写旧实现的指数平滑 position.lerp(target, delta*rate)，
 # 它在同样的输入下必然产生「加速→衰减」的锯齿位移，即用户看到的颤抖。
 func test_exponential_smoothing_is_measurably_jittery() -> void:
 	var pos := Vector3.ZERO
@@ -127,10 +224,15 @@ func test_exponential_smoothing_is_measurably_jittery() -> void:
 
 const Arena = preload("res://scripts/game/arena.gd")
 
-func _push(arena: Object, at: float, x: float) -> void:
+func _push(arena: Object, st: float, x: float, at: float = -1.0) -> void:
+	# st = 服务端时间戳（决定插值区间），at = 本地到达时刻（只用于兜底/裁剪）。
+	var local_at := st
+	if at >= 0.0:
+		local_at = at
 	arena._snapshot_buffer.append({
-		"at": at,
-		"snapshot": {"entities": [{"id": 7, "type": "hero", "owner_id": "2", "x": x, "y": 0.0}]},
+		"at": local_at,
+		"st": st,
+		"snapshot": {"time": st, "entities": [{"id": 7, "type": "hero", "owner_id": "2", "x": x, "y": 0.0}]},
 	})
 
 func test_render_snapshot_picks_pair_around_fixed_delay() -> void:
@@ -140,57 +242,41 @@ func test_render_snapshot_picks_pair_around_fixed_delay() -> void:
 	_push(arena, 0.20, 2.0)
 	_push(arena, 0.30, 3.0)
 
-	# render_time = now - 0.16。区间取「render_time 之后的第一个快照」与它前一格，
-	# 所以 render_time 落在 [prev_at, cur_at] 内，alpha 是该区间内的比例。
-	# now=0.21 → render_time=0.05 → 区间 [0.00,0.10] 中点
-	arena._select_render_snapshot(0.21)
-	near(arena._render_alpha, 0.5, 0.001, "render_time mid first segment")
-	eq(arena._render_prev_positions.get(7, Vector2.ONE), Vector2(0.0, 0.0), "prev entity is segment start")
-
-	# now=0.26 → render_time=0.10 → 仍是 [0.00,0.10] 的末端
-	arena._select_render_snapshot(0.26)
-	near(arena._render_alpha, 1.0, 0.001, "render_time at first segment end")
-
-	# now=0.31 → render_time=0.15 → 已跨入 [0.10,0.20]
-	arena._select_render_snapshot(0.31)
-	near(arena._render_alpha, 0.5, 0.001, "render_time mid second segment")
-	eq(arena._render_prev_positions.get(7, Vector2.ONE), Vector2(1.0, 0.0), "prev entity advanced")
-
-	# now=0.36 → render_time=0.20 → [0.10,0.20] 末端
-	arena._select_render_snapshot(0.36)
-	near(arena._render_alpha, 1.0, 0.001, "render_time at second segment end")
-	eq(arena._render_prev_positions.get(7, Vector2.ONE), Vector2(1.0, 0.0), "prev entity still segment start")
+	# render_st = 最新服务端时间 - 0.16。最新 st=0.30 → render_st=0.14，
+	# 落在服务端区间 [0.10, 0.20] 内，alpha 只由服务端时钟决定，与网络无关。
+	arena._select_render_snapshot()
+	near(arena._render_alpha, 0.4, 0.001, "alpha derived from server clock")
+	eq(arena._render_prev_positions.get(7, Vector2.ONE), Vector2(1.0, 0.0), "prev entity from server segment")
 	arena.free()
 
-func test_render_snapshot_survives_jittery_arrivals() -> void:
-	# 快照到达不均匀（0.08 / 0.13 / 0.08 / 0.11），渲染仍按固定延迟取格。
-	var arena = Arena.new()
-	_push(arena, 0.00, 0.0)
-	_push(arena, 0.08, 0.8)
-	_push(arena, 0.21, 2.1)
-	_push(arena, 0.29, 2.9)
-	_push(arena, 0.40, 4.0)
+func test_render_snapshot_ignores_arrival_jitter() -> void:
+	# 同样的服务端快照序列，本地到达间隔被抖动打乱，插值结果必须完全一致。
+	var straight = Arena.new()
+	_push(straight, 0.00, 0.0)
+	_push(straight, 0.10, 1.0)
+	_push(straight, 0.20, 2.0)
+	_push(straight, 0.30, 3.0)
+	straight._select_render_snapshot()
+	var clean_alpha: float = straight._render_alpha
 
-	# now=0.50 → render_time=0.34，落在 [0.29, 0.40]
-	arena._select_render_snapshot(0.50)
-	near(arena._render_alpha, (0.34 - 0.29) / 0.11, 0.001, "alpha uses real segment span")
-	eq(arena._render_prev_positions.get(7, Vector2.ONE), Vector2(2.9, 0.0), "prev from earlier arrival")
-
-	# 渲染时刻还没攒够两格时，退回最新一格且不插值（位置稳定）
-	var arena2 = Arena.new()
-	_push(arena2, 0.00, 0.0)
-	arena2._select_render_snapshot(0.05)
-	near(arena2._render_alpha, 1.0, 0.001, "single entry needs no interpolation")
-	arena.free()
-	arena2.free()
+	var jittered = Arena.new()
+	# 服务端时间戳完全一致，只有本地到达间隔被打乱。
+	_push(jittered, 0.00, 0.0, 0.00)
+	_push(jittered, 0.10, 1.0, 0.07)
+	_push(jittered, 0.20, 2.0, 0.19)
+	_push(jittered, 0.30, 3.0, 0.30)
+	jittered._select_render_snapshot()
+	near(jittered._render_alpha, clean_alpha, 0.0001, "arrival jitter must not change interpolation")
+	straight.free()
+	jittered.free()
 
 func test_render_snapshot_falls_back_when_buffer_is_stale() -> void:
 	var arena = Arena.new()
 	_push(arena, 0.00, 0.0)
 	_push(arena, 0.10, 1.0)
-	# now 远超缓冲范围：用最新格，不插值，避免角色倒退
-	arena._select_render_snapshot(5.0)
-	near(arena._render_alpha, 1.0, 0.001, "stale buffer renders latest")
+	# 只有一格可用（第二格还没到）：先用它自己，不插值，位置稳定
+	arena._select_render_snapshot()
+	near(arena._render_alpha, 1.0, 0.001, "single entry needs no interpolation")
 	arena.free()
 
 

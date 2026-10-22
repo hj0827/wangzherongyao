@@ -285,25 +285,36 @@ func _make_stat_bar(fill_color: Color, height: float) -> Control:
 	return root
 
 func _build_hints() -> void:
-	var text := "WASD 移动   ·   左键 攻击   ·   Q / E 技能   ·   滚轮 缩放   ·   Esc 菜单"
-	var top := -34.0
+	# 操作提示拆两行：左键改成「移动到点」之后键位变多，单行会顶到英雄信息面板底下。
+	var lines: Array[String] = [
+		"左键 移动   ·   右键 / 空格 普攻   ·   Q / E 技能",
+		"WASD 走位   ·   滚轮 缩放   ·   Esc 菜单",
+	]
+	var top := -50.0
 	var bottom := -12.0
 	if touch_mode:
-		text = "左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放"
+		lines = ["左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放"]
 		top = -332.0
 		bottom = -304.0
-	var hint := _make_label(text, 15 if touch_mode else 13, Color(0.66, 0.72, 0.77, 0.9))
-	hint.anchor_left = 0.0
-	hint.anchor_top = 1.0
-	hint.anchor_bottom = 1.0
-	hint.offset_left = 22.0
-	hint.offset_top = top
-	hint.offset_right = 620.0
-	hint.offset_bottom = bottom
-	hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
-	hint.add_theme_constant_override("outline_size", 3)
-	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(hint)
+	var box := VBoxContainer.new()
+	box.anchor_left = 0.0
+	box.anchor_top = 1.0
+	box.anchor_right = 0.0
+	box.anchor_bottom = 1.0
+	box.offset_left = 22.0
+	box.offset_top = top
+	box.offset_right = 640.0
+	box.offset_bottom = bottom
+	box.alignment = BoxContainer.ALIGNMENT_END
+	box.add_theme_constant_override("separation", 3)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for line in lines:
+		var hint := _make_label(line, 15 if touch_mode else 13, Color(0.66, 0.72, 0.77, 0.9))
+		hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
+		hint.add_theme_constant_override("outline_size", 3)
+		hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		box.add_child(hint)
+	add_child(box)
 
 func _build_touch_controls() -> void:
 	_joystick = TouchJoystick.new()

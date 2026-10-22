@@ -1,22 +1,37 @@
 extends SceneTree
 
-const TEST_FILES := [
-	"res://tests/test_match.gd",
-	"res://tests/test_room_manager.gd",
-	"res://tests/test_net_protocol.gd",
-	"res://tests/test_net_session.gd",
-	"res://tests/test_net_team.gd",
-	"res://tests/test_lan_discovery.gd",
-	"res://tests/test_mobile_input.gd",
-	"res://tests/test_mobile_ui.gd",
-	"res://tests/test_motion_smoothing.gd",
-]
+# 自动发现 res://tests/test_*.gd 并逐个跑里面的 test_* 方法。
+# 不维护硬编码清单：新增测试文件即生效，TDD 时「先写测试」不会因为忘记注册而被静默跳过。
+# test_base.gd 是基类（不是用例），排除。
+
+const TEST_DIR := "res://tests"
+const EXCLUDE := ["test_base.gd"]
+
+func _discover_tests() -> Array[String]:
+	var files: Array[String] = []
+	var dir := DirAccess.open(TEST_DIR)
+	if dir == null:
+		push_error("Cannot open test directory: " + TEST_DIR)
+		return files
+	for name in dir.get_files():
+		if not name.begins_with("test_") or not name.ends_with(".gd"):
+			continue
+		if EXCLUDE.has(name):
+			continue
+		files.append(TEST_DIR + "/" + name)
+	files.sort()
+	return files
 
 func _initialize() -> void:
 	var total := 0
 	var failed := 0
 	var failures: Array[String] = []
-	for path in TEST_FILES:
+	var test_files := _discover_tests()
+	if test_files.is_empty():
+		print("FAILED: no test_*.gd found under ", TEST_DIR)
+		quit(1)
+		return
+	for path in test_files:
 		var script: Script = load(path)
 		if script == null or not script.can_instantiate():
 			failures.append("Cannot load test suite: " + path)
