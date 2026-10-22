@@ -1,0 +1,147 @@
+# 烽火峡谷
+
+Godot 4.7 制作的移动端 1v1 / 5v5 战场原型，含单人试炼、人机军团、局域网联机四种模式。
+主菜单背景为 AI 生成的循环视频，UI 为分层立体风格（雾、火星、辉光与鼠标视差）。
+
+---
+
+## 目录结构
+
+```
+.
+├── run.cmd                      # 启动器：调用本机 Godot 打开工程
+├── .gitignore                   # 入库白名单式的忽略规则（见下）
+├── .gitattributes               # 二进制资源标记、换行符统一
+│
+├── godot/                       # 游戏工程本体（Godot 项目根）
+│   ├── project.godot            # 工程配置（主场景、分辨率、渲染后端）
+│   ├── export_presets.cfg       # 导出预设（Android，含 *.ogv 打包规则）
+│   ├── icon.svg / preview.png   # 工程图标、编辑器预览图
+│   │
+│   ├── assets/                  # 运行时资产（入库）
+│   │   ├── animations/          # 骨骼动画库
+│   │   ├── characters/          # 角色模型与贴图
+│   │   ├── environment/         # 建筑、地形、植被模型
+│   │   ├── weapons/             # 武器模型
+│   │   ├── textures/            # PBR 贴图
+│   │   ├── fonts/               # 思源黑体、马善政毛笔体
+│   │   └── ui/                  # 主视觉、英雄立绘、主菜单背景视频
+│   │
+│   ├── scenes/                  # 场景文件（main_menu / preview）
+│   ├── scripts/                 # 运行时代码
+│   │   ├── app/                 # 应用壳：界面切换与主流程
+│   │   ├── game/                # 战斗内逻辑与单位表现
+│   │   └── ui/                  # 主题、HUD、摇杆、动态背景、立体卡片
+│   ├── sim/                     # 战斗模拟（确定性权威逻辑）
+│   ├── net/                     # 局域网发现、房间管理、协议与同步会话
+│   ├── shaders/                 # 自定义着色器
+│   ├── tests/                   # 自动化测试（含 device_refs 参考图）
+│   └── tools/                   # 开发工具：截图、性能检查、资源巡检、设备验收
+│
+└── sources/                     # 【不入库】生成源料本地归档
+    ├── design-images/           # AI 原始设计图（与 assets/ui 成品字节一致）
+    └── ai-video/                # 背景视频源片（成品已转码为 assets/ui/menu_bg.ogv）
+```
+
+### 为什么这样分
+
+- `godot/assets/` 是**运行时真正加载**的东西，必须入库；`sources/` 只是可重新生成的原料，入库等于重复占体积。
+- `*.import` 文件是 Godot 导入配置（小文本），需要入库，队友拉下来即可直接打开；
+  而 `.godot/` 是导入产物缓存（本项目约 350MB），与本机强相关，必须忽略。
+- `godot/shots/` 下近 300 张验收截图约 365MB，属于「跑一次就重生成」的产物，只做本地留存。
+
+---
+
+## 运行
+
+```cmd
+run.cmd
+```
+
+或手动指定 Godot 路径：
+
+```cmd
+"D:\Software\Godot\Godot_v4.7-stable_win64.exe" --path godot
+```
+
+> `run.cmd` 里的 `GODOT_EXE` 默认指向 `D:\Software\Godot\`，换机器时改这一行即可。
+
+## 测试与校验
+
+```cmd
+:: 全量单元测试（headless）
+godot --headless --path godot --script res://tests/run_tests.gd
+
+:: 全流程 UI 截图（输出到 godot/shots/，不入库）
+godot --path godot --script res://tools/ui_shot.gd
+
+:: 主菜单连拍（验证背景视频在动）
+godot --path godot --script res://tools/menu_shot.gd
+```
+
+> Windows 下若命令行里 `APPDATA` 为空，启动 Godot 前请显式设置，
+> 否则 `user://` 会退化到工作目录，生成类似 `godot/Godot/app_userdata/` 的垃圾目录。
+
+## 开发约定
+
+### 1. 先写测试，再写实现（TDD）
+
+`tests/run_tests.gd` 会自动发现 `godot/tests/test_*.gd`，**新增测试文件即生效**，不需要注册清单。
+`test_base.gd` 是基类，不参与执行。
+
+标准流程：
+
+1. 在 `godot/tests/` 下新建 `test_<功能>.gd`，`extends "res://tests/test_base.gd"`；
+2. 写一条**会失败**的断言，跑一次确认它红（证明测试真的能抓到问题，不是恒真）；
+3. 写实现，跑到绿；
+4. **做一次变异验证**：把关键代码改回错误写法，确认测试变红，再改回来。
+   静默失效的 bug（`tsc`/构建/渲染都不报错的那类）必须靠这一步兜住。
+
+可用断言：`check(cond, msg)`、`eq/ne(a, b, msg)`、`gt/lt(a, b, msg)`、`near(a, b, eps, msg)`。
+
+### 2. 新建文件时先判断：入库还是忽略
+
+写文件之前先问一句「这是过程文件吗？」，再决定放哪：
+
+| 类型 | 例子 | 处理 |
+| --- | --- | --- |
+| 运行时源码 / 场景 / 着色器 / 测试 | `scripts/**`、`sim/**`、`tests/test_*.gd` | 入库 |
+| 运行时资产 | `assets/**` | 入库 |
+| 可复用的验收工具 | `tools/*_shot.gd`、`tools/perf_check.gd` | 入库 |
+| 一次性诊断探针 | `tools/probe_*.gd`、`tools/grab_*.gd` | **忽略**（规则已就绪） |
+| 脚本产出物 | `shots/**`、`build/**` | **忽略** |
+| 对着截图做的临时裁剪/比对 | `.crop*`、`*.orig` | **忽略** |
+| 可重新生成的源料 | `sources/**` | **忽略** |
+
+判断依据只有一条：**队友 clone 下来需不需要它才能跑起来 / 复现问题**。
+不需要，就别入库；不确定就先按忽略处理，规则集中在 `.gitignore` 里，改一处即可。
+
+## 打包 Android
+
+```cmd
+godot --headless --path godot --export-debug "Android" build/android/fenghuo-gorge-debug.apk
+```
+
+产物在 `godot/build/`，**不入库**（约 84MB）。
+`export_presets.cfg` 里已把 `*.ogv` 加入 `include_filter`，否则 APK 内没有背景视频，运行时会静默回落到原画动画。
+
+---
+
+## 版本管理约定
+
+入库：源码、场景、着色器、测试、工具脚本、`godot/assets/` 全部运行时资产。
+不入库：
+
+| 类别 | 路径 | 原因 |
+| --- | --- | --- |
+| 编辑器缓存 | `godot/.godot/` | 约 350MB，Godot 自动生成 |
+| 验收截图 | `godot/shots/` | 约 365MB，跑脚本即重生成 |
+| 构建产物 | `godot/build/`, `*.apk`, `*.aab` | 约 84MB，CI/本地重新导出 |
+| 一次性诊断探针 | `godot/tools/probe_*.gd`, `godot/tools/grab_*.gd` | 依赖本地现场，跑完即弃 |
+| 临时分析产物 | `.crop*`, `*.orig`, `*.rej` | 对着截图裁剪/比对的一次性文件 |
+| 日志 | `*.log` | 运行时产物 |
+| Python 字节码 | `__pycache__/` | 工具脚本副作用 |
+| 生成源料 | `sources/` | 与成品重复，可重新生成 |
+| 本地助手状态 | `.workbuddy*/` | 仅本机会话使用 |
+
+克隆后首次打开工程，Godot 会自动重建 `.godot/` 缓存并重新导入资产（首次约需 1–2 分钟）。

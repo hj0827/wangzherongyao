@@ -1,0 +1,24 @@
+# 统一换行符，避免跨平台 diff 噪声
+* text=auto
+
+# Windows 批处理必须是 CRLF，否则可能无法执行
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制资源：不做文本换行转换、不参与文本 diff
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.svg  text
+*.ttf  binary
+*.otf  binary
+*.glb  binary
+*.gltf text
+*.bin  binary
+*.ogv  binary
+*.mp4  binary
+*.apk  binary
+
+# 第三方资源不参与语言统计，保持仓库语言占比准确
+godot/assets/** linguist-vendored
