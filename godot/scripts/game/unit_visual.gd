@@ -8,6 +8,10 @@ const BLUE := Color(0.22, 0.6, 1.0)
 const RED := Color(1.0, 0.32, 0.26)
 const GOLD := Color(1.0, 0.78, 0.32)
 const MANA := Color(0.28, 0.56, 1.0)
+# 英雄血条固定红色。原先按阵营着色，蓝方英雄血条是蓝的，
+# 和下面的蓝条撞色，玩家分不清哪条是血、哪条是蓝。
+# 阵营区分交给脚下的队伍色圈和名字颜色。
+const HP_COLOR := Color(0.86, 0.16, 0.18)
 const FONT_PATH := "res://assets/fonts/NotoSansSC.ttf"
 # --- 英雄 / 小兵 的体型 ---
 # 王者荣耀官方「王者世界」身高表：男英雄 176–197cm（李白 184、韩信 185、廉颇 190），
@@ -273,7 +277,9 @@ func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 
 	# 单 quad 血条：底板 + 填充 + 护盾段都由着色器按 UV 绘制，
 	# 避免 BILLBOARD_ENABLED 丢弃节点缩放导致血条无法收缩的问题。
-	var hp_bar := _make_bar(Vector2(1.24 * width_scale, 0.14 * width_scale), BLUE if team == "blue" else RED)
+	# 英雄血条固定红，小兵仍按阵营着色（小兵没有蓝条，不会撞色）。
+	var hp_color := HP_COLOR if kind == "hero" else (BLUE if team == "blue" else RED)
+	var hp_bar := _make_bar(Vector2(1.24 * width_scale, 0.14 * width_scale), hp_color)
 	bar_mesh = hp_bar[0]
 	bar_material = hp_bar[1]
 	bar_root.add_child(bar_mesh)

@@ -78,3 +78,14 @@ static func get_hero(hero_type: String) -> Dictionary:
 
 static func is_valid(hero_type: String) -> bool:
 	return HEROES.has(hero_type)
+
+# 普攻射程（地面范围指示器用）。
+static func attack_range(hero_type: String) -> float:
+	return float(get_hero(hero_type).get("attack_range", 0.0))
+
+# 技能射程。自身增益类技能（护盾/加速）没有射程，返回 0。
+static func skill_range(hero_type: String, slot: String) -> float:
+	var skill: Variant = get_hero(hero_type).get(slot, {})
+	if not (skill is Dictionary):
+		return 0.0
+	return float((skill as Dictionary).get("range", 0.0))

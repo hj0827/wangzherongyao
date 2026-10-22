@@ -22,6 +22,8 @@ const ZOOM_GLIDE_SPEED := 14.0
 const NET_RENDER_DELAY := 0.16
 # 快照缓冲深度上限（约 1.6s）。只做兜底，正常情况远不会填满。
 const NET_BUFFER_LIMIT := 16
+# 地面射程环的高度。要略高于路面（0.022）与河水（0.012），避免被 z-fighting 吃掉。
+const RANGE_RING_Y := 0.06
 const BLUE := Color(0.22, 0.6, 1.0)
 const RED := Color(1.0, 0.32, 0.26)
 const GOLD := Color(1.0, 0.8, 0.38)
@@ -53,6 +55,8 @@ var camera: Camera3D
 var hud: GameHUD
 var aim_marker: Node3D
 var aim_material: StandardMaterial3D
+# 本地英雄脚下的普攻范围环（常驻）。技能范围环是按需生成的临时节点。
+var attack_range_ring: MeshInstance3D
 var zoom := 21.0
 # 渲染用的平滑缩放值。相机位置必须刚性跟随角色（否则与 look_at 产生相位差而抖动），
 # 但 zoom 突变会让整台相机瞬移，所以单独对 zoom 这个标量做插值。
@@ -148,6 +152,7 @@ func _ready() -> void:
 	_build_camera()
 	_build_aim_marker()
 	_build_move_marker()
+	_build_range_indicators()
 	_build_ambient_particles()
 
 	if sim != null:
@@ -380,6 +385,7 @@ func _process(delta: float) -> void:
 	_sync_structures(current_snapshot, false)
 	_update_camera(delta, false)
 	_update_aim_marker()
+	_update_range_indicators()
 	_update_move_marker(delta)
 	_hud_timer += delta
 	if _hud_timer >= 0.05 and hud != null:
@@ -411,8 +417,10 @@ func _gather_input() -> void:
 	var e_down := Input.is_key_pressed(KEY_E)
 	if (q_down and not _prev_q) or _queued_q:
 		_local_input.skill_q = true
+		_flash_skill_range("q")
 	if (e_down and not _prev_e) or _queued_e:
 		_local_input.skill_e = true
+		_flash_skill_range("e")
 	_prev_q = q_down
 	_prev_e = e_down
 	_local_input.move = move
@@ -480,8 +488,10 @@ func _move_edge_radius() -> float:
 func _gather_touch_input() -> void:
 	if _queued_q:
 		_local_input.skill_q = true
+		_flash_skill_range("q")
 	if _queued_e:
 		_local_input.skill_e = true
+		_flash_skill_range("e")
 	_local_input.move = InputAssist.camera_relative_move(_touch_move, _camera_forward_2d())
 	_local_input.aim = _resolve_touch_aim()
 	_local_input.attack = _touch_attack
@@ -712,6 +722,72 @@ func _build_aim_marker() -> void:
 	dot.material_override = material
 	dot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	aim_marker.add_child(dot)
+
+# ---------- 射程指示器 ----------
+# 普攻范围常驻在本地英雄脚下；技能范围在按下 Q/E 时闪一下，
+# 让玩家知道这一下能覆盖多远。半径写进 TorusMesh 而不是靠 scale 缩放，
+# 否则线宽会跟着半径一起被放大，远射程英雄的环会粗成一圈光带。
+
+func _build_range_indicators() -> void:
+	var radius := maxf(0.5, HeroDefs.attack_range(local_hero_type))
+	attack_range_ring = _make_ground_ring(radius, GOLD, 0.30, 0.10)
+	attack_range_ring.visible = false
+	add_child(attack_range_ring)
+
+func _update_range_indicators() -> void:
+	if attack_range_ring == null:
+		return
+	var view: UnitVisual = _views.get(_local_entity_id)
+	if view == null or view.dead or not view.visible:
+		attack_range_ring.visible = false
+		return
+	attack_range_ring.visible = true
+	attack_range_ring.position = Vector3(view.position.x, RANGE_RING_Y, view.position.z)
+
+func _flash_skill_range(slot: String) -> void:
+	var view: UnitVisual = _views.get(_local_entity_id)
+	if view == null:
+		return
+	_make_skill_range_ring(local_hero_type, slot, view.position)
+
+# 贴地圆环。返回的节点未挂载，由调用方决定 add_child 还是只做几何检查。
+func _make_ground_ring(radius: float, color: Color, alpha: float, width: float) -> MeshInstance3D:
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = maxf(0.02, radius - width * 0.5)
+	torus.outer_radius = radius + width * 0.5
+	torus.rings = 64
+	torus.ring_segments = 6
+	ring.mesh = torus
+	ring.position.y = RANGE_RING_Y
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = Color(color.r, color.g, color.b, alpha)
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 1.2
+	ring.material_override = material
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return ring
+
+# 技能范围环：施放瞬间在英雄脚下闪一下再淡出。
+# 返回 null 表示该技能没有射程（护盾 / 加速这类自身增益）。
+func _make_skill_range_ring(hero_type: String, slot: String, center: Vector3) -> MeshInstance3D:
+	var radius := HeroDefs.skill_range(hero_type, slot)
+	if radius <= 0.2:
+		return null
+	var ring := _make_ground_ring(radius, GOLD, 0.55, 0.12)
+	ring.position = Vector3(center.x, RANGE_RING_Y + 0.01, center.z)
+	if _effects_root == null:
+		# 未进树（单元测试直接调）：只返回节点，让调用方检查几何。
+		return ring
+	_effects_root.add_child(ring)
+	var material: StandardMaterial3D = ring.material_override
+	var tween := create_tween()
+	tween.tween_property(material, "albedo_color:a", 0.0, 0.55)
+	tween.tween_callback(ring.queue_free)
+	return ring
 
 # 点击移动的落点指示：绿色呼吸环。
 # 只做「我要走到这儿」的反馈，颜色刻意跟金色准星（攻击/瞄准）区分开。
@@ -1258,7 +1334,8 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		model = base_group
 		bar_height = 7.4
 		bar_width = 6.0
-		ring_radius = 7.7
+		# 基地脚下的圈就是泉水范围，和 match_sim 的恢复判定共用同一个半径。
+		ring_radius = MapData.FOUNTAIN_RADIUS
 		var light := OmniLight3D.new()
 		light.light_color = team_color
 		light.light_energy = 1.6

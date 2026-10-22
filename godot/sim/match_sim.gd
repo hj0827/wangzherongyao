@@ -13,6 +13,14 @@ const STRUCTURE_RANGE := 8.0
 const BASE_RANGE := 9.0
 const MAX_LEVEL := 15
 
+# 野外脱战回血（每秒 % 最大生命）与基础回蓝
+const FIELD_HP_REGEN := 0.025
+const FIELD_MP_REGEN := 6.0
+# 泉水恢复速率（每秒 % 最大生命 / 法力）。约 5 秒回满，
+# 比野外脱战回血快 7 倍，且不需要等 8 秒脱战计时。
+const FOUNTAIN_HP_RATE := 0.18
+const FOUNTAIN_MP_RATE := 0.15
+
 const SPAWN_OFFSETS := [0.0, -22.0, 22.0, -44.0, 44.0]
 
 var config: Dictionary
@@ -272,8 +280,12 @@ func tick(dt: float) -> void:
 	_update_structures(dt)
 	_update_respawns(dt)
 
-func _update_hero_timers(dt: float) -> void:
-	for entity in state.entities:
+# 是否站在己方泉水范围内（基地中心 MapData.FOUNTAIN_RADIUS 以内）。
+func _in_fountain(entity: Dictionary) -> bool:
+	var base := MapData.BLUE_BASE if str(entity.team) == "blue" else MapData.RED_BASE
+	return (entity.pos as Vector2).distance_to(base) <= MapData.FOUNTAIN_RADIUS
+
+func _update_hero_timers(dt: float) -> void:	for entity in state.entities:
 		if entity.type != "hero" or not entity.alive:
 			continue
 		entity.skill_q_cd = maxf(0.0, float(entity.skill_q_cd) - dt)
@@ -284,9 +296,13 @@ func _update_hero_timers(dt: float) -> void:
 			entity.shield = 0.0
 		entity.haste_timer = maxf(0.0, float(entity.haste_timer) - dt)
 		entity.slow_timer = maxf(0.0, float(entity.slow_timer) - dt)
-		entity.mp = minf(float(entity.max_mp), float(entity.mp) + 6.0 * dt)
+		entity.mp = minf(float(entity.max_mp), float(entity.mp) + FIELD_MP_REGEN * dt)
 		if float(entity.hp) < float(entity.max_hp) and float(state.time) - float(entity.last_damage_time) > 8.0:
-			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * 0.025 * dt)
+			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * FIELD_HP_REGEN * dt)
+		# 泉水：站在己方基地范围内快速回满，不必等脱战计时。
+		if _in_fountain(entity):
+			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * FOUNTAIN_HP_RATE * dt)
+			entity.mp = minf(float(entity.max_mp), float(entity.mp) + float(entity.max_mp) * FOUNTAIN_MP_RATE * dt)
 
 func _apply_human_inputs(dt: float) -> void:
 	for entity in state.entities:
