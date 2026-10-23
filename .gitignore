@@ -18,13 +18,23 @@ export.cfg
 export_credentials.cfg
 
 # ---------- 构建产物 ----------
+# 无论 Godot 导出、本地打包或已废弃 Web 端构建产物，一律不入库
 godot/build/
 build/
+godot/export/
+export/
+dist/
+out/
 *.apk
 *.aab
 *.idsig
 *.pck
 *.zip
+*.exe
+*.dll
+*.so
+*.dylib
+*.app
 
 # ---------- 截图 / 验收产物 ----------
 # tools/*_shot.gd、tools/device_checks.py 的运行时产物
@@ -52,16 +62,16 @@ __pycache__/
 *.tmp
 *.bak
 
-# ---------- 本地环境 / 依赖（任何人 clone 后自行安装，不入库） ----------
+# ---------- 本地环境 / 依赖（已废弃 Web 端及本地环境配置） ----------
 .venv/
 venv/
 node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
 .env
 .env.local
 *.env
-
-# ---------- Godot 导出产物 ----------
-godot/export/
 
 # ---------- 过程文件统一落点 ----------
 # 拿不准归不归类的东西先丢这里：整个目录被忽略，不会误提交。

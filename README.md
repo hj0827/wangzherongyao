@@ -136,7 +136,8 @@ godot --headless --path godot --export-debug "Android" build/android/fenghuo-gor
 | --- | --- | --- |
 | 编辑器缓存 | `godot/.godot/` | 约 350MB，Godot 自动生成 |
 | 验收截图 | `godot/shots/` | 约 365MB，跑脚本即重生成 |
-| 构建产物 | `godot/build/`, `*.apk`, `*.aab` | 约 84MB，CI/本地重新导出 |
+| 构建产物 / 导出产物 | `godot/build/`, `build/`, `dist/`, `out/`, `*.apk`, `*.aab`, `*.pck`, `*.exe` | 约 80MB+，衍生文件，CI/本地随时按需导出 |
+| 依赖与本地环境 | `node_modules/`, `*.lock`, `.venv/` | 本地安装与开发环境，任何人 clone 后独立管理 |
 | 一次性诊断探针 | `godot/tools/probe_*.gd`, `godot/tools/grab_*.gd` | 依赖本地现场，跑完即弃 |
 | 临时分析产物 | `.crop*`, `*.orig`, `*.rej` | 对着截图裁剪/比对的一次性文件 |
 | 日志 | `*.log` | 运行时产物 |
@@ -145,3 +146,23 @@ godot --headless --path godot --export-debug "Android" build/android/fenghuo-gor
 | 本地助手状态 | `.workbuddy*/` | 仅本机会话使用 |
 
 克隆后首次打开工程，Godot 会自动重建 `.godot/` 缓存并重新导入资产（首次约需 1–2 分钟）。
+
+---
+
+## 架构演进与 Web 端移除说明
+
+本项目在早期原型探索阶段曾尝试基于 Vite + TypeScript + HTML5 Canvas / Three.js 的 Web 端实现。经技术评估与性能实测，现已**全面确立为纯 Godot 4.7 原生架构**，Web 端已被完全废弃并清理：
+
+1. **Web 端彻底移除**：
+   - 早期 Web 客户端（`src/client/`）、旧服务端（`src/server/`）、入口页面（`index.html`）、构建配置（`vite.config.ts`、`tsconfig.json`）及包管理配置（`package.json`、`package-lock.json`）均已全部删除。
+   - 本地构建生成的 `dist/` 与依赖目录 `node_modules/` 已彻底清除，并在 `.gitignore` 中加入强制忽略，防止任何前端临时文件误入库。
+   - 后续开发与测试**无需安装 Node.js、npm 或 pnpm**，不再存在任何前端打包链路。
+
+2. **纯 Godot 原生架构优势**：
+   - **渲染与交互**：基于 Godot 4.7 GL Compatibility 渲染管线，原生支持 Android 移动端触控摇杆/技能轮盘以及 PC 桌面端键鼠操作。
+   - **核心玩法与网络**：采用确定性权威模拟逻辑（`godot/sim/`）结合 Godot 原生网络层（`godot/net/`），支持单人试炼、人机军团及局域网多人对战。
+   - **极简工作流**：只需下载 Godot 4.7，运行 `run.cmd` 即可秒级开启游戏或运行全量无头自动化测试。
+
+3. **构建产物零入库原则**：
+   - 任何平台编译/导出生成的最终二进制（如 Android APK/AAB、Godot PCK 包、Windows/Linux 可执行程序等）均不属于版本库资产，必须被 `.gitignore` 拦截，严禁上传到 Git 远程仓库。
+   - 仓库仅保存源码、场景与必要运行时素材，保证远程代码库体量轻盈、拉取与合并迅速。
