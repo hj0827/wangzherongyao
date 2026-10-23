@@ -3,6 +3,10 @@ extends RefCounted
 const MapData = preload("res://sim/map_data.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const SkillSystem = preload("res://sim/skill_system.gd")
+const TargetingRules = preload("res://sim/targeting_rules.gd")
+const EconomySystem = preload("res://sim/economy_system.gd")
+const ItemShop = preload("res://sim/item_shop.gd")
+const CombatAnnouncer = preload("res://sim/combat_announcer.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const Collision = preload("res://sim/map/collision.gd")
 const Vision = preload("res://sim/map/vision.gd")
@@ -30,6 +34,8 @@ const TOWER_DAMAGE := {"outer": 150.0, "inner": 170.0, "high": 190.0}
 # 野外脱战回血（每秒 % 最大生命）与基础回蓝
 const FIELD_HP_REGEN := 0.025
 const FIELD_MP_REGEN := 6.0
+# 出手或受击后脱离草丛隐身的显形时长（秒）。
+const REVEAL_AFTER_COMBAT := 1.5
 # 泉水恢复速率（每秒 % 最大生命 / 法力）。约 5 秒回满，
 # 比野外脱战回血快 7 倍，且不需要等 8 秒脱战计时。
 const FOUNTAIN_HP_RATE := 0.18
@@ -43,6 +49,9 @@ var state: Dictionary
 var ended := false
 var inputs: Dictionary = {}
 var kill_log: Array[Dictionary] = []
+var _announcer := CombatAnnouncer.new()
+# 固定种子的线性同余，保证暴击判定在主机模拟里可复现，也不依赖引擎随机源。
+var _rng_state := 0x2F6E2B1
 
 func _init(match_config: Dictionary) -> void:
 	config = match_config.duplicate(true)
@@ -171,6 +180,19 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"skill_r_cd": 0.0,
 		"summoner_spell": "flash",
 		"summoner_cd": 0.0,
+		"attack_mode": "default",
+		"locked_target": -1,
+		"attack_drag": Vector2.ZERO,
+		"gold": 0,
+		"gold_fraction": 0.0,
+		"inventory": [],
+		"base_hp": float(hero_def.max_hp),
+		"base_ad": float(hero_def.attack_damage),
+		"base_speed": float(hero_def.speed),
+		"ability_power": 0.0,
+		"crit_rate": 0.0,
+		"last_input_seq": -1,
+		"last_purchase_seq": -1,
 		"passive_stacks": 0,
 		"cc_immune_timer": 0.0,
 		"facing": Vector2(0.0, -1.0) if team == "blue" else Vector2(0.0, 1.0),
@@ -178,6 +200,7 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"shield_timer": 0.0,
 		"haste_timer": 0.0,
 		"slow_timer": 0.0,
+		"revealed_timer": 0.0,
 		"last_damage_time": -999.0,
 		"last_attacker_id": -1,
 		"last_attacker_time": -999.0,
@@ -344,7 +367,15 @@ func get_hero_by_player(owner_id: String) -> Variant:
 	return null
 
 func set_input(player_id: String, input: Dictionary) -> void:
-	inputs[player_id] = input.duplicate()
+	var next := input.duplicate()
+	var previous: Dictionary = inputs.get(player_id, {})
+	if not previous.is_empty():
+		# 购买/出售是离散意图。20Hz 输入可能晚于 30Hz 模拟到达，不能被下一条纯移动输入覆盖。
+		if str(next.get("buy_item", "")) == "" and str(previous.get("buy_item", "")) != "":
+			next["buy_item"] = previous["buy_item"]
+		if int(next.get("sell_slot", -1)) < 0 and int(previous.get("sell_slot", -1)) >= 0:
+			next["sell_slot"] = int(previous["sell_slot"])
+	inputs[player_id] = next
 
 func set_player_controller(owner_id: String, controller: String) -> void:
 	var hero: Variant = get_hero_by_player(owner_id)
@@ -477,6 +508,7 @@ func _update_hero_timers(dt: float) -> void:
 	for entity in state.entities:
 		if entity.type != "hero" or not entity.alive:
 			continue
+		EconomySystem.tick_natural_gold(entity, dt)
 		Jungle.tick_buffs(entity, dt)
 		entity.skill_q_cd = maxf(0.0, float(entity.skill_q_cd) - dt)
 		entity.skill_w_cd = maxf(0.0, float(entity.get("skill_w_cd", 0.0)) - dt)
@@ -491,6 +523,7 @@ func _update_hero_timers(dt: float) -> void:
 			entity.shield = 0.0
 		entity.haste_timer = maxf(0.0, float(entity.haste_timer) - dt)
 		entity.slow_timer = maxf(0.0, float(entity.slow_timer) - dt)
+		entity["revealed_timer"] = maxf(0.0, float(entity.get("revealed_timer", 0.0)) - dt)
 		entity.mp = minf(float(entity.max_mp), float(entity.mp) + FIELD_MP_REGEN * dt)
 		if float(entity.hp) < float(entity.max_hp) and float(state.time) - float(entity.last_damage_time) > 8.0:
 			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * FIELD_HP_REGEN * dt)
@@ -509,6 +542,29 @@ func _apply_human_inputs(dt: float) -> void:
 		var aim: Vector2 = input.get("aim", Vector2.ZERO)
 		var aim_vector: Vector2 = aim - entity.pos
 		var move: Vector2 = input.get("move", Vector2.ZERO)
+		entity["attack_mode"] = str(input.get("attack_mode", "default"))
+		entity["locked_target"] = int(input.get("locked_target", -1))
+		entity["attack_drag"] = aim_vector if bool(input.get("attack", false)) else Vector2.ZERO
+		var seq := int(input.get("seq", 0))
+		var buy_item_id := str(input.get("buy_item", ""))
+		var sell_slot := int(input.get("sell_slot", -1))
+		# 意图只消费一次：否则 set_input 的合并逻辑会把旧购买带进下一个输入序列。
+		input["buy_item"] = ""
+		input["sell_slot"] = -1
+		if seq > int(entity.get("last_input_seq", -1)):
+			entity["last_input_seq"] = seq
+		# 购买走可靠通道，可能与不可靠的移动输入乱序，所以用独立的购买序号去重，
+		# 不能被先到的移动输入把 last_input_seq 抬高而吞掉。
+		if (buy_item_id != "" or sell_slot >= 0) and seq > int(entity.get("last_purchase_seq", -1)):
+			entity["last_purchase_seq"] = seq
+			if buy_item_id != "" and ItemShop.buy_item(entity, buy_item_id):
+				_emit("purchase", {
+					"hero": entity.id,
+					"buy_item": buy_item_id,
+					"amount": int(ItemShop.get_item(buy_item_id).get("cost", 0)),
+				})
+			if sell_slot >= 0 and ItemShop.sell_item(entity, sell_slot):
+				_emit("sold", {"hero": entity.id, "sell_slot": sell_slot})
 		if move.length() > 1.0:
 			move = move.normalized()
 		if bool(input.get("teleport", false)) and not bool(entity.get("teleporting", false)):
@@ -557,6 +613,9 @@ func _update_bots(dt: float) -> void:
 	for entity in state.entities:
 		if entity.type != "hero" or not entity.alive or entity.controller != "bot":
 			continue
+		var recommended := ItemShop.get_quick_buy_recommendation(entity, ItemShop.build_order_for(str(entity.hero_type)))
+		if recommended != "":
+			ItemShop.buy_item(entity, recommended)
 		var target: Dictionary = _nearest_enemy(entity, 9.0)
 		if target.is_empty():
 			_advance_along_path(entity, dt)
@@ -564,8 +623,17 @@ func _update_bots(dt: float) -> void:
 		var to_target: Vector2 = target.pos - entity.pos
 		if to_target.length() > 0.1:
 			entity.facing = to_target.normalized()
-		if float(entity.skill_q_cd) <= 0.0 and to_target.length() <= 9.0:
+		var distance := to_target.length()
+		if float(entity.skill_q_cd) <= 0.0 and distance <= 9.0:
 			_cast_q(entity, target.pos)
+		var hero_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type))
+		var w_def: Dictionary = hero_def.w
+		if float(entity.skill_w_cd) <= 0.0 and distance <= float(w_def.range) + 1.0 and float(entity.mp) >= float(w_def.cost):
+			SkillSystem.cast_skill(entity, "w", target.pos, self)
+		var r_def: Dictionary = hero_def.r
+		if float(entity.skill_r_cd) <= 0.0 and distance <= float(r_def.range) + float(target.get("radius", 0.0)) and float(entity.mp) >= float(r_def.cost):
+			SkillSystem.cast_skill(entity, "r", target.pos, self)
+		_use_bot_summoner(entity, target, distance)
 		if float(entity.skill_e_cd) <= 0.0:
 			var e_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type)).e
 			var kind := str(e_def.kind)
@@ -580,6 +648,26 @@ func _update_bots(dt: float) -> void:
 			_move_hero(entity, to_target.normalized(), dt)
 		else:
 			_try_attack(entity)
+
+func _use_bot_summoner(hero: Dictionary, target: Dictionary, distance: float) -> void:
+	if float(hero.summoner_cd) > 0.0:
+		return
+	var spell := str(hero.get("summoner_spell", "flash"))
+	var hp_ratio := float(hero.hp) / maxf(1.0, float(hero.max_hp))
+	match spell:
+		"heal":
+			if hp_ratio < 0.55:
+				SkillSystem.cast_summoner_spell(hero, spell, hero.pos, self)
+		"execute":
+			var target_ratio := float(target.get("hp", 0.0)) / maxf(1.0, float(target.get("max_hp", 1.0)))
+			if distance <= 4.0 and target_ratio < 0.4:
+				SkillSystem.cast_summoner_spell(hero, spell, target.pos, self)
+		"cleanse":
+			if float(hero.slow_timer) > 0.0:
+				SkillSystem.cast_summoner_spell(hero, spell, hero.pos, self)
+		"flash":
+			if hp_ratio < 0.3 and distance < 3.0:
+				SkillSystem.cast_summoner_spell(hero, spell, hero.pos + (hero.pos - target.pos), self)
 
 func _move_hero(hero: Dictionary, direction: Vector2, dt: float) -> void:
 	var speed: float = float(hero.speed)
@@ -793,23 +881,41 @@ func _pick_skill_target(hero: Dictionary, aim: Vector2, max_range: float) -> Dic
 func _try_attack(hero: Dictionary) -> void:
 	if float(hero.attack_cd) > 0.0:
 		return
-	var target: Dictionary = _nearest_enemy(hero, float(hero.attack_range) + 0.8)
+	var mode := str(hero.get("attack_mode", "default"))
+	var locked := int(hero.get("locked_target", -1))
+	var drag: Vector2 = hero.get("attack_drag", Vector2.ZERO)
+	var target: Dictionary = TargetingRules.resolve_attack_target(hero, state.entities, mode, locked, drag)
 	if target.is_empty():
 		return
 	var reach: float = float(hero.attack_range) + float(target.get("radius", 0.0))
 	if hero.pos.distance_to(target.pos) > reach:
-		return
+		# 拖拽指向的目标够不着时退回常规索敌，避免「朝着空地按住普攻就完全不攻击」。
+		if drag.length() > 0.3 and not TargetingRules.is_lock_valid(hero, locked, state.entities):
+			target = TargetingRules.resolve_attack_target(hero, state.entities, mode, -1, Vector2.ZERO)
+			if target.is_empty():
+				return
+			reach = float(hero.attack_range) + float(target.get("radius", 0.0))
+			if hero.pos.distance_to(target.pos) > reach:
+				return
+		else:
+			return
 	hero.attack_cd = float(hero.attack_interval)
 	hero.facing = (target.pos - hero.pos).normalized()
-	var damage: float = float(hero.attack_damage) + float(hero.level - 1) * float(HeroDefs.get_hero(str(hero.hero_type)).damage_growth)
+	var damage: float = float(hero.attack_damage)
+	var crit := float(hero.get("crit_rate", 0.0)) > 0.0 and _next_random() < float(hero.get("crit_rate", 0.0))
+	if crit:
+		damage *= 1.5
 	_emit("attack", {
 		"hero": hero.id,
 		"x": float(hero.pos.x),
 		"y": float(hero.pos.y),
 		"aim_x": float(target.pos.x),
 		"aim_y": float(target.pos.y),
+		"crit": crit,
 	})
 	_damage(target, damage, hero)
+	# 被动挂在真实普攻命中上：英雄详情里的描述与实战数值必须同源。
+	SkillSystem.on_hero_attack_hit(hero, target, self)
 
 func _update_respawns(dt: float) -> void:
 	for entity in state.entities:
@@ -855,6 +961,12 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 		incoming *= TowerRules.damage_scale(target, state.time)
 	if not source.is_empty() and str(source.get("type", "")) == "hero":
 		incoming *= Jungle.damage_scale(source) * Objectives.damage_scale(state, str(source.get("team", "")))
+	# 交手即暴露：草丛里的英雄一出手/一挨打就短暂显形，否则回放里会出现
+	# 「血条自己掉、伤害来源不可见」的诡异画面。
+	if target.type == "hero" and not source.is_empty() and str(source.get("team", "")) != str(target.get("team", "")):
+		target["revealed_timer"] = REVEAL_AFTER_COMBAT
+		if str(source.get("type", "")) == "hero":
+			source["revealed_timer"] = REVEAL_AFTER_COMBAT
 	var remaining := incoming
 	if float(target.get("shield", 0.0)) > 0.0:
 		var absorbed: float = minf(float(target.shield), remaining)
@@ -928,6 +1040,7 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 				killer_hero_type = str(killer.get("hero_type", ""))
 				killer.kills = int(killer.get("kills", 0)) + 1
 				state.scores[killer.team].kills = int(state.scores[killer.team].kills) + 1
+				EconomySystem.award_hero_kill(killer, kill_log.is_empty())
 				_add_xp(killer, 130.0)
 			elif killer_type == "tower" or killer_type == "base":
 				killer_name = "防御塔" if killer_type == "tower" else "主堡"
@@ -943,6 +1056,15 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		target["last_killer_type"] = killer_type
 		target["last_killer_team"] = killer_team
 
+		var announce: Dictionary
+		if killer_type == "hero":
+			announce = _announcer.record_kill(
+				killer_id, killer_hero_type, killer_team,
+				int(target.id), str(target.hero_type), str(target.team), float(state.time)
+			)
+		else:
+			announce = _announcer.record_death(int(target.id))
+
 		var kill_record := {
 			"time": float(state.time),
 			"victim_id": int(target.id),
@@ -954,6 +1076,8 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 			"killer_team": killer_team,
 			"killer_type": killer_type,
 			"killer_hero_type": killer_hero_type,
+			"announcement": str(announce.get("announcement", "")),
+			"streak_title": str(announce.get("streak_title", "")),
 		}
 		kill_log.append(kill_record)
 
@@ -964,18 +1088,30 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 			"hero_type": target.hero_type,
 			"victim_name": str(target.name),
 			"victim_team": str(target.team),
+			"victim_id": int(target.id),
 			"killer": killer_id,
+			"killer_id": killer_id,
 			"killer_type": killer_type,
 			"killer_name": killer_name,
 			"killer_hero_type": killer_hero_type,
 			"killer_team": killer_team,
+			"announcement": str(announce.get("announcement", "")),
+			"streak_title": str(announce.get("streak_title", "")),
 			"x": float(target.pos.x),
 			"y": float(target.pos.y),
 		})
+		if _announcer.check_ace(str(target.team), state.entities):
+			_emit("ace", {
+				"team": target.team,
+				"victim_team": target.team,
+			})
 	elif target.type == "minion":
 		target.death_cleanup_timer = 2.0
 		if not source.is_empty() and source.type == "hero":
 			_add_xp(source, 32.0)
+			_award_minion_gold(target, source)
+		else:
+			_award_minion_gold(target, {})
 		_emit("death", {
 			"entity_type": "minion",
 			"team": target.team,
@@ -1051,6 +1187,7 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 	elif target.type == "tower":
 		var winner_team := "blue" if target.team == "red" else "red"
 		state.scores[winner_team].towers = int(state.scores[winner_team].towers) + 1
+		EconomySystem.award_tower_team_gold(winner_team, state.entities)
 		if not source.is_empty() and source.type == "hero":
 			_add_xp(source, 80.0)
 		_emit("tower_destroyed", {
@@ -1067,6 +1204,37 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		ended = true
 		_emit("match_end", {"winner": state.winner})
 
+func _award_minion_gold(victim: Dictionary, last_hitter: Dictionary) -> void:
+	const ASSIST_RADIUS := 8.0
+	if not last_hitter.is_empty():
+		EconomySystem.award_minion_kill(last_hitter, true)
+		for entity in state.entities:
+			if entity.type != "hero" or not entity.alive:
+				continue
+			if str(entity.team) != str(last_hitter.team) or int(entity.id) == int(last_hitter.id):
+				continue
+			if entity.pos.distance_to(victim.pos) <= ASSIST_RADIUS:
+				EconomySystem.award_minion_kill(entity, false)
+		return
+	# 没有英雄补刀时，最近的一名敌方英雄获得基础金币，避免小兵对拼时经济完全断流。
+	var best: Dictionary = {}
+	var best_dist := ASSIST_RADIUS
+	for entity in state.entities:
+		if entity.type != "hero" or not entity.alive:
+			continue
+		if str(entity.team) == str(victim.get("team", "")):
+			continue
+		var dist: float = entity.pos.distance_to(victim.pos)
+		if dist <= best_dist:
+			best_dist = dist
+			best = entity
+	if not best.is_empty():
+		EconomySystem.award_minion_kill(best, false)
+
+func _next_random() -> float:
+	_rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+	return float(_rng_state) / 2147483648.0
+
 func _add_xp(hero: Dictionary, amount: float) -> void:
 	if hero.type != "hero" or not hero.alive:
 		return
@@ -1075,9 +1243,11 @@ func _add_xp(hero: Dictionary, amount: float) -> void:
 		hero.xp = float(hero.xp) - _xp_needed(int(hero.level))
 		hero.level = int(hero.level) + 1
 		var hero_def: Dictionary = HeroDefs.get_hero(str(hero.hero_type))
-		hero.max_hp = float(hero.max_hp) + float(hero_def.hp_growth)
+		# 成长值写进 base_*，再由装备系统统一重算，避免装备加成被升级覆盖或重复叠加。
+		hero.base_hp = float(hero.get("base_hp", hero.max_hp)) + float(hero_def.hp_growth)
+		hero.base_ad = float(hero.get("base_ad", hero.attack_damage)) + float(hero_def.damage_growth)
 		hero.max_mp = float(hero.max_mp) + float(hero_def.mp_growth)
-		hero.attack_damage = float(hero.attack_damage) + float(hero_def.damage_growth)
+		ItemShop.recalculate_stats(hero)
 		hero.hp = minf(float(hero.max_hp), float(hero.hp) + float(hero_def.hp_growth))
 		hero.mp = minf(float(hero.max_mp), float(hero.mp) + float(hero_def.mp_growth))
 		_emit("level_up", {"hero": hero.id, "level": hero.level})
@@ -1113,8 +1283,13 @@ func snapshot() -> Dictionary:
 	}
 
 # 客机视角快照：只包含己方与视野内目标，避免全图透视。
-func snapshot_for(team: String) -> Dictionary:
-	return Vision.filter_snapshot(snapshot(), team)
+# events_override 用于联机广播：服务端把两次快照之间的全部事件攒下来传入，
+# 避免 10Hz 快照只带得走最后 1/30 秒的事件。
+func snapshot_for(team: String, events_override: Variant = null) -> Dictionary:
+	var shot := snapshot()
+	if events_override is Array:
+		shot["events"] = (events_override as Array).duplicate(true)
+	return Vision.filter_snapshot(shot, team)
 
 func _snapshot_objectives() -> Dictionary:
 	var spawn_timer := float(state.objective.get("spawn_timer", 0.0))
@@ -1183,6 +1358,10 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["skill_r_cd"] = float(entity.get("skill_r_cd", 0.0))
 		data["summoner_cd"] = float(entity.get("summoner_cd", 0.0))
 		data["summoner_spell"] = str(entity.get("summoner_spell", "flash"))
+		data["gold"] = int(entity.get("gold", 0))
+		data["inventory"] = (entity.get("inventory", []) as Array).duplicate()
+		data["ability_power"] = float(entity.get("ability_power", 0.0))
+		data["crit_rate"] = float(entity.get("crit_rate", 0.0))
 		data["speed"] = float(entity.speed)
 		data["shield"] = float(entity.shield)
 		data["facing_x"] = float(facing.x)
@@ -1201,6 +1380,9 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["teleport_cd"] = float(entity.get("teleport_cd", 0.0))
 		data["buff_red_timer"] = float(entity.get("buff_red_timer", 0.0))
 		data["buff_blue_timer"] = float(entity.get("buff_blue_timer", 0.0))
+		data["revealed_timer"] = float(entity.get("revealed_timer", 0.0))
+		# 客机用它把「已被服务端处理的最后一个输入」对掉，剩余输入重放。
+		data["last_input_seq"] = int(entity.get("last_input_seq", -1))
 	elif entity.type == "minion":
 		data["lane"] = str(entity.lane)
 		data["minion_type"] = str(entity.get("minion_type", "melee"))

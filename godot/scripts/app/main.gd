@@ -1196,9 +1196,10 @@ func _animate_lift(button: Button, target_scale: float) -> void:
 	if not is_instance_valid(button) or not button.is_inside_tree():
 		return
 	button.pivot_offset = button.size * 0.5
-	var previous: Variant = button.get_meta("lift_tween", null)
-	if previous is Tween and (previous as Tween).is_valid():
-		(previous as Tween).kill()
+	if button.has_meta("lift_tween"):
+		var previous: Variant = button.get_meta("lift_tween")
+		if previous is Tween and (previous as Tween).is_valid():
+			(previous as Tween).kill()
 	var tween := button.create_tween()
 	tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tween.tween_property(button, "scale", Vector2.ONE * target_scale, 0.14)

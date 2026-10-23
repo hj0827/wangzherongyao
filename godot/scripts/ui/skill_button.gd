@@ -2,6 +2,9 @@ extends Control
 class_name SkillButton
 
 signal pressed
+signal drag_started(slot: String, screen_pos: Vector2)
+signal drag_updated(slot: String, screen_pos: Vector2)
+signal drag_released(slot: String, screen_pos: Vector2)
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
@@ -16,6 +19,7 @@ var disabled := false
 var accent := GameTheme.GOLD
 var touch_mode := false
 var _hovered := false
+var _touch_index := -1
 
 func _ready() -> void:
 	custom_minimum_size = TouchLayout.SKILL_TOUCH_SIZE if touch_mode else TouchLayout.SKILL_DESKTOP_SIZE
@@ -36,8 +40,10 @@ func _gui_input(event: InputEvent) -> void:
 	if touch_mode:
 		if event is InputEventScreenTouch:
 			var touch := event as InputEventScreenTouch
-			if touch.pressed:
+			if touch.pressed and _touch_index < 0:
+				_touch_index = touch.index
 				pressed.emit()
+				drag_started.emit(slot, touch.position)
 				accept_event()
 		return
 	if event is InputEventMouseButton:
@@ -45,6 +51,23 @@ func _gui_input(event: InputEvent) -> void:
 		if mouse.button_index == MOUSE_BUTTON_LEFT and mouse.pressed:
 			pressed.emit()
 			accept_event()
+
+# 手指移出按钮矩形后 _gui_input 不再收到事件，拖拽/取消必须在全局 _input 里跟。
+func _input(event: InputEvent) -> void:
+	if not touch_mode or _touch_index < 0:
+		return
+	if event is InputEventScreenDrag:
+		var drag := event as InputEventScreenDrag
+		if drag.index == _touch_index:
+			drag_updated.emit(slot, drag.position)
+	elif event is InputEventScreenTouch:
+		var touch := event as InputEventScreenTouch
+		if touch.index == _touch_index and not touch.pressed:
+			_touch_index = -1
+			drag_released.emit(slot, touch.position)
+
+func cancel_drag() -> void:
+	_touch_index = -1
 
 func set_state(new_cooldown: float, new_total: float, new_name: String, can_use: bool, is_disabled: bool) -> void:
 	cooldown = new_cooldown

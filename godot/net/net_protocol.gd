@@ -1,6 +1,7 @@
 extends RefCounted
 
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const ItemShop = preload("res://sim/item_shop.gd")
 
 const MAGIC := 0x4D4F4241
 const VERSION := 1
@@ -11,6 +12,8 @@ const MAX_EVENTS := 32
 const MAX_STRING := 48
 const MAX_AIM := 58.0
 const MODES := ["duel", "team"]
+const ATTACK_MODES := ["default", "minion", "tower"]
+const SUMMONER_SPELLS := ["flash", "execute", "cleanse", "heal"]
 const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster"]
 const TYPES := [
 	"hello",
@@ -33,9 +36,17 @@ const EMPTY_INPUT := {
 	"aim": Vector2.ZERO,
 	"attack": false,
 	"skill_q": false,
+	"skill_w": false,
 	"skill_e": false,
+	"skill_r": false,
+	"summoner": false,
 	"recall": false,
 	"teleport": false,
+	"attack_mode": "default",
+	"locked_target": -1,
+	"buy_item": "",
+	"sell_slot": -1,
+	"seq": 0,
 }
 
 static func is_valid_type(type: String) -> bool:
@@ -101,9 +112,18 @@ static func sanitize_input(raw: Dictionary) -> Dictionary:
 		input.aim = (raw_aim as Vector2).clamp(Vector2(-MAX_AIM, -MAX_AIM), Vector2(MAX_AIM, MAX_AIM))
 	input.attack = _flag(raw.get("attack", false))
 	input.skill_q = _flag(raw.get("skill_q", false))
+	input.skill_w = _flag(raw.get("skill_w", false))
 	input.skill_e = _flag(raw.get("skill_e", false))
+	input.skill_r = _flag(raw.get("skill_r", false))
+	input.summoner = _flag(raw.get("summoner", false))
 	input.recall = _flag(raw.get("recall", false))
 	input.teleport = _flag(raw.get("teleport", false))
+	var attack_mode := str(raw.get("attack_mode", "default"))
+	input.attack_mode = attack_mode if ATTACK_MODES.has(attack_mode) else "default"
+	input.locked_target = clampi(int(_number(raw.get("locked_target", -1))), -1, 1000000)
+	input.buy_item = _short_string(str(raw.get("buy_item", "")), 32) if raw.get("buy_item") is String else ""
+	input.sell_slot = clampi(int(_number(raw.get("sell_slot", -1))), -1, 5)
+	input.seq = maxi(0, int(_number(raw.get("seq", 0))))
 	return input
 
 static func sanitize_hello(raw: Dictionary) -> Dictionary:
@@ -242,7 +262,26 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["deaths"] = clampi(int(_number(source.get("deaths", 0))), 0, 9999)
 		entity["respawn_timer"] = clampf(_number(source.get("respawn_timer", 0.0)), 0.0, 600.0)
 		entity["skill_q_cd"] = clampf(_number(source.get("skill_q_cd", 0.0)), 0.0, 600.0)
+		entity["skill_w_cd"] = clampf(_number(source.get("skill_w_cd", 0.0)), 0.0, 600.0)
 		entity["skill_e_cd"] = clampf(_number(source.get("skill_e_cd", 0.0)), 0.0, 600.0)
+		entity["skill_r_cd"] = clampf(_number(source.get("skill_r_cd", 0.0)), 0.0, 600.0)
+		var summoner_spell := str(source.get("summoner_spell", "flash"))
+		if not SUMMONER_SPELLS.has(summoner_spell):
+			summoner_spell = "flash"
+		entity["summoner_spell"] = summoner_spell
+		entity["summoner_cd"] = clampf(_number(source.get("summoner_cd", 0.0)), 0.0, 600.0)
+		entity["gold"] = clampi(int(_number(source.get("gold", 0))), 0, 1000000)
+		var inventory: Array = []
+		var raw_inventory: Variant = source.get("inventory", [])
+		if raw_inventory is Array:
+			for item in raw_inventory:
+				if inventory.size() >= 6:
+					break
+				if item is String and ItemShop.CATALOGUE.has(item):
+					inventory.append(item)
+		entity["inventory"] = inventory
+		entity["ability_power"] = clampf(_number(source.get("ability_power", 0.0)), 0.0, 100000.0)
+		entity["crit_rate"] = clampf(_number(source.get("crit_rate", 0.0)), 0.0, 1.0)
 		entity["speed"] = clampf(_number(source.get("speed", 0.0)), 0.0, 64.0)
 		entity["shield"] = clampf(_number(source.get("shield", 0.0)), 0.0, 1000000.0)
 		entity["facing_x"] = clampf(_number(source.get("facing_x", 1.0)), -1.0, 1.0)
@@ -261,6 +300,8 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["teleport_cd"] = clampf(_number(source.get("teleport_cd", 0.0)), 0.0, 600.0)
 		entity["buff_red_timer"] = clampf(_number(source.get("buff_red_timer", 0.0)), 0.0, 600.0)
 		entity["buff_blue_timer"] = clampf(_number(source.get("buff_blue_timer", 0.0)), 0.0, 600.0)
+		entity["revealed_timer"] = clampf(_number(source.get("revealed_timer", 0.0)), 0.0, 60.0)
+		entity["last_input_seq"] = clampi(int(_number(source.get("last_input_seq", -1))), -1, 1000000000)
 	elif type == "minion":
 		var lane := str(source.get("lane", "mid"))
 		if lane != "top" and lane != "bottom":
@@ -322,7 +363,9 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		"killer", "killer_type", "killer_name", "killer_hero_type", "killer_team",
 		"victim_name", "victim_hero_type", "victim_team",
 		"tier", "side", "guards_left", "buff", "objective_id", "name",
-		"pad", "to_x", "to_y",
+		"pad", "to_x", "to_y", "spell_id", "caster_id",
+		"killer_id", "victim_id", "amount",
+		"announcement", "streak_title", "buy_item", "sell_slot", "crit",
 	]:
 		if not source.has(key):
 			continue

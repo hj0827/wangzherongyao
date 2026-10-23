@@ -30,7 +30,7 @@ else                           → 纯本地（无 session）
 | 客机渲染延迟 | **0.16s** | `arena.NET_RENDER_DELAY` |
 | 缓冲上限 | **16 帧** | `arena.NET_BUFFER_LIMIT` |
 
-**注意**：`_input_timer` 的刷新条件里写死了 `or _local_input.skill_q or _local_input.skill_e`——加了新技能键，这里也要加，否则新技能按下后要等最多 50ms 才上报（手感发粘）。
+**注意**：`_input_timer` 的刷新条件是把所有即时输入键逐个 `or` 起来的（Q/W/E/R、召唤师、回城、传送、`buy_item`/`sell_slot`）。新增任何即时键时，这里必须同步加，否则新键按下后最多要等 50ms 才上报（手感发粘）。
 
 ---
 
@@ -57,25 +57,42 @@ const EMPTY_INPUT := {
     "aim": Vector2.ZERO,
     "attack": false,
     "skill_q": false,
+    "skill_w": false,
     "skill_e": false,
+    "skill_r": false,
+    "summoner": false,
     "recall": false,
+    "teleport": false,
+    "attack_mode": "default",
+    "locked_target": -1,
+    "buy_item": "",
+    "sell_slot": -1,
+    "seq": 0,
 }
 ```
 
-`sanitize_input()` 只清洗这 6 个键。**加 `skill_w` / `skill_r` / `summoner` 必须同时改 `EMPTY_INPUT` 和 `sanitize_input()`**，否则联机时按键被吞。
+`sanitize_input()` 逐字段清洗这 15 个键。`buy_item` / `sell_slot` 与 `seq` 是商店链路：购买/出售走可靠通道，并按 `last_purchase_seq` 去重。
 
 ### 4.2 实体白名单（`_sanitize_entity`）
 
-hero 分支逐字段列举并钳制范围。**当前欠账**：
+hero 分支逐字段列举并钳制范围。W/R/召唤师冷却、金币、装备、AP、暴击、`revealed_timer`、`last_input_seq` 均已收录：
 
-| 字段 | 在 sim 里有 | 在白名单里 | 后果 |
+| 字段 | 在 sim 里有 | 在白名单里 | 用途 |
 | --- | --- | --- | --- |
-| `skill_w_cd` | ✅ | ❌ | 联机看不到 W 冷却 |
-| `skill_r_cd` | ✅ | ❌ | 联机看不到 R 冷却 |
-| `summoner_cd` | ✅ | ❌ | 联机看不到召唤师技能冷却 |
-| `summoner_spell` | ✅ | ❌ | 客机不知道队友带的是什么 |
+| `skill_w_cd` / `skill_r_cd` | ✅ | ✅ | 客机按钮显示冷却 |
+| `summoner_cd` / `summoner_spell` | ✅ | ✅ | 召唤师技能状态 |
+| `gold` / `inventory` / `ability_power` / `crit_rate` | ✅ | ✅ | 商店与经济 UI |
+| `revealed_timer` | ✅ | ✅ | 草丛交战后短暂显形 |
+| `last_input_seq` | ✅ | ✅ | 客机预测对账 |
 
-其他字段（`recalling`、`buff_red_timer`、`buff_blue_timer`、`last_killer_name` 等）都在。
+### 4.2.1 视野与事件过滤
+
+`match_sim.snapshot_for(team)` 会调用 `Vision.filter_snapshot()`：
+
+- 实体：只保留友军、建筑与视野内敌人。
+- 事件：全局播报（兵线、首领刷新、塔毁、比赛结束等）照常下发；攻击/技能/受击/死亡等带坐标事件只有在本队视野内才下发，防止通过事件流透视。
+- 河道视野：只下发本队掌握的眼位。
+- 单机与主机同样使用 `snapshot_for(local_team)`，不再全图可见。
 
 ### 4.3 快照顶层白名单（`sanitize_snapshot`）
 
@@ -91,16 +108,20 @@ hero 分支逐字段列举并钳制范围。**当前欠账**：
 
 ---
 
-## 5. 战争迷雾只在客机生效
+## 5. 战争迷雾对所有本地视角生效
 
 ```gdscript
-func snapshot() -> Dictionary:        # 全量，主机本地用
-func snapshot_for(team: String):      # 按视野过滤，联机客机用
+func snapshot() -> Dictionary:                          # 全量：调试/服务端内部用
+func snapshot_for(team: String, events = null):         # 按视野过滤：所有玩家视角
 ```
 
-本地权威分支直接用 `sim.snapshot()`，**所以单机模式下你能看见全图敌人**，草丛和墙体遮挡完全不生效。
+单机、主机、客机都只拿本队视角：
 
-想让单机也有迷雾：把本地分支改成 `sim.snapshot_for(local_team)`，只过滤渲染层，sim 内部照常全算。
+- 主机/单机：`arena.current_snapshot = sim.snapshot_for(local_team)`，sim 内部照常全算。
+- 主机联网广播：`sim.snapshot_for(team, outgoing_events)`，按队伍分别过滤实体、事件与河道眼位；`outgoing_events` 攒的是两次 10Hz 快照之间的全部 30Hz 事件，避免漏事件。
+- 客机：服务端下发的已经是过滤后的快照，jitter buffer 直接回放。
+
+`_sync_units()` 会把离开视野的敌方英雄视图 `visible = false`，重新进入视野时直接落位，避免从旧位置滑入泄露动向。
 
 ---
 
@@ -129,8 +150,9 @@ static func freezes_simulation(online: bool) -> bool:
 
 ## 8. 已知缺口
 
-- **无客户端预测（未接线）**：`net/client_prediction.gd` 已实现、有测试（`tests/test_client_prediction.gd`），但 `arena.gd` 没有引用它。当前仍是"客机输入 → 主机 → 快照回放"，固定 0.16s 延迟。
 - **无断线重连**：掉线即退出对局。
-- **协议白名单欠账**：见 §4.2，`skill_w_cd` / `skill_r_cd` / `summoner_cd` / `summoner_spell` 四个字段联机收不到。
+- **预测不含碰撞**：客机只按输入方向与速度外推，撞墙/被阻挡的误差靠服务端回执平滑纠正。
+- **无服务端延迟补偿（lag compensation）**：命中判定仍以服务端当前世界为准，高延迟下技能需要预判。
+- **事件过滤不做击杀播报降级**：雾中击杀的死亡事件会被过滤，敌方在视野外被击杀时本队看不到播报。
 
 判断一个联机模块到底有没有生效，用 `01-repo-reality.md` §4 的引用检查命令——**测试绿不代表它在跑**。

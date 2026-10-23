@@ -67,6 +67,21 @@ func record_kill(
 
 	return result
 
+# 非英雄击杀（塔/兵/野怪）：仍然要推进一血与连杀重置，只是没有多杀播报。
+func record_death(victim_id: int) -> Dictionary:
+	var result := {
+		"killer_id": -1,
+		"victim_id": victim_id,
+		"announcement": "",
+		"streak_title": "",
+	}
+	_hero_streaks[victim_id] = 0
+	_multi_kill_counts[victim_id] = 0
+	if not _first_blood_claimed:
+		_first_blood_claimed = true
+		result["announcement"] = "first_blood"
+	return result
+
 func check_ace(team: String, team_entities: Array) -> bool:
 	var hero_count := 0
 	for e in team_entities:
@@ -74,4 +89,5 @@ func check_ace(team: String, team_entities: Array) -> bool:
 			hero_count += 1
 			if bool(e.get("alive", false)):
 				return false
-	return hero_count > 0
+	# 1v1 里唯一的英雄阵亡不算团灭，团灭至少需要两名队友。
+	return hero_count >= 2

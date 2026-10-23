@@ -38,19 +38,11 @@ entity["skill_q_cd"] = clampf(_number(source.get("skill_q_cd", 0.0)), 0.0, 600.0
 entity["gold"] = clampi(int(_number(source.get("gold", 0))), 0, 1000000)
 ```
 
-**已知欠账**：`skill_w_cd`、`skill_r_cd`、`summoner_cd`、`summoner_spell` **目前不在白名单里**，所以联机客机看不到 W/R 冷却和召唤师技能。修这个属于"补白名单"，改 `_sanitize_entity` 即可。
+**当前状态**：`skill_w_cd`、`skill_r_cd`、`summoner_cd`、`summoner_spell` 均已加入 `_sanitize_entity`，联机客机能看到 W/R 冷却与召唤师技能。再新增英雄字段时仍按上表 6 处逐一检查。
 
-### 加"金币"这类新资源字段时，额外注意
+### 加"金币"这类新资源字段时
 
-`sim/economy_system.gd` 和 `sim/item_shop.gd` 已经写好了金币/补刀/装备逻辑和测试，**但 `match_sim` 里连 `gold` 这个词都没有**。
-
-接线时不要重新设计，直接按 §A 的 6 处挂上去：
-1. `_spawn_hero` 加 `"gold": 0, "gold_fraction": 0.0`
-2. `_update_hero_timers` 里调 `EconomySystem.tick_natural_gold(entity, dt)`
-3. `_kill_entity` 的 minion 分支调 `award_minion_kill`
-4. `_snapshot_entity` 输出 `gold`
-5. `_sanitize_entity` 加白名单
-6. HUD 加金币显示 + 商店入口
+`sim/economy_system.gd` 与 `sim/item_shop.gd` 已完成接线（自然跳钱、补刀/击杀/推塔收益、购买/出售、属性重算、商店 UI）。新增资源字段时不要重新设计，直接按 §A 的 6 处挂上去，并同步 `_sanitize_entity` 与快照字段。
 
 ---
 
@@ -64,7 +56,7 @@ entity["gold"] = clampi(int(_number(source.get("gold", 0))), 0, 1000000)
 | 2 | `scripts/game/arena.gd` → `_gather_input()`（键鼠）/ `_gather_touch_input()`（触控） | 赋值 |
 | 3 | `net/net_protocol.gd` → `EMPTY_INPUT` + `sanitize_input()` | 加键 + `_flag()` 清洗 |
 | 4 | `scripts/ui/game_hud.gd` → `_build_bottom_panel()` / `_build_touch_controls()` | 创建按钮并连到 `skill_pressed` |
-| 5 | `scripts/ui/touch_layout.gd` → `SKILL_ARC_ANGLES_DEG` | 触控弧形排布角度（现在只有 `[190.0, 255.0]` 两个位） |
+| 5 | `scripts/ui/touch_layout.gd` → `SKILL_ARC_ANGLES_DEG` | 触控弧形排布角度（现在是 `[185.0, 210.0, 235.0, 260.0]` 四个位） |
 
 ### 输入从按下到生效的完整路径
 
@@ -83,20 +75,22 @@ entity["gold"] = clampi(int(_number(source.get("gold", 0))), 0, 1000000)
 
 ### 当前状态（2026-10-23 实测）
 
-- `_local_input` 有 6 个键：`move / aim / skill_q / skill_e / attack / recall`。
-- **`skill_w` / `skill_r` / `summoner` 三个键不存在**，所以玩家只能放 Q/E + 回城。
-- 但 `match_sim` 和 `skill_system` 都支持它们，bot AI 也在用（`_update_bots` 会放 Q/E，`skill_system` 支持全部 4 个技能 + 召唤师技能）。
-- **结论：人机对战时，AI 比玩家多两个技能和一次闪现。**
+- `_local_input` 已覆盖：`move / aim / skill_q / skill_w / skill_e / skill_r / summoner / attack / attack_mode / locked_target / recall / teleport / buy_item / sell_slot / seq`。
+- 桌面与触控两条输入路径都已赋值；触控技能键支持按下→拖拽瞄准→松手施放，拖到取消区则中断。
+- `net/net_protocol.gd` 的 `EMPTY_INPUT` / `sanitize_input()` 已同步全部字段，联机不会再静默吞键。
+- 金币、装备、购买/出售也已走同一条输入链路（`buy_item` / `sell_slot`，可靠通道 + 序号去重）。
 
-`recall` 是最近补上的，说明这条 5 步链路是通的——照着它补 `skill_w` 即可。
+### 攻击目标选择：sim 侧统一裁决
 
-### 攻击目标选择：注意有现成的锁敌库没用
+`match_sim._try_attack()` 已调用 `sim/targeting_rules.gd` 的 `resolve_attack_target()`，支持：
 
-`_try_attack()` 仍调用 `_nearest_enemy(seeker, max_range)`，**只按距离排序**，对英雄有 `-0.65` 的距离偏置（等于永远优先打英雄），**没有补刀/推塔模式**。
+- 默认智能索敌（英雄优先）
+- 补刀模式（小兵优先）
+- 推塔模式（建筑优先）
+- 头像锁定（`locked_target`，死亡/超距自动失效）
+- 轮盘拖拽索敌（`attack_drag` 方向筛选）
 
-但 `scripts/ui/targeting_system.gd` 已经实现了英雄/小兵/建筑优先级、头像锁定、轮盘索敌，`tests/test_targeting_and_attack_modes.gd` 也全绿——**只是 `match_sim` 没引用它**。
-
-要加补刀键/推塔键，正确做法是：把 `targeting_system` 的选择函数接进 `_try_attack`（或在 sim 侧复刻同一套优先级），而不是再写一份。
+`scripts/ui/targeting_system.gd` 只是转发同一份规则，生产代码直接走 sim 侧，避免双实现漂移。
 
 ---
 

@@ -22,5 +22,6 @@
 
 ## 3. 产出文件
 - `godot/sim/economy_system.gd`：自然跳钱调度、补刀奖励判定、防御塔团队金币分配。
-- `godot/sim/item_shop.gd`：装备库、购买/售卖(60%折价返还)、六神装属性动态重算与左侧快捷预购判定。
-- `godot/tests/test_economy_and_shop.gd`：7 大单元测试全量验证通过。
+- `godot/sim/item_shop.gd`：装备库、购买/售卖(60%折价返还)、六神装属性动态重算与快捷预购判定。
+- `godot/scripts/ui/shop_panel.gd`：商店面板（购买/出售/快速购买、金币显示）。
+- `godot/tests/test_economy_and_shop.gd`：9 大单元测试全量验证通过（含购买序号去重与出售退款）。

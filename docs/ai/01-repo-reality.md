@@ -13,19 +13,19 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   ├── match_sim.gd            主仿真循环：tick、伤害、击杀、快照
 │   ├── hero_defs.gd            4 个英雄的静态数值表
 │   ├── skill_system.gd         技能施放 / 召唤师技能 / 被动
-│   ├── economy_system.gd       ⚠️ 有实现有测试，**未接线**（见 §4）
-│   ├── item_shop.gd            ⚠️ 同上
-│   ├── combat_announcer.gd     ⚠️ 有实现有测试，**未接线**
+│   ├── economy_system.gd       ✅ 已接线（自然金币/击杀/补刀/推塔/助攻）
+│   ├── item_shop.gd            ✅ 已接线（商店 UI + 属性重算 + 快速购买）
+│   ├── combat_announcer.gd     ✅ 已接线（多杀/一血/团灭事件）
 │   ├── map_data.gd             基地坐标、分路边点、边界
 │   ├── map_intel.gd            小地图点击查情报
 │   └── map/                    collision / vision / tower_rules / wave_rules
 │                               / jungle / objectives / recall / map_layout
 ├── net/                        联机：protocol / session / room / discovery
-│   └── client_prediction.gd    ⚠️ 有实现有测试，**未接线**
+│   └── client_prediction.gd    ✅ 已接线（客机预测 + last_input_seq 对账）
 ├── scripts/
 │   ├── app/main.gd             ★ 应用壳：菜单、选人、建房、进战斗（1200+ 行）
 │   ├── game/                   ★ 实际的 view 层
-│   │   ├── arena.gd            1900+ 行，承担相机/单位同步/特效/指示器/输入
+│   │   ├── arena.gd            2500+ 行，承担相机/单位同步/特效/指示器/输入
 │   │   ├── unit_visual.gd      单位装配 + 骨骼动画 + 血条
 │   │   ├── map_view.gd         ✅ 地图表现，**唯一真正接线的新模块**
 │   │   ├── input_assist.gd     键鼠/触控 → 战局方向向量
@@ -33,10 +33,10 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   ├── ui/                     ★ 实际的 ui 层：hud / minimap / skill_button
 │   │   │                       / touch_joystick / touch_layout / game_theme
 │   │   │                       / depth_card / cinematic_background
-│   │   ├── targeting_system.gd     ⚠️ 锁敌/补刀/推塔优先级，**未接线**
-│   │   ├── skill_indicator.gd      ⚠️ 技能指示器，**未接线**
-│   │   └── cancel_cast_zone.gd     ⚠️ 取消施法区，**未接线**
-│   ├── view/hit_stop_manager.gd    ⚠️ 顿帧，**未接线**
+│   │   ├── targeting_system.gd     仅转发 sim/targeting_rules.gd（生产直接走 sim 侧）
+│   │   ├── skill_indicator.gd      ✅ 已接线（HUD 技能指示器/触摸拖拽）
+│   │   └── cancel_cast_zone.gd     ✅ 已接线（HUD 取消施法区）
+│   ├── view/hit_stop_manager.gd    ✅ 已接线（arena 顿帧 + 震屏）
 │   ├── core/                   ⚠️ 只有 README.md，**空壳**
 │   └── infra/                  ⚠️ 只有 README.md，**空壳**
 ├── shaders/billboard_bar.gdshader   血条/蓝条自定义 billboard
@@ -47,7 +47,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 └── build/                      导出产物（不入库）
 ```
 
-> 标 ⚠️ 的都是"文件在、测试绿、但生产代码没引用"的模块，详见 §4。这份树会变，以 `git status` 与实测为准。
+> 这份树会变，以 `git status` 与实测为准。2026-10-23 已完成一轮"文档说做了但实际没接线"的清理，§4 记录历史与当前接线位置。
 
 ---
 
@@ -70,31 +70,31 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 
 ## 3. 两个必须知道的规模事实
 
-- **`arena.gd` 1921 行**，是 ARCHITECTURE 铁律 5（单文件 ≤500 行，超 600 必须拆）的 3.8 倍。
+- **`arena.gd` 2544 行**，是 ARCHITECTURE 铁律 5（单文件 ≤500 行，超 600 必须拆）的 5 倍。
   往里加功能前先想清楚：**要不要顺手拆**。继续堆会让"改一处连带改几处"的半径越来越大。
 - **`main.gd` 1264 行**，同样超标。菜单/选人/联机大厅/进战斗全在一个文件里。
 
 ---
 
-## 4. ★ 本仓库最大的坑：已实现 / 已测试 / **未接线**
+## 4. ★ 历史坑：已实现 / 已测试 / **未接线**（2026-10-23 已清理）
 
-> 这一节比整份文档其他部分都重要。
+> 这一节记录的是本仓库最危险的一类假完成。**现在这些模块都已接线**，但每次新增模块都要重新验证。
 
-`docs/upgrades/README.md` 里那些模块，现在**文件都真的存在了，测试也真的全绿**——但它们的生产代码引用数是 **0**，只有自己的测试文件在引用。
+曾经 `docs/upgrades/README.md` 里的模块**文件存在、测试全绿、生产引用为 0**。也就是说：功能写完了、测过了、没接进游戏。
 
-也就是说：**功能写完了、测过了、没接进游戏。**
-
-| 模块 | 非测试引用 | 状态 |
+| 模块 | 当前生产引用 | 接线位置 |
 | --- | --- | --- |
-| `scripts/ui/targeting_system.gd`（锁敌/补刀/推塔优先级） | **0** | sim 的 `_try_attack` 仍走老的 `_nearest_enemy`，没用它 |
-| `scripts/ui/skill_indicator.gd`（技能指示器） | **0** | HUD 没挂 |
-| `scripts/ui/cancel_cast_zone.gd`（取消施法区） | **0** | HUD 没挂 |
-| `scripts/view/hit_stop_manager.gd`（顿帧） | **0** | arena 没调 |
-| `sim/combat_announcer.gd`（多杀/团灭播报） | **0** | arena 没调 |
-| `net/client_prediction.gd`（客户端预测） | **0** | arena 没调 |
-| `sim/economy_system.gd`（金币） | **0** | hero 字典无 `gold` 字段，tick 不调 |
-| `sim/item_shop.gd`（装备） | **0** | 无商店 UI |
-| `scripts/game/map_view.gd`（地图表现） | 4 ✅ | **唯一真正接上的**（arena + minimap 在用） |
+| `sim/targeting_rules.gd`（锁敌/补刀/推塔） | ✅ | `match_sim._try_attack()` |
+| `scripts/ui/targeting_system.gd` | 仅测试 | 生产直接走 sim 侧规则；此文件只是转发层 |
+| `scripts/ui/skill_indicator.gd`（技能指示器） | ✅ | `scripts/ui/game_hud.gd` 触摸拖拽瞄准 |
+| `scripts/ui/cancel_cast_zone.gd`（取消施法区） | ✅ | `scripts/ui/game_hud.gd` 拖拽取消 |
+| `scripts/view/hit_stop_manager.gd`（顿帧） | ✅ | `scripts/game/arena.gd` |
+| `sim/combat_announcer.gd`（多杀/团灭播报） | ✅ | `match_sim._kill_entity()` → `arena._process_events()` |
+| `net/client_prediction.gd`（客户端预测） | ✅ | `arena._update_local_prediction()` / `_reconcile_local_prediction()` |
+| `sim/economy_system.gd`（金币） | ✅ | `match_sim._update_hero_timers()` / `_kill_entity()` |
+| `sim/item_shop.gd`（装备） | ✅ | `match_sim` + `scripts/ui/shop_panel.gd` |
+| `scripts/ui/attack_cluster.gd`（攻击键簇） | ✅ | `scripts/ui/game_hud.gd` |
+| `scripts/game/map_view.gd`（地图表现） | ✅ | `arena` + `minimap` |
 
 ### 怎么自己验证（写任何"已完成"结论之前必须跑）
 
@@ -107,20 +107,21 @@ grep -rn "EconomySystem" --include="*.gd" godot/scripts godot/sim godot/net
 
 ### 为什么这很危险
 
-227 个测试全绿 + 文档写着"已完成" + 文件确实存在 —— 三个信号都指向"做完了"，但游戏里一点效果都没有。
+测试全绿 + 文档写着"已完成" + 文件确实存在 —— 三个信号都指向"做完了"，但游戏里一点效果都没有。
 
 **这正是"测试绿 ≠ 做完了"的具体形态。**
 
 ---
 
-## 5. 另一个已确认的事实：玩家只能放 Q/E
+## 5. 玩家输入与联机字段现状
 
-- `arena.gd` 的 `_local_input` 现在有 `move / aim / skill_q / skill_e / attack / recall` 六个键。
-- **没有 `skill_w` / `skill_r` / `summoner`**，所以玩家按不出 W、R 和召唤师技能。
-- 但 `match_sim._apply_human_inputs()` 会读这些键，`skill_system` 全部支持，bot AI 也在用。
-- **结论：人机对战时，AI 比玩家多两个技能和一次闪现。**
+- `arena.gd` 的 `_local_input` 已覆盖：`move / aim / skill_q / skill_w / skill_e / skill_r / summoner / attack / attack_mode / locked_target / recall / teleport / buy_item / sell_slot / seq`。
+- 全部输入键都已进 `net/net_protocol.gd` 的 `sanitize_input()`，联机不会静默吞键。
+- 英雄快照与实体白名单已覆盖 W/R/召唤师冷却、金币、装备、AP、暴击、`revealed_timer`、`last_input_seq`。
+- 单机/主机也走战争迷雾：`arena.current_snapshot = sim.snapshot_for(local_team)`；客机由服务端按队伍过滤后下发。
+- 客机移动使用本地预测，服务端通过 `last_input_seq` 回执校正；大误差瞬移、小误差平滑衰减。
 
-`recall`（回城）已经接上了，是最近补的——说明"加输入键"这条路是通的，W/R 只是还没做。
+加新输入键仍按 `04-combat-chain.md` 的 5 处清单改，少一处就是"按了没反应"。
 
 ---
 

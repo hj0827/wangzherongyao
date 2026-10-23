@@ -2,6 +2,7 @@ extends "res://tests/test_base.gd"
 
 const ItemShop = preload("res://sim/item_shop.gd")
 const EconomySystem = preload("res://sim/economy_system.gd")
+const MatchSim = preload("res://sim/match_sim.gd")
 
 func _mock_hero() -> Dictionary:
 	return {
@@ -97,3 +98,55 @@ func test_quick_buy_recommends_affordable_build_item() -> void:
 	hero.gold = 300
 	var rec2: String = ItemShop.get_quick_buy_recommendation(hero, build_order)
 	eq(rec2, "boots", "recommends first affordable item in build order")
+
+func test_input_purchase_is_applied_once_per_sequence() -> void:
+	var sim := MatchSim.new({
+		"mode": "duel",
+		"humans": [
+			{"id": "p1", "team": "blue", "hero_type": "blade"},
+			{"id": "p2", "team": "red", "hero_type": "tank"},
+		],
+		"bot_fill": false,
+	})
+	var hero: Dictionary = sim.get_hero_by_player("p1")
+	hero["gold"] = 2000
+	
+	sim.set_input("p1", {"seq": 1, "buy_item": "iron_sword"})
+	sim.tick(1.0 / 30.0)
+	eq(hero.inventory.size(), 1, "purchase input buys the item")
+	eq(hero.inventory[0], "iron_sword", "correct item in first slot")
+	check(_has_event(sim, "purchase"), "purchase event emitted")
+	
+	sim.set_input("p1", {"seq": 1, "buy_item": "iron_sword"})
+	sim.tick(1.0 / 30.0)
+	eq(hero.inventory.size(), 1, "replayed sequence buys nothing")
+	
+	sim.set_input("p1", {"seq": 2, "buy_item": "boots"})
+	sim.tick(1.0 / 30.0)
+	eq(hero.inventory.size(), 2, "next sequence buys again")
+
+func test_input_sell_slot_refunds_gold() -> void:
+	var sim := MatchSim.new({
+		"mode": "duel",
+		"humans": [
+			{"id": "p1", "team": "blue", "hero_type": "blade"},
+			{"id": "p2", "team": "red", "hero_type": "tank"},
+		],
+		"bot_fill": false,
+	})
+	var hero: Dictionary = sim.get_hero_by_player("p1")
+	hero["gold"] = 2000
+	ItemShop.buy_item(hero, "iron_sword")
+	var gold_before: int = int(hero.gold)
+	
+	sim.set_input("p1", {"seq": 1, "sell_slot": 0})
+	sim.tick(1.0 / 30.0)
+	eq(hero.inventory.size(), 0, "input sell removes the item")
+	gt(int(hero.gold), gold_before, "sell refunds gold")
+	check(_has_event(sim, "sold"), "sold event emitted")
+
+func _has_event(sim: MatchSim, type: String) -> bool:
+	for event in sim.state.events:
+		if str(event.get("type", "")) == type:
+			return true
+	return false

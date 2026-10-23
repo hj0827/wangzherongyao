@@ -17,6 +17,8 @@ const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const MapView = preload("res://scripts/game/map_view.gd")
 const BushFeedback = preload("res://scripts/game/bush_feedback.gd")
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
+const HitStopManager = preload("res://scripts/view/hit_stop_manager.gd")
+const ClientPrediction = preload("res://net/client_prediction.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
 const ENV_DIR := "res://assets/environment/"
@@ -42,6 +44,20 @@ const MOVE_ARRIVE_EPS := 0.3
 # 绿色移动指示环的呼吸幅度 / 频率
 const MOVE_MARKER_PULSE := 0.06
 const MOVE_MARKER_PULSE_HZ := 7.0
+const KILL_ANNOUNCEMENTS := {
+	"first_blood": "第一滴血",
+	"double_kill": "双杀",
+	"triple_kill": "三杀",
+	"quadra_kill": "四杀",
+	"penta_kill": "五杀",
+	"shutdown": "终结",
+}
+const STREAK_TITLES := {
+	"killing_spree": "大杀特杀",
+	"rampage": "暴走",
+	"godlike": "横扫千军",
+	"legendary": "天下无双",
+}
 
 var config: Dictionary = {}
 var mode := "duel"
@@ -66,6 +82,9 @@ var aim_marker: Node3D
 var aim_material: StandardMaterial3D
 # 本地英雄脚下的普攻范围环（常驻）。技能范围环是按需生成的临时节点。
 var attack_range_ring: MeshInstance3D
+var lock_ring: MeshInstance3D
+var _attack_mode := "default"
+var _locked_target := -1
 var zoom := 21.0
 # 渲染用的平滑缩放值。相机位置必须刚性跟随角色（否则与 look_at 产生相位差而抖动），
 # 但 zoom 突变会让整台相机瞬移，所以单独对 zoom 这个标量做插值。
@@ -89,8 +108,12 @@ var _pending_events: Array = []
 var _paused := false
 var _local_id := -1
 var _local_entity_id := -1
-var _first_blood := false
+var _hit_stop := HitStopManager.new()
 var _camera_shake := 0.0
+# 客机本地预测：立即响应移动输入，再用服务端 last_input_seq 校正。
+var _prediction = ClientPrediction.new()
+var _prediction_ready := false
+var _prediction_entity_id := -1
 # 草丛进出：状态机 → HUD 隐匿提示 + 焦段目标 + 合成音效。
 var _bush_feedback = BushFeedback.new()
 var _bush_hidden := false
@@ -117,19 +140,35 @@ var _auto_aim_valid := false
 var _touch_points: Dictionary = {}
 var _pinch_distance := -1.0
 var _prev_q := false
+var _prev_w := false
 var _prev_e := false
+var _prev_r := false
+var _prev_summoner := false
 var _queued_q := false
+var _queued_w := false
 var _queued_e := false
+var _queued_r := false
+var _queued_summoner := false
 var _queued_recall := false
 var _queued_teleport := false
+var _pending_purchases: Array[Dictionary] = []
+var _input_seq := 0
 var _local_input := {
 	"move": Vector2.ZERO,
 	"aim": Vector2.ZERO,
 	"skill_q": false,
+	"skill_w": false,
 	"skill_e": false,
+	"skill_r": false,
+	"summoner": false,
 	"attack": false,
+	"attack_mode": "default",
+	"locked_target": -1,
 	"recall": false,
 	"teleport": false,
+	"buy_item": "",
+	"sell_slot": -1,
+	"seq": 0,
 }
 var _started_announcement := false
 
@@ -208,7 +247,8 @@ func _build_staged() -> void:
 
 	_emit_build(0.5, "点亮英雄与防御塔")
 	if sim != null:
-		current_snapshot = sim.snapshot()
+		# 主机/单机也走战争迷雾：本地玩家只能看到本队视野内的单位。
+		current_snapshot = sim.snapshot_for(local_team)
 		_sync_structures(current_snapshot, true)
 		await _next_frame()
 		await _create_initial_views_staged(current_snapshot)
@@ -285,6 +325,12 @@ func _build_hud() -> void:
 	hud = GameHUD.new()
 	hud.setup(local_owner, local_team, local_hero_type, local_name, touch_mode, session != null)
 	hud.skill_pressed.connect(_on_skill_button)
+	hud.attack_mode_changed.connect(_on_attack_mode_changed)
+	hud.lock_changed.connect(_on_lock_changed)
+	hud.buy_item_requested.connect(_on_buy_item_requested)
+	hud.sell_item_requested.connect(_on_sell_item_requested)
+	hud.skill_aim_released.connect(_on_skill_aim_released)
+	hud.set_targeting_state(_attack_mode, _locked_target)
 	hud.leave_requested.connect(_on_leave_requested)
 	hud.resume_requested.connect(_on_resume_requested)
 	hud.move_changed.connect(_on_touch_move)
@@ -295,12 +341,45 @@ func _build_hud() -> void:
 func _on_skill_button(slot: String) -> void:
 	if slot == "q":
 		_queued_q = true
+	elif slot == "w":
+		_queued_w = true
 	elif slot == "e":
 		_queued_e = true
+	elif slot == "r":
+		_queued_r = true
+	elif slot == "summoner":
+		_queued_summoner = true
 	elif slot == "recall":
 		_queued_recall = true
 	elif slot == "teleport":
 		_queued_teleport = true
+
+func _on_attack_mode_changed(mode: String) -> void:
+	_attack_mode = mode
+	_local_input.attack_mode = mode
+
+func _on_lock_changed(target_id: int) -> void:
+	_locked_target = target_id
+	_local_input.locked_target = target_id
+
+func _on_buy_item_requested(item_id: String) -> void:
+	if item_id != "":
+		_pending_purchases.append({"buy_item": item_id})
+
+func _on_sell_item_requested(slot_index: int) -> void:
+	if slot_index >= 0:
+		_pending_purchases.append({"sell_slot": slot_index})
+
+# 触摸技能是「按下开始瞄准、松手施放」：松手位置投到地面作为本次施法方向；
+# 拖进取消区则整次施法作废。
+func _on_skill_aim_released(slot: String, screen_pos: Vector2, cancelled: bool) -> void:
+	if cancelled:
+		return
+	if _project_ground(screen_pos):
+		_touch_aim = _mouse_ground
+		_touch_aim_valid = true
+		_touch_aim_timer = 3.0
+	_on_skill_button(slot)
 
 func _on_touch_move(value: Vector2) -> void:
 	_touch_move = value
@@ -437,6 +516,11 @@ func _process(delta: float) -> void:
 		session.poll()
 	if _paused:
 		return
+	_hit_stop.tick(delta)
+	if _hit_stop.is_frozen():
+		# 击杀/破塔的短促顿帧只冻结表现层：模拟与网络照常推进，避免联机卡顿。
+		_update_camera(delta, false)
+		return
 	if touch_mode:
 		if _touch_aim_valid:
 			if _touch_points.is_empty():
@@ -460,14 +544,16 @@ func _process(delta: float) -> void:
 			guard += 1
 			ticked = true
 		if ticked:
-			current_snapshot = sim.snapshot()
+			current_snapshot = sim.snapshot_for(local_team)
 			_process_events(current_snapshot.events)
+			# 输入只在真正被模拟消费后清空；否则高帧率下会吞掉刚按下的技能。
+			_consume_skill_queue()
 			if session != null and session.has_method("is_online") and session.is_online():
-				_pending_events.append_array(current_snapshot.events)
+				# 广播用原始事件，按队伍过滤交给 snapshot_for；本地视角的过滤不能影响下发。
+				_pending_events.append_array(sim.state.events)
 		elif current_snapshot.is_empty():
-			current_snapshot = sim.snapshot()
+			current_snapshot = sim.snapshot_for(local_team)
 		_render_alpha = clampf(_accumulator / TICK, 0.0, 1.0)
-		_consume_skill_queue()
 		if session != null and session.has_method("is_online") and session.is_online():
 			_snapshot_timer += delta
 			if _snapshot_timer >= 0.1:
@@ -476,17 +562,18 @@ func _process(delta: float) -> void:
 				_pending_events.clear()
 				# 视野过滤必须按队伍分别下发，否则客机能看到全图敌人。
 				session.broadcast_team_snapshots(func(team: String) -> Dictionary:
-					var team_snapshot: Dictionary = sim.snapshot_for(team)
-					team_snapshot["events"] = outgoing_events.duplicate()
-					return team_snapshot
+					return sim.snapshot_for(team, outgoing_events)
 				)
 	elif session != null:
 		_gather_input()
+		_update_local_prediction(delta)
 		_input_timer += delta
-		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_e or _local_input.recall or _local_input.teleport:
+		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0:
 			_input_timer = 0.0
 			session.submit_input(_local_input.duplicate())
-			_consume_skill_queue()
+			# 每个发出的输入都占一个序列号，服务端逐条确认，预测记录用同一个号。
+			_input_seq = maxi(_input_seq, int(_local_input.seq) + 1)
+			_consume_skill_queue(false)
 		# 客机没有本地模拟，位置由 jitter buffer 回放驱动。
 		_select_render_snapshot()
 	else:
@@ -498,6 +585,7 @@ func _process(delta: float) -> void:
 	else:
 		# 客机：视觉用缓冲里回放出的那一格，HUD / 准星仍用最新快照。
 		_sync_units(_render_snapshot, delta)
+		_apply_predicted_visual()
 	_sync_structures(current_snapshot, false)
 	_update_bush_feedback()
 	_update_camera(delta, false)
@@ -507,6 +595,7 @@ func _process(delta: float) -> void:
 	_hud_timer += delta
 	if _hud_timer >= 0.05 and hud != null:
 		_hud_timer = 0.0
+		_validate_lock_target()
 		hud.update_snapshot(current_snapshot)
 
 func _gather_input() -> void:
@@ -531,15 +620,29 @@ func _gather_input() -> void:
 	else:
 		move = _click_move_vector()
 	var q_down := Input.is_key_pressed(KEY_Q)
+	var w_down := Input.is_key_pressed(KEY_1)
 	var e_down := Input.is_key_pressed(KEY_E)
+	var r_down := Input.is_key_pressed(KEY_R)
+	var summoner_down := Input.is_key_pressed(KEY_F)
 	if (q_down and not _prev_q) or _queued_q:
 		_local_input.skill_q = true
 		_flash_skill_range("q")
+	if (w_down and not _prev_w) or _queued_w:
+		_local_input.skill_w = true
+		_flash_skill_range("w")
 	if (e_down and not _prev_e) or _queued_e:
 		_local_input.skill_e = true
 		_flash_skill_range("e")
+	if (r_down and not _prev_r) or _queued_r:
+		_local_input.skill_r = true
+		_flash_skill_range("r")
+	if (summoner_down and not _prev_summoner) or _queued_summoner:
+		_local_input.summoner = true
 	_prev_q = q_down
+	_prev_w = w_down
 	_prev_e = e_down
+	_prev_r = r_down
+	_prev_summoner = summoner_down
 	_local_input.move = move
 	if _mouse_valid:
 		_local_input.aim = _mouse_ground
@@ -547,6 +650,9 @@ func _gather_input() -> void:
 	_local_input.attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or Input.is_key_pressed(KEY_SPACE)
 	_local_input.recall = Input.is_key_pressed(KEY_B) or _queued_recall
 	_local_input.teleport = Input.is_key_pressed(KEY_T) or _queued_teleport
+	_local_input.attack_mode = _attack_mode
+	_local_input.locked_target = _locked_target
+	_apply_pending_purchase()
 
 # 点击移动：算出本 tick 该走的向量。
 # 返回值长度可能小于 1（模拟侧只在 >1 时才归一化），一步能走完时按剩余距离缩短。
@@ -608,9 +714,17 @@ func _gather_touch_input() -> void:
 	if _queued_q:
 		_local_input.skill_q = true
 		_flash_skill_range("q")
+	if _queued_w:
+		_local_input.skill_w = true
+		_flash_skill_range("w")
 	if _queued_e:
 		_local_input.skill_e = true
 		_flash_skill_range("e")
+	if _queued_r:
+		_local_input.skill_r = true
+		_flash_skill_range("r")
+	if _queued_summoner:
+		_local_input.summoner = true
 	if _queued_recall:
 		_local_input.recall = true
 	if _queued_teleport:
@@ -618,6 +732,20 @@ func _gather_touch_input() -> void:
 	_local_input.move = InputAssist.camera_relative_move(_touch_move, _camera_forward_2d())
 	_local_input.aim = _resolve_touch_aim()
 	_local_input.attack = _touch_attack
+	_local_input.attack_mode = _attack_mode
+	_local_input.locked_target = _locked_target
+	_apply_pending_purchase()
+
+func _apply_pending_purchase() -> void:
+	if _pending_purchases.is_empty():
+		_local_input.buy_item = ""
+		_local_input.sell_slot = -1
+		_local_input.seq = _input_seq
+		return
+	var front: Dictionary = _pending_purchases[0]
+	_local_input.buy_item = str(front.get("buy_item", ""))
+	_local_input.sell_slot = int(front.get("sell_slot", -1))
+	_local_input.seq = _input_seq + 1
 
 func _resolve_touch_aim() -> Vector2:
 	var local := _snapshot_local_hero()
@@ -640,15 +768,72 @@ func _snapshot_local_hero() -> Dictionary:
 			return entity
 	return {}
 
-func _consume_skill_queue() -> void:
+func _consume_skill_queue(advance_seq: bool = true) -> void:
 	_local_input.skill_q = false
+	_local_input.skill_w = false
 	_local_input.skill_e = false
+	_local_input.skill_r = false
+	_local_input.summoner = false
 	_local_input.recall = false
 	_local_input.teleport = false
 	_queued_q = false
+	_queued_w = false
 	_queued_e = false
+	_queued_r = false
+	_queued_summoner = false
 	_queued_recall = false
 	_queued_teleport = false
+	if _local_input.buy_item != "" or _local_input.sell_slot >= 0:
+		if not _pending_purchases.is_empty():
+			_pending_purchases.pop_front()
+		if advance_seq:
+			_input_seq = maxi(_input_seq, int(_local_input.seq) + 1)
+	_local_input.buy_item = ""
+	_local_input.sell_slot = -1
+	_local_input.seq = _input_seq
+
+# 客机本地预测：用本帧输入立即推进英雄位置，服务端确认后再校正。
+# 记录按「下一次要发的输入序列号」归档，receive_snapshot 用 last_input_seq 对账。
+func _update_local_prediction(delta: float) -> void:
+	var hero := _snapshot_local_hero()
+	if hero.is_empty():
+		return
+	var server_pos := Vector2(float(hero.get("x", 0.0)), float(hero.get("y", 0.0)))
+	var hero_id := int(hero.get("id", -1))
+	if not _prediction_ready or hero_id != _prediction_entity_id:
+		_prediction_ready = true
+		_prediction_entity_id = hero_id
+		_prediction.reset(server_pos)
+	# 死亡/回城/传送期间位置由服务端流程接管，客户端不要自作主张。
+	if not bool(hero.get("alive", false)) or bool(hero.get("recalling", false)) or bool(hero.get("teleporting", false)):
+		_prediction.reset(server_pos)
+		return
+	_prediction.predict_at(_local_input.move, float(hero.get("speed", 6.0)), delta, int(_local_input.seq))
+	_prediction.update_decay(delta)
+
+func _reconcile_local_prediction() -> void:
+	var hero := _find_entity_by_owner(local_owner)
+	if hero.is_empty():
+		return
+	var server_pos := Vector2(float(hero.get("x", 0.0)), float(hero.get("y", 0.0)))
+	if not _prediction_ready:
+		_prediction_ready = true
+		_prediction_entity_id = int(hero.get("id", -1))
+		_prediction.reset(server_pos)
+		return
+	if not bool(hero.get("alive", false)):
+		_prediction.reset(server_pos)
+		return
+	_prediction.reconcile(int(hero.get("last_input_seq", -1)), server_pos)
+
+func _apply_predicted_visual() -> void:
+	if not _prediction_ready or _local_entity_id < 0:
+		return
+	var view: UnitVisual = _views.get(_local_entity_id)
+	if view == null or view.dead:
+		return
+	var predicted := _prediction.get_render_pos()
+	view.position = Vector3(predicted.x, 0.0, predicted.y)
 
 func _update_mouse_ground() -> void:
 	_project_ground(get_viewport().get_mouse_position())
@@ -678,6 +863,8 @@ func receive_snapshot(data: Dictionary) -> void:
 	})
 	while _snapshot_buffer.size() > NET_BUFFER_LIMIT:
 		_snapshot_buffer.pop_front()
+	if not authoritative:
+		_reconcile_local_prediction()
 	if not build_complete:
 		return
 	_process_events(data.get("events", []))
@@ -788,6 +975,9 @@ func _update_camera(delta: float, instant: bool) -> void:
 	if _camera_shake > 0.0:
 		_camera_shake = maxf(0.0, _camera_shake - delta * 1.8)
 		camera.position += Vector3(randf_range(-_camera_shake, _camera_shake), randf_range(-_camera_shake, _camera_shake) * 0.4, 0.0)
+	var stop_shake := _hit_stop.get_shake_offset()
+	if stop_shake.length_squared() > 0.0:
+		camera.position += Vector3(stop_shake.x, stop_shake.y * 0.4, 0.0)
 	camera.look_at(target + Vector3(0.0, 0.55, 0.0), Vector3.UP)
 
 func _build_camera() -> void:
@@ -909,8 +1099,46 @@ func _build_range_indicators() -> void:
 	attack_range_ring = _make_ground_ring(radius, GOLD, 0.30, 0.10)
 	attack_range_ring.visible = false
 	add_child(attack_range_ring)
+	lock_ring = _make_ground_ring(0.88, RED, 0.85, 0.09)
+	lock_ring.visible = false
+	add_child(lock_ring)
+
+func _validate_lock_target() -> void:
+	if _locked_target <= 0:
+		return
+	var local := _snapshot_local_hero()
+	if local.is_empty() or not bool(local.get("alive", true)):
+		_clear_locked_target()
+		return
+	var from := Vector2(float(local.get("x", 0.0)), float(local.get("y", 0.0)))
+	for entity in current_snapshot.get("entities", []):
+		if int(entity.get("id", -1)) != _locked_target:
+			continue
+		if not bool(entity.get("alive", false)):
+			break
+		var to := Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0)))
+		if from.distance_to(to) > 14.0:
+			break
+		return
+	_clear_locked_target()
+
+func _clear_locked_target() -> void:
+	_locked_target = -1
+	_local_input.locked_target = -1
+	if hud != null:
+		hud.set_targeting_state(_attack_mode, -1)
+
+func _update_lock_ring() -> void:
+	if lock_ring == null:
+		return
+	var view: UnitVisual = _views.get(_locked_target) if _locked_target > 0 else null
+	var show := view != null and not view.dead and view.visible
+	lock_ring.visible = show
+	if show:
+		lock_ring.position = Vector3(view.position.x, RANGE_RING_Y + 0.005, view.position.z)
 
 func _update_range_indicators() -> void:
+	_update_lock_ring()
 	if attack_range_ring == null:
 		return
 	var view: UnitVisual = _views.get(_local_entity_id)
@@ -1572,10 +1800,20 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 			_views[entity_id] = view
 		if view == null:
 			continue
+		if entity_type == "hero" and not view.visible:
+			# 重新进入视野：直接落位，别从旧位置滑过来（那会出卖敌人的来路）。
+			view.visible = true
+			view.set_snapshot(entity, delta, 1.0, Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0))))
 		# jitter buffer 模式下调用方显式给出上一格位置（可能跳过多格）。
 		var prev_xy: Vector2 = _render_prev_positions.get(entity_id, Vector2(INF, INF))
 		view.set_snapshot(entity, delta, _render_alpha, prev_xy)
 		view.process_visual(delta)
+
+	# 敌人离开视野：英雄不回收（等级/装备信息仍要在重新出现时立刻可用），但必须从画面消失。
+	for eid in _views:
+		var hidden_view: UnitVisual = _views[eid]
+		if hidden_view != null and hidden_view.kind == "hero" and not seen_ids.has(eid):
+			hidden_view.visible = false
 
 	# 回收死亡完成或在快照中移除的小兵/野怪，杜绝泄漏与每帧遍历浪费。
 	var to_recycle: Array[int] = []
@@ -1913,6 +2151,8 @@ func _process_events(events: Array) -> void:
 				var attacker: UnitVisual = _views.get(int(event.get("hero", -1)))
 				if attacker:
 					attacker.play_attack()
+				if bool(event.get("crit", false)):
+					_hit_stop.trigger_hit_stop(0.045, 0.18)
 			"skill":
 				_handle_skill_event(event)
 			"hit":
@@ -1922,6 +2162,7 @@ func _process_events(events: Array) -> void:
 			"tower_destroyed":
 				var pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(pos, RED if str(event.get("team", "red")) == "red" else BLUE, 32)
+				_hit_stop.trigger_hit_stop(0.06, 0.22)
 			"guard_destroyed":
 				var guard_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(guard_pos, RED if str(event.get("team", "red")) == "red" else BLUE, 30)
@@ -1931,6 +2172,7 @@ func _process_events(events: Array) -> void:
 				_spawn_ring(crystal_pos, Color(0.55, 0.84, 1.0), 1.0, 8.0, 1.0)
 				_spawn_particles(crystal_pos + Vector3(0, 2.0, 0), Color(0.62, 0.86, 1.0), 30, 6.0)
 				_camera_shake = maxf(_camera_shake, 0.22)
+				_hit_stop.trigger_hit_stop(0.1, 0.3)
 			"teleport":
 				var from_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
 				var to_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
@@ -1972,6 +2214,7 @@ func _process_events(events: Array) -> void:
 				_spawn_ring(pos, GOLD, 0.4, 2.0, 0.6)
 			"match_end":
 				hud.announce("主堡陷落", GameTheme.GOLD_LIGHT, 2.0)
+				_hit_stop.trigger_hit_stop(0.16, 0.45)
 
 func _handle_skill_event(event: Dictionary) -> void:
 	var entity_id := int(event.get("hero", -1))
@@ -2040,10 +2283,16 @@ func _handle_death_event(event: Dictionary) -> void:
 
 		var is_local_victim := (hero_id == _local_entity_id)
 		var is_local_killer := (killer_id == _local_entity_id)
+		var local_involved := is_local_victim or is_local_killer
+		_hit_stop.trigger_hit_stop(0.09 if local_involved else 0.05, 0.34 if local_involved else 0.16)
 
-		if not _first_blood:
-			_first_blood = true
-			hud.announce("第一滴血", GameTheme.GOLD_LIGHT, 2.0)
+		# 多杀 / 一血 / 终结由模拟侧统一判定，联机两端看到的是同一份结果。
+		var announce_code := str(event.get("announcement", ""))
+		var streak_code := str(event.get("streak_title", ""))
+		if KILL_ANNOUNCEMENTS.has(announce_code):
+			hud.announce(str(KILL_ANNOUNCEMENTS[announce_code]), GameTheme.GOLD_LIGHT, 2.0)
+		elif STREAK_TITLES.has(streak_code):
+			hud.announce("%s · %s" % [killer_name, STREAK_TITLES[streak_code]], GameTheme.GOLD_LIGHT, 1.8)
 		elif is_local_killer:
 			hud.announce("你击败了敌方英雄！", GameTheme.GOLD_LIGHT, 1.8)
 		elif is_local_victim:

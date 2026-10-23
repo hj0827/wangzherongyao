@@ -84,3 +84,44 @@ func test_filter_snapshot_keeps_allies_and_only_visible_enemies() -> void:
 	check(not ids.has(4), "视野外敌人必须剔除")
 	near(float(filtered.time), 8.0, 0.001, "过滤快照保留时间戳")
 	eq(snapshot.entities.size(), 4, "过滤不能修改原始快照")
+
+func test_filter_snapshot_keeps_revealed_enemy_in_fog() -> void:
+	var bush: Dictionary = MapLayout.BUSHES[0]
+	var hidden_hero := _hero(2, "red", bush.pos, {"revealed_timer": 0.8})
+	var snapshot := {
+		"entities": [
+			_hero(1, "blue", bush.pos + Vector2(0.0, -6.0)),
+			hidden_hero,
+		],
+	}
+	var filtered: Dictionary = Vision.filter_snapshot(snapshot, "blue")
+	eq(filtered.entities.size(), 2, "刚交过手的草丛敌人短暂可见")
+	hidden_hero["revealed_timer"] = 0.0
+	var hidden: Dictionary = Vision.filter_snapshot(snapshot, "blue")
+	eq(hidden.entities.size(), 1, "暴露时间结束后草丛重新隐藏该敌人")
+
+func test_filter_events_hides_fog_combat_but_keeps_own_and_global_events() -> void:
+	var snapshot := {
+		"time": 12.0,
+		"entities": [
+			_hero(1, "blue", Vector2.ZERO),
+			_hero(2, "red", Vector2(5.0, 0.0)),
+			_hero(3, "red", Vector2(50.0, 50.0)),
+		],
+		"events": [
+			{"type": "attack", "hero": 2, "x": 5.0, "y": 0.0},
+			{"type": "attack", "hero": 3, "x": 50.0, "y": 50.0},
+			{"type": "purchase", "hero": 3, "buy_item": "iron_sword"},
+			{"type": "purchase", "hero": 1, "buy_item": "boots"},
+			{"type": "wave", "wave": 3},
+			{"type": "skill_cast", "caster_id": 3, "pos": [50.0, 50.0]},
+		],
+	}
+	var filtered: Dictionary = Vision.filter_snapshot(snapshot, "blue")
+	var types: Array = filtered.events.map(func(event): return str(event.type))
+	eq(types.size(), 3, "只下发己方、可见与全局事件")
+	eq(types.count("attack"), 1, "雾中攻击被剔除，视野内攻击保留")
+	check(types.has("wave"), "全局兵线播报保留")
+	eq(filtered.events[1].hero, 1, "保留的购买事件来自己方")
+	eq(filtered.events[1].type, "purchase", "己方购买保留")
+	eq(snapshot.events.size(), 6, "事件过滤不能修改原始快照")

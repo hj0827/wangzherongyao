@@ -21,4 +21,5 @@
 ## 2. 产出文件
 - `godot/sim/combat_announcer.gd`：多杀时间窗口追踪、连杀头衔、终结判定、全队团灭检测。
 - `godot/scripts/view/hit_stop_manager.gd`：冻结定时器、震动偏移计算与衰减模型。
-- `godot/tests/test_kill_and_combat_feedback.gd`：4 大专项测试用例全部绿灯通过。
+- `godot/tests/test_kill_and_combat_feedback.gd`：6 大专项测试用例全部绿灯通过。
+- 接线：`match_sim._kill_entity()` 调用播报器并写入事件；`arena._process_events()` 播报横幅，`arena._process()` 执行顿帧与震屏。

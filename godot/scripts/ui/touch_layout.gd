@@ -10,8 +10,15 @@ const RESULT_BUTTON_SIZE := Vector2(260.0, 120.0)
 const BOTTOM_PANEL_HEIGHT := 180.0
 const ATTACK_BUTTON_SIZE := 152.0
 const ATTACK_MARGIN := Vector2(18.0, 40.0)
-const SKILL_ARC_RADIUS := 210.0
-const SKILL_ARC_ANGLES_DEG := [190.0, 255.0]
+const SKILL_ARC_RADIUS := 330.0
+# 四个技能按 Q / W / E / R 顺序从拇指侧向斜上方排开。
+const SKILL_ARC_ANGLES_DEG := [185.0, 210.0, 235.0, 260.0]
+
+# 右下角锚点偏移：回城/传送/召唤师排在技能弧上方，避免盖住 Q 的触摸区。
+const UTILITY_BUTTON_SIZE := Vector2(96.0, 96.0)
+const UTILITY_SUMMONER_RECT := Rect2(-784.0, -326.0, 96.0, 96.0)
+const UTILITY_TELEPORT_RECT := Rect2(-688.0, -326.0, 96.0, 96.0)
+const UTILITY_RECALL_RECT := Rect2(-592.0, -326.0, 96.0, 96.0)
 
 static func button_height(touch: bool, desktop: float) -> float:
 	return BUTTON_HEIGHT if touch else desktop

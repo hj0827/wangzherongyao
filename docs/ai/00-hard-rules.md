@@ -6,7 +6,7 @@
 
 ## 1. 目录以 `01-repo-reality.md` 为准，不以 `docs/ARCHITECTURE.md` 的树为准
 
-ARCHITECTURE.md 描述的是**目标态**，其中 `scripts/core/`、`scripts/infra/` **只有 README.md，没有任何代码**；`scripts/view/` 也只有一个未接线的 `hit_stop_manager.gd`。
+ARCHITECTURE.md 描述的是**目标态**，其中 `scripts/core/`、`scripts/infra/` **只有 README.md，没有任何代码**；`scripts/view/` 目前只有 `hit_stop_manager.gd`（已接线）。
 
 **违反了会怎样**：你把新逻辑写进 `scripts/core/`，它会成为死代码——全工程没有任何 `preload` 指向那里，游戏跑起来完全看不到你的改动，测试也不会覆盖。
 
@@ -74,7 +74,7 @@ godot --headless --path godot --script res://tests/run_tests.gd
 
 ## 9. "文件在 + 测试绿" ≠ "功能在跑"
 
-本仓库当前有 **8 个模块**处于"已实现、已测试、生产代码引用为 0"的状态（锁敌、指示器、取消施法、顿帧、播报、客户端预测、金币、装备）。`docs/upgrades/README.md` 把它们全标成"已完成"。
+本仓库曾出现 **8 个模块**处于"已实现、已测试、生产代码引用为 0"的状态（锁敌、指示器、取消施法、顿帧、播报、客户端预测、金币、装备）。**2026-10-23 已全部接线**，但这条规则永远成立：新模块写完必须验证生产引用。
 
 **违反前必须做的事**：在说"已完成 / 已实现"之前，跑一次引用检查——
 
@@ -84,7 +84,7 @@ grep -rn "EconomySystem" --include="*.gd" godot/scripts godot/sim godot/net
 
 如果结果里**只有 `tests/`**，它就没接线。要么接上，要么在汇报里写"已实现，未接入"。
 
-**违反了会怎样**：你向用户汇报"顿帧和指示器做好了"，用户在游戏里一点感觉都没有——因为没有任何一行生产代码调用它们。完整清单见 `01-repo-reality.md` §4。
+**违反了会怎样**：你向用户汇报"顿帧和指示器做好了"，用户在游戏里一点感觉都没有——因为没有任何一行生产代码调用它们。历史清单与接线位置见 `01-repo-reality.md` §4。
 
 ---
 

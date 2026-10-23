@@ -22,6 +22,7 @@ verify:
   ui_shot: "godot --path godot --script res://tools/ui_shot.gd"
   mobile_shot: "godot --path godot --script res://tools/mobile_shot.gd"
   perf: "godot --path godot --script res://tools/perf_check.gd"
+  device: "cd godot && python tools/device_checks.py"
   clean_check: "git status --porcelain"
   wiring_check: "grep -rn <ClassName> --include=*.gd godot/scripts godot/sim godot/net"
 
@@ -104,7 +105,21 @@ tasks:
     when: 启动游戏、截图、打包 APK、排查环境问题
     read:
       - docs/ai/02-godot-pitfalls.md
-    verify: 截图落到 godot/shots/（不入库）
+    notes:
+      - APK 导出后必须跑 godot/tools/fix_apk_theme_icon.py 补 themed icon 并重签名
+      - 截图落到 godot/shots/（不入库）
+    verify: device
+
+  - id: device-test
+    when: Android 真机验收、触摸/视频/生命周期/联机问题排查、打包后回归
+    read:
+      - docs/ai/09-device-testing.md
+      - docs/ai/08-delivery-checklist.md
+    verify: "cd godot && python tools/device_checks.py"
+    notes:
+      - 旧 APK 不算数，改动后必须重新 export-debug
+      - NET-01 只有一台设备时合法 SKIP
+      - 音频、双指缩放、第二台手机联机必须人工过
 
   - id: delivery
     when: 任务收尾、提交前
@@ -114,36 +129,14 @@ tasks:
 
 # 已实现、已测试、但生产代码引用为 0 的模块。
 # 汇报"已完成"前必须先跑 wiring_check，否则就是假交付。
+# 2026-10-23：历史 8 个模块已全部接线，unwired 清空。新增模块仍需逐项验证。
 known_gaps:
-  unwired:
-    - path: scripts/ui/targeting_system.gd
-      class: TargetingSystem
-      note: 锁敌/补刀/推塔优先级；sim 的 _try_attack 仍走老的 _nearest_enemy
-    - path: scripts/ui/skill_indicator.gd
-      class: SkillIndicator
-      note: 技能指示器；HUD 未挂
-    - path: scripts/ui/cancel_cast_zone.gd
-      class: CancelCastZone
-      note: 取消施法区；HUD 未挂
-    - path: scripts/view/hit_stop_manager.gd
-      class: HitStopManager
-      note: 顿帧；arena 未调用
-    - path: sim/combat_announcer.gd
-      class: CombatAnnouncer
-      note: 多杀/团灭播报；arena 未调用
-    - path: net/client_prediction.gd
-      class: ClientPrediction
-      note: 客户端预测；arena 未调用
-    - path: sim/economy_system.gd
-      class: EconomySystem
-      note: 金币；match_sim 无 gold 字段
-    - path: sim/item_shop.gd
-      class: ItemShop
-      note: 装备；无商店 UI
+  unwired: []
 
   gameplay:
-    - 玩家只能施放 Q/E + 回城；W/R 与召唤师技能无输入键
-    - 单机无战争迷雾（仅联机客机经 snapshot_for 过滤）
-    - 协议白名单缺 skill_w_cd / skill_r_cd / summoner_cd / summoner_spell
-    - 全项目零音频（无音效资产、无 AudioStreamPlayer）
-    - arena.gd 与 main.gd 均超 ARCHITECTURE 的 500 行上限 2~4 倍
+    - 无断线重连：掉线即退出对局
+    - 客户端预测不含碰撞；撞墙/被阻挡的误差靠服务端回执平滑纠正
+    - 无服务端延迟补偿（lag compensation）
+    - 事件过滤会丢弃雾中击杀的死亡事件（敌方视野外被击杀时本队看不到播报）
+    - 音效资产有限（目前只有草丛进出等少量合成音）
+    - arena.gd 与 main.gd 均超 ARCHITECTURE 的 500 行上限 2~5 倍

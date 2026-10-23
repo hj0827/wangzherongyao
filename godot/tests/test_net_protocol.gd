@@ -63,6 +63,39 @@ func test_input_sanitizer_clamps_and_scrubs() -> void:
 	eq(junk.attack, false, "truthy string is not a bool")
 	eq(junk.skill_e, false, "missing skill defaults false")
 
+func test_input_sanitizer_carries_skills_targeting_and_purchases() -> void:
+	var clean: Dictionary = NetProtocol.sanitize_input({
+		"skill_w": true,
+		"skill_r": true,
+		"summoner": true,
+		"attack_mode": "tower",
+		"locked_target": 42,
+		"buy_item": "iron_sword",
+		"sell_slot": 3,
+		"seq": 12,
+	})
+	eq(clean.skill_w, true, "skill W flag kept")
+	eq(clean.skill_r, true, "skill R flag kept")
+	eq(clean.summoner, true, "summoner flag kept")
+	eq(clean.attack_mode, "tower", "valid attack mode kept")
+	eq(clean.locked_target, 42, "locked target kept")
+	eq(clean.buy_item, "iron_sword", "buy item kept")
+	eq(clean.sell_slot, 3, "sell slot kept")
+	eq(clean.seq, 12, "sequence kept")
+	
+	var hostile: Dictionary = NetProtocol.sanitize_input({
+		"attack_mode": "base",
+		"locked_target": -99,
+		"sell_slot": 99,
+		"buy_item": "x".repeat(99),
+		"seq": -5,
+	})
+	eq(hostile.attack_mode, "default", "unknown attack mode falls back")
+	eq(hostile.locked_target, -1, "negative lock clamped")
+	eq(hostile.sell_slot, 5, "sell slot clamped to last inventory slot")
+	eq(hostile.buy_item.length(), 32, "buy item id capped")
+	eq(hostile.seq, 0, "negative sequence clamped")
+
 func test_name_sanitizer_trims_and_caps() -> void:
 	eq(NetProtocol.sanitize_name("  Alice  "), "Alice", "name trimmed")
 	eq(NetProtocol.sanitize_name(""), "玩家", "empty name falls back")
@@ -162,6 +195,48 @@ func test_snapshot_sanitizer_requires_core_fields() -> void:
 	var ok: Dictionary = NetProtocol.sanitize_snapshot({"time": 0.0, "mode": "duel", "bounds": 58.0, "entities": []})
 	check(ok.ok, "minimal snapshot accepted")
 	eq(ok.snapshot.entities.size(), 0, "empty entity list accepted")
+
+func test_snapshot_hero_carries_skills_gold_and_inventory() -> void:
+	var result: Dictionary = NetProtocol.sanitize_snapshot({
+		"time": 1.0,
+		"mode": "duel",
+		"bounds": 58.0,
+		"entities": [{
+			"id": 1,
+			"type": "hero",
+			"team": "blue",
+			"x": 0.0,
+			"y": 0.0,
+			"hp": 100.0,
+			"max_hp": 100.0,
+			"alive": true,
+			"owner_id": "p1",
+			"hero_type": "blade",
+			"skill_w_cd": 2.5,
+			"skill_r_cd": 30.0,
+			"summoner_spell": "flash",
+			"summoner_cd": 12.0,
+			"gold": 321,
+			"inventory": ["iron_sword", "boots", "not_an_item"],
+			"ability_power": 40.0,
+			"crit_rate": 0.2,
+			"revealed_timer": 1.2,
+			"last_input_seq": 17,
+		}],
+	})
+	check(result.ok, "hero snapshot accepted")
+	var hero: Dictionary = result.snapshot.entities[0]
+	eq(hero.skill_w_cd, 2.5, "skill W cooldown survives")
+	eq(hero.skill_r_cd, 30.0, "skill R cooldown survives")
+	eq(hero.summoner_spell, "flash", "summoner spell survives")
+	eq(hero.summoner_cd, 12.0, "summoner cooldown survives")
+	eq(hero.gold, 321, "gold survives")
+	eq(hero.inventory.size(), 2, "unknown item ids are dropped")
+	eq(hero.inventory[0], "iron_sword", "first item survives")
+	eq(hero.ability_power, 40.0, "ability power survives")
+	eq(hero.crit_rate, 0.2, "crit rate survives")
+	eq(hero.revealed_timer, 1.2, "reveal timer survives for bush combat")
+	eq(hero.last_input_seq, 17, "acked input sequence survives for reconciliation")
 
 func test_room_code_sanitizer_accepts_short_codes_only() -> void:
 	eq(NetProtocol.sanitize_room_code(" ab12c "), "AB12C", "code normalized")

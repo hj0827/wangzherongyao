@@ -130,7 +130,9 @@ func submit_input(input: Dictionary) -> void:
 		return
 	var clean := NetProtocol.sanitize_input(input)
 	var bytes := NetProtocol.encode("input", clean)
-	_send_bytes(1, bytes, false)
+	# 购买/出售是离散且不可重放的操作，丢失一次就永远不生效，必须走可靠通道。
+	var reliable := str(clean.get("buy_item", "")) != "" or int(clean.get("sell_slot", -1)) >= 0
+	_send_bytes(1, bytes, reliable)
 
 func broadcast_snapshot(snapshot: Dictionary) -> void:
 	if not is_server or peer == null:

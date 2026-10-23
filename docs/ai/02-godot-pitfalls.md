@@ -116,13 +116,17 @@ for entity in state.entities:
 
 ---
 
-## 10. 打包 Android 的两个坑
+## 10. 打包 Android 的三个坑
 
 ```cmd
 godot --headless --path godot --export-debug "Android" build/android/fenghuo-gorge-debug.apk
+:: 导出后必须补 themed icon 并重签名，否则 APK 里 mipmap/themed_icon 引用悬空
+cd godot && python tools/fix_apk_theme_icon.py && cd ..
+adb install -r build/android/fenghuo-gorge-debug.apk
 ```
 
 - **`export_presets.cfg` 的 `include_filter` 必须含 `*.ogv`**。否则 APK 里没有背景视频，运行时会**静默回落**成静态图——不报错，只是"主菜单不动了"。
+- **Godot 导出不打包 `res/mipmap-anydpi-v26/themed_icon.xml`**，但已编译的 `resources.arsc` 仍引用它（`aapt2 dump` 报 `no such path exists`）。`tools/fix_apk_theme_icon.py` 负责补文件 + `zipalign` + 调试密钥重签名；真机套件的 `BUILD-05` 就是查这件事。
 - 产物在 `godot/build/`，**不入库**（约 84MB）。`.gitignore` 已拦。
 
 ---

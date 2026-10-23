@@ -20,19 +20,43 @@ func predict_input(input_data: Dictionary, dt: float) -> Vector2:
 	if move.length() > 1.0:
 		move = move.normalized()
 	var speed: float = float(input_data.get("speed", 6.0))
-	var step := move * speed * dt
-	_current_pos += step
+	return _predict(move, speed, dt, _next_seq, true)
 
-	var record := {
-		"seq": _next_seq,
-		"move": move,
-		"speed": speed,
-		"dt": dt,
-		"predicted_pos": _current_pos,
-	}
-	_pending_inputs.append(record)
-	_next_seq += 1
+# 联机版本：预测记录按服务端输入序列号归档，同一序列内的多帧合并成一条记录，
+# reconcile 时才能用 acked_seq 精确找到历史位置并重放剩余输入。
+func predict_at(move_input: Vector2, speed: float, dt: float, seq: int) -> Vector2:
+	var move := move_input
+	if move.length() > 1.0:
+		move = move.normalized()
+	return _predict(move, speed, dt, seq, false)
+
+func _predict(move: Vector2, speed: float, dt: float, seq: int, auto_advance: bool) -> Vector2:
+	_current_pos += move * speed * dt
+	var record := _find_record(seq)
+	if record.is_empty():
+		_pending_inputs.append({
+			"seq": seq,
+			"move": move,
+			"speed": speed,
+			"dt": dt,
+			"predicted_pos": _current_pos,
+		})
+	else:
+		record["move"] = move
+		record["speed"] = speed
+		record["dt"] = float(record.dt) + dt
+		record["predicted_pos"] = _current_pos
+	if auto_advance:
+		_next_seq += 1
+	else:
+		_next_seq = maxi(_next_seq, seq + 1)
 	return _current_pos
+
+func _find_record(seq: int) -> Dictionary:
+	for item in _pending_inputs:
+		if int(item.seq) == seq:
+			return item
+	return {}
 
 func reconcile(acked_seq: int, server_pos: Vector2) -> void:
 	var match_index := -1
@@ -42,15 +66,23 @@ func reconcile(acked_seq: int, server_pos: Vector2) -> void:
 			break
 
 	if match_index < 0:
-		# 没有匹配的待决历史，直接采用权威
-		if _pending_inputs.is_empty():
-			var diff := server_pos - _current_pos
-			if diff.length() > SNAP_THRESHOLD:
-				_current_pos = server_pos
-				_smooth_offset = Vector2.ZERO
-			elif diff.length() > DRIFT_EPSILON:
-				_smooth_offset -= diff
-				_current_pos = server_pos
+		# 没有匹配的待决历史（刚重置、购买序列跳跃或服务端确认了未预测的输入）：
+		# 以服务端位置为基准重放剩余输入，再按新旧渲染位置差补偿，避免视觉跳变。
+		var kept: Array[Dictionary] = []
+		for item in _pending_inputs:
+			if int(item.seq) > acked_seq:
+				kept.append(item)
+		_pending_inputs = kept
+		var old_render := get_render_pos()
+		_current_pos = server_pos
+		for item in _pending_inputs:
+			_current_pos += (item.move as Vector2) * float(item.speed) * float(item.dt)
+			item["predicted_pos"] = _current_pos
+		var drift := old_render - _current_pos
+		if drift.length() > SNAP_THRESHOLD:
+			_smooth_offset = Vector2.ZERO
+		else:
+			_smooth_offset = drift
 		return
 
 	var historical_pred: Vector2 = _pending_inputs[match_index].predicted_pos

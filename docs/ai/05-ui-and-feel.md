@@ -8,14 +8,16 @@
 
 | 文件 | 职责 | 规模 |
 | --- | --- | --- |
-| `scripts/ui/game_hud.gd` | 局内全部 2D：顶栏、小地图、底栏、技能键、播报、死亡/结算/暂停遮罩 | 813 行 |
-| `scripts/ui/minimap.gd` | 小地图绘制（206×206）+ 点击查情报 | 149 行 |
-| `scripts/ui/skill_button.gd` | 单个技能键（CD 扇形遮罩、法力不足、禁用态） | 111 行 |
+| `scripts/ui/game_hud.gd` | 局内全部 2D：顶栏、小地图、底栏、技能键、商店/播报、死亡/结算/暂停遮罩 | 1131 行 |
+| `scripts/ui/minimap.gd` | 小地图绘制（206×206）+ 点击查情报 | 278 行 |
+| `scripts/ui/skill_button.gd` | 单个技能键（CD 扇形遮罩、法力不足、禁用态、触摸拖拽） | 134 行 |
+| `scripts/ui/shop_panel.gd` | 商店面板：购买/出售/快速购买、金币显示 | 207 行 |
+| `scripts/ui/attack_cluster.gd` | 攻击键簇：补刀/推塔模式切换、头像锁敌 | 159 行 |
 | `scripts/ui/touch_joystick.gd` / `touch_action_button.gd` | 摇杆 / 圆形动作键 | 91 / 77 行 |
-| `scripts/ui/touch_layout.gd` | 触控尺寸与弧度的**唯一常量源** | 常量 |
+| `scripts/ui/touch_layout.gd` | 触控尺寸与弧度的**唯一常量源** | 36 行 |
 | `scripts/ui/game_theme.gd` | 配色、字体、StyleBox | 132 行 |
-| `scripts/game/arena.gd` | 3D 表现：相机、特效、飘字、震屏、指示环、输入 | 1921 行 |
-| `scripts/game/unit_visual.gd` | 单位装配、骨骼动画、头顶血条 | 758 行 |
+| `scripts/game/arena.gd` | 3D 表现：相机、特效、飘字、震屏、指示环、输入 | 2544 行 |
+| `scripts/game/unit_visual.gd` | 单位装配、骨骼动画、头顶血条 | 809 行 |
 
 ---
 
@@ -28,9 +30,15 @@ const SKILL_TOUCH_SIZE := Vector2(128, 148)
 const SKILL_DESKTOP_SIZE := Vector2(96, 112)
 const ATTACK_BUTTON_SIZE := 152.0
 const ATTACK_MARGIN := Vector2(18, 40)
-const SKILL_ARC_RADIUS := 210.0
-const SKILL_ARC_ANGLES_DEG := [190.0, 255.0]   # ← 只有两个技能位
+const SKILL_ARC_RADIUS := 330.0
+const SKILL_ARC_ANGLES_DEG := [185.0, 210.0, 235.0, 260.0]   # 四个技能位
+const UTILITY_BUTTON_SIZE := Vector2(96, 96)
+const UTILITY_SUMMONER_RECT := Rect2(-784.0, -326.0, 96.0, 96.0)
+const UTILITY_TELEPORT_RECT := Rect2(-688.0, -326.0, 96.0, 96.0)
+const UTILITY_RECALL_RECT := Rect2(-592.0, -326.0, 96.0, 96.0)
 ```
+
+半径 330 是为了让四个 128×148 的技能触摸区沿弧线互不重叠；回城/传送/召唤师另起一排放在技能弧上方，右下角锚点偏移见上，**不要再塞回 Q 旁边**——真机上回城键会盖住 Q 的触摸区（`UI-01` 与 `test_utility_buttons_do_not_cover_the_skill_arc` 会抓）。
 
 桌面底栏高度写死在 `game_hud.gd:_build_bottom_panel()`：`160.0`，宽度 `840`（`-420 .. 420`）。
 
@@ -52,18 +60,20 @@ const SKILL_ARC_ANGLES_DEG := [190.0, 255.0]   # ← 只有两个技能位
 | --- | --- | --- |
 | 伤害飘字 | `arena._spawn_damage_number()` | 只有数字；`amount >= 150` 金色，否则近白；上飘 0.9、0.65s 淡出 |
 | 命中粒子 | `_handle_hit_event()` | 英雄 10 颗，小兵/建筑 4 颗 |
-| 震屏 | `_camera_shake` | **只有两档**：受击 `0.12`、坦克技能 `0.18`；线性衰减 `delta * 1.8` |
-| 范围环 | `_spawn_ring()` / `_flash_skill_range()` | 按下技能键时闪一次，不是持续指示器 |
+| 震屏 | `_camera_shake` + `_hit_stop` | 受击 `0.12`、坦克技能 `0.18`；顿帧触发时附加击退感 shake |
+| 顿帧 | `scripts/view/hit_stop_manager.gd` | 暴击/击杀/破塔/破盾/终局分别触发；只冻结表现层，模拟与网络照常 |
+| 范围环 | `_spawn_ring()` / `_flash_skill_range()` | 技能命中/施放时闪一次；触摸拖拽时由 `SkillIndicator` 实时绘制 |
+| 技能指示器 | `scripts/ui/skill_indicator.gd` | 触摸按下技能键后显示圆形/直线/扇形指示，松手施放 |
+| 取消施法区 | `scripts/ui/cancel_cast_zone.gd` | 触摸拖拽到屏幕上方取消区，松手中断施法 |
 | 弹道/光束 | `_spawn_projectile()` / `_spawn_beam()` | 法师/射手技能、塔攻击共用 |
 | 播报 | `hud.announce()` | 中央横幅，0.18s 淡入 → 停留 → 0.4s 淡出 |
+| 多杀/一血/团灭 | `sim/combat_announcer.gd` → `arena._handle_death_event()` | 双杀/三杀/四杀/五杀/终结/团灭/一血，两端看到同一份结果 |
 | 战报 | `hud.add_feed()` | 右上滚动 6 条，4.5s 后淡出 |
 | 死亡遮罩 | `_build_death_overlay()` | 全屏红 48% + 复活倒计时 + 击杀者名 |
 
-**运行时没有的东西**（写新反馈时别去找）：顿帧 / hit-stop、受击闪白、击退、暴击区分、护盾吸收飘字、低血量屏幕边缘红晕、任何音效。
+**运行时仍然没有的东西**（写新反馈时别去找）：受击闪白、击退、护盾吸收飘字、低血量屏幕边缘红晕、完整音效资产（目前只有草丛进出等少量合成音）。
 
-**注意区分"没有"和"没接"**：`scripts/view/hit_stop_manager.gd`（顿帧）、`sim/combat_announcer.gd`（多杀播报）、`scripts/ui/skill_indicator.gd`（指示器）、`scripts/ui/cancel_cast_zone.gd`（取消施法）**文件都存在、测试都绿，但没有任何生产代码调用它们**。见 `01-repo-reality.md` §4。
-
-想启用它们，工作内容是"接线"（在 `arena._process_events` / `_handle_hit_event` / `game_hud` 里调起来），不是"重新实现"。
+**接线状态**：顿帧、多杀播报、技能指示器、取消施法区都已接入生产代码（见 `01-repo-reality.md` §4）。新增反馈模块时照旧要先 `grep` 确认生产引用，不能只写测试。
 
 ---
 
@@ -88,19 +98,10 @@ godot --path godot --script res://tools/mobile_shot.gd
 
 `skill_button.gd` 是纯 `Control` + `_draw()` 手绘：外圈、CD 扇形遮罩、剩余秒数、技能名、法力不足提示。
 
-- **交互**：触屏是"按下即 `pressed.emit()`"；桌面是鼠标左键按下即发。**没有拖拽瞄准、没有取消施法**。
-- 瞄准点来自 `arena._local_input.aim`（鼠标地面投影 / 最后一次触控点），不是按钮拖拽向量。
-- HUD 当前只建 **Q / E 两个技能键**，外加一个回城键（`_recall_button`）。
-
-### 想加"按住拖拽调方向 + 拖到取消区松手取消"
-
-**不用从零写**：`scripts/ui/skill_indicator.gd` 和 `scripts/ui/cancel_cast_zone.gd` 已经实现了，测试也覆盖了（`tests/test_indicators_and_cancel.gd`）。要做的是：
-
-1. 在 `game_hud.gd` 里实例化并挂到技能键上
-2. 把 `skill_button.gd:_gui_input()` 从"按下即发"改成状态机：按下出指示器 → 拖拽更新 `aim` → 松手提交或取消
-3. `arena.gd` 侧不用动——`cast_skill()` 本来就接受任意 `aim` 点
-
-**注意**：`skill_button.gd` 的触摸分支和鼠标分支是两套代码，改的时候两边都要动。
+- **交互**：桌面是鼠标左键按下即发（瞄准点来自 `arena._local_input.aim` 的地面投影）。触屏是"按下出指示器 → 拖拽调方向 → 松手施放"，拖到顶部中央取消区（半径 66）松手则取消。
+- 触屏拖拽由 `skill_button.gd` 的 `drag_started/updated/released` 三个信号驱动，`game_hud.gd` 用 `SkillIndicator` 画方向/落点、用 `CancelCastZone` 判定取消并变色。**按钮自身不再直接 emit `pressed`**，触摸分支和鼠标分支是两套代码。
+- HUD 建 **Q / W / E / R + 召唤师（F）+ 回城**：桌面 W 技能绑数字键 `1`（键盘 W 用于走位），按钮上直接标注实际键位；触屏按钮沿右下弧线排布。
+- 新技能槽的扩展点：`_create_skill(slot, key, accent)` + `_skill_button_for(slot)`，两处都要加分支；`skill_button.gd` 的触摸/鼠标分支也要同步。
 
 ---
 

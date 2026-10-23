@@ -2,6 +2,11 @@ extends Control
 class_name GameHUD
 
 signal skill_pressed(slot: String)
+signal skill_aim_released(slot: String, screen_pos: Vector2, cancelled: bool)
+signal attack_mode_changed(mode: String)
+signal lock_changed(target_id: int)
+signal buy_item_requested(item_id: String)
+signal sell_item_requested(slot_index: int)
 signal leave_requested
 signal resume_requested
 signal move_changed(value: Vector2)
@@ -10,10 +15,15 @@ signal pause_requested
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const SkillSystem = preload("res://sim/skill_system.gd")
 const MapIntel = preload("res://sim/map_intel.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
 const SkillButton = preload("res://scripts/ui/skill_button.gd")
+const SkillIndicator = preload("res://scripts/ui/skill_indicator.gd")
+const CancelCastZone = preload("res://scripts/ui/cancel_cast_zone.gd")
+const AttackCluster = preload("res://scripts/ui/attack_cluster.gd")
+const ShopPanel = preload("res://scripts/ui/shop_panel.gd")
 const TouchJoystick = preload("res://scripts/ui/touch_joystick.gd")
 const TouchActionButton = preload("res://scripts/ui/touch_action_button.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
@@ -49,7 +59,21 @@ var _name_label: Label
 var _role_label: Label
 var _kd_label: Label
 var _skill_q: SkillButton
+var _skill_w: SkillButton
 var _skill_e: SkillButton
+var _skill_r: SkillButton
+var _summoner_button: SkillButton
+var _attack_cluster: AttackCluster
+var _skill_aim_layer: Control
+var _aim_slot := ""
+var _aim_from := Vector2.ZERO
+var _aim_touch := Vector2.ZERO
+var _cancel_state: Dictionary = CancelCastZone.create_state()
+var _cancel_center := Vector2.ZERO
+const CANCEL_ZONE_RADIUS := 66.0
+var _shop_panel: ShopPanel
+var _shop_button: Button
+var _gold_label: Label
 var _minimap: Minimap
 var _intel_panel: PanelContainer
 var _intel_title: Label
@@ -98,13 +122,17 @@ func _ready() -> void:
 	_build_feed()
 	_build_announcement()
 	_build_bottom_panel()
+	_build_attack_cluster()
 	_build_hints()
 	if touch_mode:
 		_build_touch_controls()
+		_build_skill_aim_layer()
 	_build_death_overlay()
 	_build_pause_overlay()
 	_build_result_overlay()
 	_build_loading_overlay()
+	_build_shop()
+	set_process_unhandled_key_input(true)
 
 func _build_top_bar() -> void:
 	var panel := PanelContainer.new()
@@ -337,13 +365,14 @@ func _build_announcement() -> void:
 func _build_bottom_panel() -> void:
 	var bottom_inset := 40.0 if touch_mode else 16.0
 	var panel_height := TouchLayout.BOTTOM_PANEL_HEIGHT if touch_mode else 160.0
+	var half_width := 560.0 if not touch_mode else 420.0
 	var panel := PanelContainer.new()
 	panel.anchor_left = 0.5
 	panel.anchor_right = 0.5
 	panel.anchor_top = 1.0
 	panel.anchor_bottom = 1.0
-	panel.offset_left = -420.0
-	panel.offset_right = 420.0
+	panel.offset_left = -half_width
+	panel.offset_right = half_width
 	panel.offset_top = -(bottom_inset + panel_height)
 	panel.offset_bottom = -bottom_inset
 	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.04, 0.055, 0.92), Color(0.55, 0.44, 0.24, 0.7), 1, 12))
@@ -390,27 +419,133 @@ func _build_bottom_panel() -> void:
 	info.add_child(mp_root)
 	_kd_label = _make_label("击杀 0 / 阵亡 0", 13, GameTheme.MUTED)
 	info.add_child(_kd_label)
+	_gold_label = _make_label("金币 0", 13, GameTheme.GOLD)
+	info.add_child(_gold_label)
 
 	if not touch_mode:
 		var skills := HBoxContainer.new()
-		skills.add_theme_constant_override("separation", 12)
+		skills.add_theme_constant_override("separation", 8)
 		row.add_child(skills)
 		_skill_q = _create_skill("q", "Q", GameTheme.GOLD)
 		skills.add_child(_skill_q)
+		# 键盘 W 已用于走位，第二技能改绑数字键 1，HUD 直接标注实际键位。
+		_skill_w = _create_skill("w", "1", Color(0.68, 0.86, 0.58))
+		skills.add_child(_skill_w)
 		_skill_e = _create_skill("e", "E", Color(0.55, 0.75, 1.0))
 		skills.add_child(_skill_e)
+		_skill_r = _create_skill("r", "R", Color(0.95, 0.62, 0.45))
+		skills.add_child(_skill_r)
+		_summoner_button = _create_skill("summoner", "F", Color(0.5, 0.86, 0.76), _summoner_name())
+		skills.add_child(_summoner_button)
 	var hero_def: Dictionary = HeroDefs.get_hero(hero_type)
 	_role_label.text = "%s · %s" % [hero_def.role, hero_def.title]
 
-func _create_skill(slot: String, key: String, accent: Color) -> SkillButton:
+func _create_skill(slot: String, key: String, accent: Color, display_name := "") -> SkillButton:
 	var button := SkillButton.new()
 	button.slot = slot
 	button.key_text = key
 	button.accent = accent
 	button.touch_mode = touch_mode
-	button.skill_name = str(HeroDefs.get_hero(hero_type).get(slot, {}).get("name", "技能"))
-	button.pressed.connect(func(): skill_pressed.emit(slot))
+	if display_name == "":
+		display_name = str(HeroDefs.get_hero(hero_type).get(slot, {}).get("name", "技能"))
+	button.skill_name = display_name
+	if touch_mode:
+		button.drag_started.connect(_on_skill_drag_started)
+		button.drag_updated.connect(_on_skill_drag_updated)
+		button.drag_released.connect(_on_skill_drag_released)
+	else:
+		button.pressed.connect(func(): skill_pressed.emit(slot))
 	return button
+
+func _build_skill_aim_layer() -> void:
+	_skill_aim_layer = Control.new()
+	_skill_aim_layer.name = "SkillAimLayer"
+	_skill_aim_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_skill_aim_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_skill_aim_layer.visible = false
+	_skill_aim_layer.draw.connect(func(): _draw_skill_aim(_skill_aim_layer))
+	add_child(_skill_aim_layer)
+
+func _skill_button_for(slot: String) -> SkillButton:
+	match slot:
+		"q":
+			return _skill_q
+		"w":
+			return _skill_w
+		"e":
+			return _skill_e
+		"r":
+			return _skill_r
+		"summoner":
+			return _summoner_button
+	return null
+
+func _cancel_zone_position() -> Vector2:
+	return Vector2(size.x * 0.5, 150.0)
+
+func _on_skill_drag_started(slot: String, screen_pos: Vector2) -> void:
+	if _skill_aim_layer == null:
+		return
+	var button := _skill_button_for(slot)
+	if button == null:
+		return
+	_aim_slot = slot
+	_aim_from = button.get_global_rect().get_center()
+	_aim_touch = screen_pos
+	_cancel_center = _cancel_zone_position()
+	CancelCastZone.update_state(_cancel_state, screen_pos, _cancel_center, CANCEL_ZONE_RADIUS)
+	_skill_aim_layer.visible = true
+	_skill_aim_layer.queue_redraw()
+
+func _on_skill_drag_updated(slot: String, screen_pos: Vector2) -> void:
+	if slot != _aim_slot or _skill_aim_layer == null:
+		return
+	_aim_touch = screen_pos
+	CancelCastZone.update_state(_cancel_state, screen_pos, _cancel_center, CANCEL_ZONE_RADIUS)
+	_skill_aim_layer.queue_redraw()
+
+func _on_skill_drag_released(slot: String, screen_pos: Vector2) -> void:
+	if slot != _aim_slot:
+		return
+	_aim_touch = screen_pos
+	var cancelled := CancelCastZone.is_inside(screen_pos, _cancel_center, CANCEL_ZONE_RADIUS)
+	_aim_slot = ""
+	if _skill_aim_layer != null:
+		_skill_aim_layer.visible = false
+	skill_aim_released.emit(slot, screen_pos, cancelled)
+
+func _draw_skill_aim(layer: Control) -> void:
+	if _aim_slot == "":
+		return
+	var cancelling := bool(_cancel_state.get("cancelling", false))
+	var color := CancelCastZone.get_indicator_color(cancelling)
+	var to_touch := _aim_touch - _aim_from
+	var length := to_touch.length()
+	if length > 4.0:
+		var quad := SkillIndicator.generate_line_points(_aim_from, to_touch / length, minf(length, 560.0), 26.0)
+		var fill := color
+		fill.a = 0.16
+		layer.draw_colored_polygon(quad, fill)
+		layer.draw_polyline(PackedVector2Array([_aim_from, _aim_touch]), color, 2.0)
+	var ring_points := SkillIndicator.generate_circle_points(30.0, 24)
+	var ring := PackedVector2Array()
+	for point in ring_points:
+		ring.append(_aim_touch + point)
+	layer.draw_polyline(ring, color, 2.5)
+	layer.draw_circle(_cancel_center, CANCEL_ZONE_RADIUS, Color(color.r, color.g, color.b, 0.14))
+	layer.draw_arc(_cancel_center, CANCEL_ZONE_RADIUS, 0.0, TAU, 48, color, 3.0, true)
+	layer.draw_string(
+		GameTheme.FONT_REGULAR,
+		_cancel_center + Vector2(-CANCEL_ZONE_RADIUS, 6.0),
+		"拖到这里取消",
+		HORIZONTAL_ALIGNMENT_CENTER,
+		CANCEL_ZONE_RADIUS * 2.0,
+		14,
+		color
+	)
+
+func _summoner_name() -> String:
+	return str(SkillSystem.get_summoner_spell("flash").get("name", "召唤"))
 
 func _make_stat_bar(fill_color: Color, height: float) -> Control:
 	var root := Control.new()
@@ -442,16 +577,45 @@ func _make_stat_bar(fill_color: Color, height: float) -> Control:
 	root.set_meta("label", label)
 	return root
 
+func _build_attack_cluster() -> void:
+	_attack_cluster = AttackCluster.new()
+	_attack_cluster.setup(touch_mode)
+	_attack_cluster.mode_changed.connect(func(mode: String): attack_mode_changed.emit(mode))
+	_attack_cluster.lock_changed.connect(func(target_id: int): lock_changed.emit(target_id))
+	if touch_mode:
+		_attack_cluster.anchor_left = 1.0
+		_attack_cluster.anchor_top = 0.0
+		_attack_cluster.anchor_right = 1.0
+		_attack_cluster.anchor_bottom = 0.0
+		_attack_cluster.offset_left = -500.0
+		_attack_cluster.offset_top = 92.0
+		_attack_cluster.offset_right = -20.0
+		_attack_cluster.offset_bottom = 232.0
+	else:
+		_attack_cluster.anchor_left = 1.0
+		_attack_cluster.anchor_top = 1.0
+		_attack_cluster.anchor_right = 1.0
+		_attack_cluster.anchor_bottom = 1.0
+		_attack_cluster.offset_left = -520.0
+		_attack_cluster.offset_top = -372.0
+		_attack_cluster.offset_right = -20.0
+		_attack_cluster.offset_bottom = -196.0
+	add_child(_attack_cluster)
+
+func set_targeting_state(mode: String, target_id: int) -> void:
+	if _attack_cluster != null:
+		_attack_cluster.set_targeting_state(mode, target_id)
+
 func _build_hints() -> void:
 	# 操作提示拆两行：左键改成「移动到点」之后键位变多，单行会顶到英雄信息面板底下。
 	var lines: Array[String] = [
-		"左键 移动   ·   右键 / 空格 普攻   ·   Q / E 技能",
+		"左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师",
 		"WASD 走位   ·   B 回城   ·   T 传送阵   ·   滚轮 缩放   ·   Esc 菜单",
 	]
 	var top := -50.0
 	var bottom := -12.0
 	if touch_mode:
-		lines = ["左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放   ·   回城 / 传送键"]
+		lines = ["左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放   ·   四技能 / 召唤师 / 回城 / 传送"]
 		top = -332.0
 		bottom = -304.0
 	var box := VBoxContainer.new()
@@ -508,9 +672,18 @@ func _build_touch_controls() -> void:
 	_skill_q = _create_skill("q", "Q", GameTheme.GOLD)
 	add_child(_skill_q)
 	_place_touch_skill(_skill_q, 0)
+	_skill_w = _create_skill("w", "1", Color(0.68, 0.86, 0.58))
+	add_child(_skill_w)
+	_place_touch_skill(_skill_w, 1)
 	_skill_e = _create_skill("e", "E", Color(0.55, 0.75, 1.0))
 	add_child(_skill_e)
-	_place_touch_skill(_skill_e, 1)
+	_place_touch_skill(_skill_e, 2)
+	_skill_r = _create_skill("r", "R", Color(0.95, 0.62, 0.45))
+	add_child(_skill_r)
+	_place_touch_skill(_skill_r, 3)
+	_summoner_button = _create_skill("summoner", "F", Color(0.5, 0.86, 0.76), _summoner_name())
+	add_child(_summoner_button)
+	_place_utility_button(_summoner_button, TouchLayout.UTILITY_SUMMONER_RECT)
 
 	_pause_button = TouchActionButton.new()
 	_pause_button.touch_mode = true
@@ -532,32 +705,28 @@ func _build_touch_controls() -> void:
 	_recall_button.label = "回城"
 	_recall_button.hint = "B"
 	_recall_button.accent = Color(0.45, 0.78, 0.62)
-	_recall_button.anchor_left = 1.0
-	_recall_button.anchor_top = 1.0
-	_recall_button.anchor_right = 1.0
-	_recall_button.anchor_bottom = 1.0
-	_recall_button.offset_left = -500.0
-	_recall_button.offset_top = -190.0
-	_recall_button.offset_right = -404.0
-	_recall_button.offset_bottom = -94.0
 	_recall_button.pressed.connect(func(): skill_pressed.emit("recall"))
 	add_child(_recall_button)
+	_place_utility_button(_recall_button, TouchLayout.UTILITY_RECALL_RECT)
 
 	_teleport_button = TouchActionButton.new()
 	_teleport_button.touch_mode = true
 	_teleport_button.label = "传送"
 	_teleport_button.hint = "T"
 	_teleport_button.accent = Color(0.42, 0.8, 0.9)
-	_teleport_button.anchor_left = 1.0
-	_teleport_button.anchor_top = 1.0
-	_teleport_button.anchor_right = 1.0
-	_teleport_button.anchor_bottom = 1.0
-	_teleport_button.offset_left = -596.0
-	_teleport_button.offset_top = -190.0
-	_teleport_button.offset_right = -500.0
-	_teleport_button.offset_bottom = -94.0
 	_teleport_button.pressed.connect(func(): skill_pressed.emit("teleport"))
 	add_child(_teleport_button)
+	_place_utility_button(_teleport_button, TouchLayout.UTILITY_TELEPORT_RECT)
+
+func _place_utility_button(button: Control, offsets: Rect2) -> void:
+	button.anchor_left = 1.0
+	button.anchor_top = 1.0
+	button.anchor_right = 1.0
+	button.anchor_bottom = 1.0
+	button.offset_left = offsets.position.x
+	button.offset_top = offsets.position.y
+	button.offset_right = offsets.end.x
+	button.offset_bottom = offsets.end.y
 
 func _place_touch_skill(button: Control, arc_index: int) -> void:
 	var angle := deg_to_rad(float(TouchLayout.SKILL_ARC_ANGLES_DEG[arc_index]))
@@ -678,6 +847,52 @@ func _build_result_overlay() -> void:
 	leave.pressed.connect(func(): leave_requested.emit())
 	box.add_child(leave)
 
+func _build_shop() -> void:
+	_shop_button = Button.new()
+	_shop_button.text = "商店 (P)"
+	_shop_button.focus_mode = Control.FOCUS_NONE
+	_shop_button.anchor_left = 1.0
+	_shop_button.anchor_top = 0.0
+	_shop_button.anchor_right = 1.0
+	_shop_button.anchor_bottom = 0.0
+	_shop_button.offset_left = -170.0
+	_shop_button.offset_top = 18.0
+	_shop_button.offset_right = -20.0
+	_shop_button.offset_bottom = 58.0
+	_shop_button.pressed.connect(toggle_shop)
+	add_child(_shop_button)
+
+	_shop_panel = ShopPanel.new()
+	_shop_panel.setup(hero_type, touch_mode)
+	_shop_panel.buy_requested.connect(func(item_id: String): buy_item_requested.emit(item_id))
+	_shop_panel.sell_requested.connect(func(slot: int): sell_item_requested.emit(slot))
+	_shop_panel.quick_buy_requested.connect(func(item_id: String): buy_item_requested.emit(item_id))
+	_shop_panel.close_requested.connect(close_shop)
+	add_child(_shop_panel)
+
+func toggle_shop() -> void:
+	if _shop_panel == null:
+		return
+	_shop_panel.visible = not _shop_panel.visible
+	if _shop_panel.visible and _shop_button != null:
+		_shop_button.text = "关闭商店"
+	elif _shop_button != null:
+		_shop_button.text = "商店 (P)"
+
+func close_shop() -> void:
+	if _shop_panel != null:
+		_shop_panel.visible = false
+	if _shop_button != null:
+		_shop_button.text = "商店 (P)"
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if not (event is InputEventKey):
+		return
+	var key := event as InputEventKey
+	if key.pressed and not key.echo and key.keycode == KEY_P:
+		toggle_shop()
+		accept_event()
+
 func _build_loading_overlay() -> void:
 	_loading_overlay = PanelContainer.new()
 	_loading_overlay.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
@@ -749,6 +964,11 @@ func update_snapshot(data: Dictionary) -> void:
 		_hp_style.bg_color = desired_color
 	_level_label.text = "Lv.%d" % int(local.get("level", 1))
 	_kd_label.text = "击杀 %d   /   阵亡 %d" % [int(local.get("kills", 0)), int(local.get("deaths", 0))]
+	var gold := int(local.get("gold", 0))
+	if _gold_label != null:
+		_gold_label.text = "金币 %d" % gold
+	if _shop_panel != null:
+		_shop_panel.set_state(gold, local.get("inventory", []), str(local.get("hero_type", hero_type)))
 	var hero_def: Dictionary = HeroDefs.get_hero(str(local.get("hero_type", hero_type)))
 	var role_text := "%s · %s" % [hero_def.role, hero_def.title]
 	if float(local.get("buff_blue_timer", 0.0)) > 0.0:
@@ -761,10 +981,19 @@ func update_snapshot(data: Dictionary) -> void:
 		role_text += " [传送中...]"
 	_role_label.text = role_text
 	var alive := bool(local.get("alive", true))
-	var q_def: Dictionary = hero_def.q
-	var e_def: Dictionary = hero_def.e
-	_skill_q.set_state(float(local.get("skill_q_cd", 0.0)), float(q_def.cooldown), str(q_def.name), mp >= float(q_def.cost), not alive)
-	_skill_e.set_state(float(local.get("skill_e_cd", 0.0)), float(e_def.cooldown), str(e_def.name), mp >= float(e_def.cost), not alive)
+	_apply_skill_state(_skill_q, local, hero_def.q, "skill_q_cd", mp, not alive)
+	_apply_skill_state(_skill_w, local, hero_def.w, "skill_w_cd", mp, not alive)
+	_apply_skill_state(_skill_e, local, hero_def.e, "skill_e_cd", mp, not alive)
+	_apply_skill_state(_skill_r, local, hero_def.r, "skill_r_cd", mp, not alive)
+	if _summoner_button != null:
+		var spell := SkillSystem.get_summoner_spell(str(local.get("summoner_spell", "flash")))
+		_summoner_button.set_state(
+			float(local.get("summoner_cd", 0.0)),
+			float(spell.get("cooldown", 90.0)),
+			str(spell.get("name", "召唤")),
+			true,
+			not alive
+		)
 
 	var ended := bool(data.get("ended", false))
 	if not ended and not alive and not _result_overlay.visible:
@@ -779,11 +1008,24 @@ func update_snapshot(data: Dictionary) -> void:
 	else:
 		_death_overlay.visible = false
 
+	if _attack_cluster != null:
+		_attack_cluster.refresh_enemies(data.get("entities", []), local_team)
 	_minimap.set_snapshot(data, local_owner, local_team)
 	if _intel_valid:
 		_refresh_intel()
 	if ended and not result_shown:
 		show_result(str(data.get("winner", "")), local)
+
+func _apply_skill_state(button: SkillButton, local: Dictionary, skill_def: Dictionary, cd_key: String, mp: float, dead: bool) -> void:
+	if button == null:
+		return
+	button.set_state(
+		float(local.get(cd_key, 0.0)),
+		float(skill_def.get("cooldown", 1.0)),
+		str(skill_def.get("name", "技能")),
+		mp >= float(skill_def.get("cost", 0.0)),
+		dead
+	)
 
 func _find_local_hero(data: Dictionary) -> Dictionary:
 	for entity in data.get("entities", []):
@@ -836,6 +1078,7 @@ func show_pause(value: bool, online := false) -> void:
 		_pause_button.label = MatchMenu.pause_label(online_mode)
 	if value:
 		_reset_touch_controls()
+		close_shop()
 	_pause_overlay.visible = value
 
 func _reset_touch_controls() -> void:
@@ -843,12 +1086,19 @@ func _reset_touch_controls() -> void:
 		_joystick.reset()
 	if _attack_button:
 		_attack_button.reset()
+	for button in [_skill_q, _skill_w, _skill_e, _skill_r, _summoner_button]:
+		if button != null:
+			button.cancel_drag()
+	_aim_slot = ""
+	if _skill_aim_layer != null:
+		_skill_aim_layer.visible = false
 
 func is_modal() -> bool:
 	return _pause_overlay.visible or _result_overlay.visible
 
 func show_result(winner: String, local: Dictionary) -> void:
 	result_shown = true
+	close_shop()
 	_death_overlay.visible = false
 	var victory := winner == local_team
 	_result_title.text = "胜  利" if victory else "战  败"

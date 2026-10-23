@@ -65,6 +65,8 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 	hero[cd_key] = float(skill.get("cooldown", 5.0)) * Jungle.cooldown_scale(hero)
 	
 	var damage: float = float(skill.get("damage", 0.0))
+	if damage > 0.0:
+		damage += float(hero.get("ability_power", 0.0)) * 0.3
 	var range_val: float = float(skill.get("range", 5.0))
 	var kind: String = str(skill.get("kind", ""))
 	var hero_pos: Vector2 = hero.get("pos", Vector2.ZERO)

@@ -14,4 +14,5 @@
 
 ## 2. 产出文件
 - `godot/net/client_prediction.gd`：输入队列管理、预测计算、双模纠错与指数平滑衰减。
-- `godot/tests/test_client_prediction.gd`：4 大专项单元测试全部绿灯通过。
+- `godot/tests/test_client_prediction.gd`：6 大专项单元测试全部绿灯通过（含同序列多帧合并、未知 ack 重放）。
+- `godot/scripts/game/arena.gd`：客机每帧调用 `_update_local_prediction()`，`receive_snapshot()` 里调用 `_reconcile_local_prediction()`；服务端快照携带 `last_input_seq`，输入序号随每次网络发送推进。

@@ -91,8 +91,18 @@ const CATALOGUE := {
 	},
 }
 
+const BUILD_ORDERS := {
+	"blade": ["boots", "iron_sword", "infinity_edge", "cloth_armor", "ominous_shield", "resistance_boots"],
+	"mage": ["spell_tome", "boots", "echo_wand", "cloth_armor", "ominous_shield", "resistance_boots"],
+	"tank": ["cloth_armor", "boots", "ominous_shield", "resistance_boots", "iron_sword", "infinity_edge"],
+	"archer": ["boots", "iron_sword", "infinity_edge", "cloth_armor", "resistance_boots", "ominous_shield"],
+}
+
 static func get_item(item_id: String) -> Dictionary:
 	return CATALOGUE.get(item_id, {})
+
+static func build_order_for(hero_type: String) -> Array:
+	return BUILD_ORDERS.get(hero_type, BUILD_ORDERS["blade"])
 
 static func can_buy(hero: Dictionary, item_id: String) -> bool:
 	if not CATALOGUE.has(item_id):

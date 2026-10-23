@@ -14,6 +14,11 @@ const BUSH_REVEAL := 3.2
 
 const VISION_TYPES := ["hero", "minion", "tower", "guard", "base"]
 const ALWAYS_VISIBLE_TYPES := ["tower", "guard", "base"]
+# 全局播报类事件：建筑永远可见、兵线/首领刷新与比赛结束本就是全图信息。
+const GLOBAL_EVENT_TYPES := [
+	"wave", "objective_spawn", "monster_respawn", "match_end", "ace",
+	"tower_destroyed", "guard_destroyed", "crystal_shield_broken", "base_exposed",
+]
 
 static func radius_of(entity: Dictionary) -> float:
 	match str(entity.get("type", "")):
@@ -70,6 +75,52 @@ static func is_visible(target: Dictionary, viewer_team: String, entities: Array,
 		return true
 	return false
 
+# 事件过滤：攻击、技能、受击、死亡都带坐标，敌人躲在战争迷雾里做这些事
+# 不能通过事件流泄露位置；己方事件与全局播报照常下发。
+static func filter_events(events: Array, viewer_team: String, entities: Array, reveals: Array = []) -> Array:
+	if not can_see_team(viewer_team):
+		return events.duplicate(true)
+	var kept: Array = []
+	for item in events:
+		if not (item is Dictionary):
+			continue
+		var event: Dictionary = item
+		if GLOBAL_EVENT_TYPES.has(str(event.get("type", ""))):
+			kept.append(event.duplicate(true))
+			continue
+		if _event_team(event, entities) == viewer_team:
+			kept.append(event.duplicate(true))
+			continue
+		var point: Variant = _event_position(event)
+		if point == null:
+			# 无坐标的敌方事件一律丢弃，宁可少播报也不给透视。
+			continue
+		if is_visible({"type": "event", "team": "neutral", "pos": point}, viewer_team, entities, reveals):
+			kept.append(event.duplicate(true))
+	return kept
+
+static func _event_team(event: Dictionary, entities: Array) -> String:
+	for key in ["team", "victim_team", "killer_team"]:
+		var value := str(event.get(key, ""))
+		if value == "blue" or value == "red":
+			return value
+	for key in ["hero", "caster_id", "killer_id", "victim_id", "source", "target"]:
+		var entity_id := int(event.get(key, -1))
+		if entity_id < 0:
+			continue
+		for item in entities:
+			if item is Dictionary and int(item.get("id", -1)) == entity_id:
+				return str(item.get("team", ""))
+	return ""
+
+static func _event_position(event: Dictionary) -> Variant:
+	if event.has("x") and event.has("y"):
+		return Vector2(float(event.get("x", 0.0)), float(event.get("y", 0.0)))
+	var stored: Variant = event.get("pos", null)
+	if stored is Array and (stored as Array).size() >= 2:
+		return Vector2(float(stored[0]), float(stored[1]))
+	return null
+
 # 副本过滤：友军全留、建筑全留，敌方与中立单位只有被看见才进快照。
 static func filter_snapshot(snapshot: Dictionary, viewer_team: String) -> Dictionary:
 	var filtered: Dictionary = snapshot.duplicate(true)
@@ -88,6 +139,8 @@ static func filter_snapshot(snapshot: Dictionary, viewer_team: String) -> Dictio
 		if bool(is_visible(entity, viewer_team, source, reveals)):
 			kept.append(entity.duplicate(true))
 	filtered["entities"] = kept
+	if snapshot.get("events", null) is Array:
+		filtered["events"] = filter_events(snapshot["events"], viewer_team, source, reveals)
 	# 河道视野也是队内情报，不能把敌方掌握的眼位透给本视角。
 	if river is Dictionary and can_see_team(viewer_team):
 		filtered["river"] = {

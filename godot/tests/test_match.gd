@@ -315,3 +315,26 @@ func test_in_place_attack_keeps_root_at_origin() -> void:
 	uv.process_visual(0.7)
 	eq(sk.get_bone_pose_position(0), Vector3.ZERO, "post-attack root bone stays at origin")
 	uv.free()
+
+func test_combat_reveals_both_heroes_and_timer_decays() -> void:
+	var sim := _match({"humans": [_human("p1", "blue")], "bot_fill": true})
+	var blue := _hero(sim, "p1")
+	var red: Dictionary = _entities(sim, "hero").filter(func(hero): return hero.team == "red")[0]
+	eq(float(red.revealed_timer), 0.0, "hero starts unrevealed")
+	sim._damage(red, 10.0, blue)
+	eq(float(red.revealed_timer), MatchSim.REVEAL_AFTER_COMBAT, "victim is briefly revealed")
+	eq(float(blue.revealed_timer), MatchSim.REVEAL_AFTER_COMBAT, "attacker reveals self by trading")
+	var red_snapshot: Dictionary = sim.snapshot().entities.filter(func(hero): return int(hero.id) == int(red.id))[0]
+	eq(float(red_snapshot.revealed_timer), MatchSim.REVEAL_AFTER_COMBAT, "snapshot carries the reveal timer")
+	_tick_for(sim, MatchSim.REVEAL_AFTER_COMBAT + 0.2)
+	eq(float(red.revealed_timer), 0.0, "reveal expires after combat ends")
+
+func test_snapshot_for_filters_events_per_team() -> void:
+	var sim := _match({"humans": [_human("p1", "blue")], "bot_fill": true})
+	var red: Dictionary = _entities(sim, "hero").filter(func(hero): return hero.team == "red")[0]
+	var events: Array = [{"type": "attack", "hero": int(red.id), "x": float(red.pos.x), "y": float(red.pos.y)}]
+	var blue_view: Dictionary = sim.snapshot_for("blue", events)
+	eq(blue_view.events.size(), 0, "enemy combat in fog is not leaked to the other team")
+	var red_view: Dictionary = sim.snapshot_for("red", events)
+	eq(red_view.events.size(), 1, "own combat event reaches own team")
+	eq(red_view.events[0].type, "attack", "event payload survives filtering")

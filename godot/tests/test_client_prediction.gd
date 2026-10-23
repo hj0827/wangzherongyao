@@ -55,3 +55,28 @@ func test_large_divergence_snaps_instantly() -> void:
 	
 	near(predictor.get_render_pos().x, -10.0, 0.01, "large divergence snaps instantly to server authority")
 	near(predictor.get_smooth_offset().length(), 0.0, 0.001, "no smooth sliding across screen on hard snap")
+
+func test_predict_at_merges_frames_under_one_network_sequence() -> void:
+	var predictor := ClientPrediction.new()
+	predictor.reset(Vector2.ZERO)
+
+	predictor.predict_at(Vector2(1.0, 0.0), 6.0, 0.02, 5)
+	predictor.predict_at(Vector2(1.0, 0.0), 6.0, 0.03, 5)
+	eq(predictor.get_pending_count(), 1, "frames sharing a sequence merge into one pending record")
+	near(predictor.get_render_pos().x, 0.3, 0.001, "merged prediction accumulates both frames")
+
+	predictor.reconcile(5, Vector2(0.3, 0.0))
+	eq(predictor.get_pending_count(), 0, "server ack clears the matching network sequence")
+	near(predictor.get_render_pos().x, 0.3, 0.001, "clean ack keeps predicted position")
+
+func test_unknown_ack_rebases_and_replays_without_visual_jump() -> void:
+	var predictor := ClientPrediction.new()
+	predictor.reset(Vector2.ZERO)
+
+	predictor.predict_at(Vector2(1.0, 0.0), 5.0, 0.1, 7)
+	var before := predictor.get_render_pos()
+	# 服务端还没处理 seq 7（可能刚重置过预测历史），只确认到 6。
+	predictor.reconcile(6, Vector2.ZERO)
+	eq(predictor.get_pending_count(), 1, "unacked sequence is replayed")
+	near(predictor.get_render_pos().x, before.x, 0.001, "render position stays continuous across unknown ack")
+	near(predictor.get_smooth_offset().length(), 0.0, 0.001, "rebase does not double-count the pending input")

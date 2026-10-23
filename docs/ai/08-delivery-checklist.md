@@ -1,6 +1,6 @@
 # 交付前自查清单
 
-> 只在"任务收尾 / 提交前"读这份。7 项，每项挡一类"看起来完成"的假交付。
+> 只在"任务收尾 / 提交前"读这份。8 项，每项挡一类"看起来完成"的假交付。
 
 ---
 
@@ -37,7 +37,7 @@ grep -rn "YourClass" --include="*.gd" godot/scripts godot/sim godot/net
 - [ ] 结果里除了 `tests/`，还有**至少一个生产文件**
 - [ ] 如果只有 `tests/`，要么接上，要么在汇报里写"已实现，未接入"
 
-**当前已有 8 个模块栽在这上面**，清单见 `01-repo-reality.md` §4。不要成为第 9 个。
+**历史上已有 8 个模块栽在这上面**（2026-10-23 已全部接线），清单见 `01-repo-reality.md` §4。不要成为第 9 个。
 
 ---
 
@@ -63,7 +63,7 @@ grep -rn "YourClass" --include="*.gd" godot/scripts godot/sim godot/net
 - [ ] 改了 `docs/ARCHITECTURE.md` 里的目录约定 → 同步 `docs/ai/01-repo-reality.md`
 - [ ] **不要**往 `docs/upgrades/README.md` 的完成度表里填"未接线"的模块
 
-**假交付症状**：文档写着"已完成"，但生产代码里没有任何引用（这个仓库已经发生过 8 次，见 `00-hard-rules.md` 第 9 条）。
+**假交付症状**：文档写着"已完成"，但生产代码里没有任何引用（这个仓库历史上发生过 8 次，见 `00-hard-rules.md` 第 9 条）。
 
 ---
 
@@ -91,6 +91,17 @@ godot --path godot --script res://tools/mobile_shot.gd
 ```
 
 截图落 `godot/shots/`，**不入库**。
+
+---
+
+## 8. 如果这次改了 Android 可见行为（UI / 视频 / 输入 / 打包）
+
+- [ ] 改了脚本或资源后**重新导出 APK**（旧包不算数），版本号与 `export_presets.cfg` 一致；导出后跑 `python tools/fix_apk_theme_icon.py` 补 themed icon 并重签名
+- [ ] `cd godot && python tools/device_checks.py` **接上真机**跑完整套件、无 FAIL；设备离线时的 `ENV-01` FAIL + `PHASE-*` SKIP 不算通过。`NET-01` 在有第二台手机前允许 SKIP
+- [ ] 人工用例按 `09-device-testing.md` §4 过一遍（音频、双指、第二台手机、长局）
+- [ ] `report.json` 路径与结果记入 `09-device-testing.md` §6
+
+**假交付症状**：headless 全绿、截图是旧的、APK 没重打，手机上还是上一版。
 
 ---
 

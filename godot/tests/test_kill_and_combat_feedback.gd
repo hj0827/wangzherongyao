@@ -2,6 +2,7 @@ extends "res://tests/test_base.gd"
 
 const CombatAnnouncer = preload("res://sim/combat_announcer.gd")
 const HitStopManager = preload("res://scripts/view/hit_stop_manager.gd")
+const MatchSim = preload("res://sim/match_sim.gd")
 
 func test_first_blood_and_multi_kill_detection() -> void:
 	var announcer := CombatAnnouncer.new()
@@ -43,6 +44,58 @@ func test_ace_announcement_when_team_wiped() -> void:
 	
 	red_team[0].alive = true
 	check(not announcer.check_ace("red", red_team), "if any enemy is alive, no Ace")
+	
+	var duel_team := [{"id": 12, "type": "hero", "team": "red", "alive": false}]
+	check(not announcer.check_ace("red", duel_team), "a lone dead hero in 1v1 is not an Ace")
+
+func test_non_hero_death_claims_first_blood_and_resets_streak() -> void:
+	var announcer := CombatAnnouncer.new()
+	var first: Dictionary = announcer.record_death(10)
+	eq(str(first.announcement), "first_blood", "non-hero first death still claims first blood")
+	var second: Dictionary = announcer.record_death(10)
+	eq(str(second.announcement), "", "first blood is claimed only once")
+
+func test_match_sim_emits_announcements_and_ace() -> void:
+	var sim := MatchSim.new({
+		"mode": "team",
+		"humans": [
+			{"id": "p1", "team": "blue", "hero_type": "blade"},
+			{"id": "p2", "team": "red", "hero_type": "tank"},
+			{"id": "p3", "team": "red", "hero_type": "mage"},
+		],
+		"bot_fill": false,
+	})
+	var blue: Dictionary = sim.get_hero_by_player("p1")
+	var red_one: Dictionary = sim.get_hero_by_player("p2")
+	var red_two: Dictionary = sim.get_hero_by_player("p3")
+	check(not blue.is_empty() and not red_one.is_empty() and not red_two.is_empty(), "team heroes spawned")
+	
+	sim._kill_entity(red_one, blue)
+	var first_death := _find_event(sim.state.events, "death")
+	eq(str(first_death.get("announcement", "")), "first_blood", "sim tags first blood")
+	check(not _has_event(sim.state.events, "ace"), "one teammate still alive means no ace")
+	
+	sim._kill_entity(red_two, blue)
+	check(_has_event(sim.state.events, "ace"), "wiping the team emits ace")
+	var second_death := _latest_event(sim.state.events, "death")
+	eq(str(second_death.get("announcement", "")), "double_kill", "second quick kill is a double kill")
+	eq(str(second_death.get("streak_title", "")), "", "two kills is not a streak title yet")
+
+func _find_event(events: Array, type: String) -> Dictionary:
+	for event in events:
+		if str(event.get("type", "")) == type:
+			return event
+	return {}
+
+func _latest_event(events: Array, type: String) -> Dictionary:
+	for i in range(events.size() - 1, -1, -1):
+		var event: Variant = events[i]
+		if event is Dictionary and str(event.get("type", "")) == type:
+			return event
+	return {}
+
+func _has_event(events: Array, type: String) -> bool:
+	return not _find_event(events, type).is_empty()
 
 func test_hit_stop_manager_freezes_and_decays() -> void:
 	var manager := HitStopManager.new()

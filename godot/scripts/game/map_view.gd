@@ -104,4 +104,12 @@ static func event_banner(event: Dictionary) -> Dictionary:
 				"announce": true,
 				"duration": 1.8,
 			}
+		"ace":
+			return {
+				"text": "%s团灭" % team_label,
+				"feed": "%s全员阵亡，遭到团灭" % team_label,
+				"color": GameTheme.GOLD_LIGHT,
+				"announce": true,
+				"duration": 2.0,
+			}
 	return {}
