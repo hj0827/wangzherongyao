@@ -1528,6 +1528,8 @@ func _handle_death_event(event: Dictionary) -> void:
 		_spawn_particles(pos, Color(0.75, 0.7, 0.6), 5, 2.0, 0.05, 0.4)
 
 func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
+	if _effects_root == null:
+		return
 	var label := Label3D.new()
 	label.text = str(int(round(amount)))
 	label.font = load("res://assets/fonts/NotoSansSC.ttf")
