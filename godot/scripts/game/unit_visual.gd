@@ -150,6 +150,13 @@ var _has_pos := false
 # 上一帧的插值进度。变小说明进入了新的一格（tick / 快照区间推进），
 # 用来识别「这一格位置没变 = 实体已经站住」。
 var _last_alpha := 1.0
+# 渲染状态缓存：这些值只在变化时写回 Label3D / ShaderMaterial，
+# 避免 60fps 下对每个单位重复做字体排版与材质参数刷新。
+var _shown_hp := -1.0
+var _shown_shield := -1.0
+var _shown_mp := -1.0
+var _shown_level := -1
+var _shown_bar_visible := true
 
 var bar_root: Node3D
 var bar_mesh: MeshInstance3D
@@ -178,6 +185,74 @@ static func scale_for_height(measured_height: float, target_height: float) -> fl
 	if measured_height <= 0.001 or target_height <= 0.0:
 		return 1.0
 	return target_height / measured_height
+
+func can_recycle() -> bool:
+	return kind == "minion" and dead and death_timer < -1.0
+
+func recycle() -> void:
+	visible = false
+	dead = true
+	for player in animation_players:
+		if player:
+			player.stop()
+
+func reset_minion(new_team: String, new_pos: Vector3) -> void:
+	team = new_team
+	dead = false
+	death_timer = 0.0
+	action_timer = 0.0
+	current_animation = ""
+	_locomotion_rate = 1.0
+	_last_alpha = 1.0
+	_shown_hp = -1.0
+	_shown_shield = -1.0
+	_shown_mp = -1.0
+	_shown_level = -1
+	_shown_bar_visible = true
+	visible = true
+	_has_pos = false
+	_initialized = false
+	position = new_pos
+	_prev_pos = new_pos
+	_cur_pos = new_pos
+	_last_target = new_pos
+	rotation.y = 0.0
+	if team_ring:
+		team_ring.visible = true
+		var ring_mat := team_ring.material_override as StandardMaterial3D
+		if ring_mat:
+			var ring_color := BLUE if team == "blue" else RED
+			ring_mat.albedo_color = Color(ring_color.r, ring_color.g, ring_color.b, 0.8)
+			ring_mat.emission = ring_color
+	if bar_mesh:
+		bar_mesh.visible = true
+	if bar_material:
+		bar_material.set_shader_parameter("ratio", 1.0)
+		bar_material.set_shader_parameter("shield_ratio", 0.0)
+	if mp_mesh:
+		mp_mesh.visible = false
+	if level_label:
+		level_label.visible = false
+	_set_anim("Idle", true)
+	_cur_pos = new_pos
+	_last_alpha = 1.0
+	if team_ring:
+		team_ring.visible = true
+		var ring_mat := team_ring.material_override as StandardMaterial3D
+		if ring_mat:
+			var ring_color := BLUE if team == "blue" else RED
+			ring_mat.albedo_color = Color(ring_color.r, ring_color.g, ring_color.b, 0.8)
+			ring_mat.emission = ring_color
+	if bar_material:
+		bar_material.set_shader_parameter("ratio", 1.0)
+		bar_material.set_shader_parameter("shield_ratio", 0.0)
+	if bar_mesh:
+		bar_mesh.visible = true
+	for player in animation_players:
+		if player:
+			player.stop()
+	current_animation = ""
+	_set_anim("Idle", true)
 
 func _build_hero() -> void:
 	var setup_data: Dictionary = HERO_SETUPS.get(hero_type, HERO_SETUPS["blade"])
@@ -208,6 +283,9 @@ func _build_hero() -> void:
 	idle_anim = str(setup_data.get("idle", "Idle"))
 	_set_anim(idle_anim, true)
 	process_priority = 10
+	# 单位数量多、始终处于镜头附近，阴影 pass 的收益远低于开销；
+	# 建筑与环境保留阴影，单位用脚下队伍环提供接地感。
+	ModelUtils.enable_shadows(self, false)
 
 func _build_minion() -> void:
 	var scene: PackedScene
@@ -229,6 +307,7 @@ func _build_minion() -> void:
 	_add_ring(0.44)
 	_add_health_bar(MINION_HEIGHT + 0.16, 0.62)
 	_set_anim("Idle", true)
+	ModelUtils.enable_shadows(self, false)
 
 func _add_ring(radius: float) -> void:
 	team_ring = _make_ring(radius, BLUE if team == "blue" else RED, 0.8)
@@ -348,6 +427,9 @@ func _skeleton_key(skeleton: Skeleton3D, prefix: String) -> String:
 		names.append(skeleton.get_bone_name(i))
 	return prefix + "|" + "|".join(names)
 
+static func warmup() -> void:
+	_get_source_animations()
+
 static func _get_source_animations() -> Dictionary:
 	if not _source_animations.is_empty():
 		return _source_animations
@@ -373,6 +455,11 @@ func _build_library(skeleton: Skeleton3D, prefix: String) -> AnimationLibrary:
 		for i in range(animation.get_track_count() - 1, -1, -1):
 			var bone := animation.track_get_path(i).get_concatenated_subnames()
 			if bone == "" or skeleton.find_bone(bone) < 0:
+				animation.remove_track(i)
+			elif bone == "root":
+				# 动作库部分攻击/技能动画包含 root 骨骼位移（Root Motion）。
+				# MOBA 战斗中实体的实际位移由模拟层逻辑控制，模型动画必须保持原地（In-Place），
+				# 否则攻击后模型脱离地面的脚底光圈与指示环，且待机动画无 root 轨导致位移无法复原。
 				animation.remove_track(i)
 			else:
 				animation.track_set_path(i, NodePath(prefix + ":" + bone))
@@ -464,7 +551,8 @@ func set_snapshot(data: Dictionary, delta: float, alpha: float = 1.0, prev_xy: V
 	mp_ratio = clampf(float(data.get("mp", 0.0)) / maxf(1.0, float(data.get("max_mp", 1.0))), 0.0, 1.0)
 	_update_health_bar()
 	level = int(data.get("level", 1))
-	if level_label:
+	if level_label and level != _shown_level:
+		_shown_level = level
 		level_label.text = "Lv.%d" % level
 	haste = float(data.get("haste_timer", 0.0)) > 0.0
 	_update_dead_state(bool(data.get("alive", true)))
@@ -472,11 +560,18 @@ func set_snapshot(data: Dictionary, delta: float, alpha: float = 1.0, prev_xy: V
 func _update_health_bar() -> void:
 	if bar_material == null:
 		return
-	bar_material.set_shader_parameter("ratio", hp_ratio)
-	bar_material.set_shader_parameter("shield_ratio", shield_ratio)
-	if bar_mesh:
-		bar_mesh.visible = not dead or hp_ratio > 0.0
-	if mp_material:
+	if not is_equal_approx(hp_ratio, _shown_hp):
+		_shown_hp = hp_ratio
+		bar_material.set_shader_parameter("ratio", hp_ratio)
+	if not is_equal_approx(shield_ratio, _shown_shield):
+		_shown_shield = shield_ratio
+		bar_material.set_shader_parameter("shield_ratio", shield_ratio)
+	var show_bar := not dead or hp_ratio > 0.0
+	if bar_mesh and show_bar != _shown_bar_visible:
+		_shown_bar_visible = show_bar
+		bar_mesh.visible = show_bar
+	if mp_material and not is_equal_approx(mp_ratio, _shown_mp):
+		_shown_mp = mp_ratio
 		mp_material.set_shader_parameter("ratio", mp_ratio)
 	if mp_mesh:
 		mp_mesh.visible = not dead
@@ -486,6 +581,11 @@ func _update_health_bar() -> void:
 func _update_dead_state(alive: bool) -> void:
 	if alive and dead:
 		dead = false
+		_shown_hp = -1.0
+		_shown_shield = -1.0
+		_shown_mp = -1.0
+		_shown_level = -1
+		_shown_bar_visible = true
 		for player in animation_players:
 			if player:
 				player.stop()
@@ -501,6 +601,7 @@ func _update_dead_state(alive: bool) -> void:
 		death_timer = 2.4
 		_set_anim("Death01" if kind == "hero" else "Death_A", false)
 		action_timer = 0.0
+		_shown_hp = 0.0
 		if bar_material:
 			bar_material.set_shader_parameter("ratio", 0.0)
 		if team_ring:

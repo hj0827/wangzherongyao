@@ -10,6 +10,7 @@ signal pause_requested
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const MapIntel = preload("res://sim/map_intel.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
 const SkillButton = preload("res://scripts/ui/skill_button.gd")
@@ -48,6 +49,16 @@ var _kd_label: Label
 var _skill_q: SkillButton
 var _skill_e: SkillButton
 var _minimap: Minimap
+var _intel_panel: PanelContainer
+var _intel_title: Label
+var _intel_meta: Label
+var _intel_detail: Label
+var _intel_summary: Label
+var _intel_units: VBoxContainer
+var _intel_rows: Array[Label] = []
+var _intel_close: Button
+var _intel_point := Vector2.ZERO
+var _intel_valid := false
 var _portrait: TextureRect
 var _feed_box: VBoxContainer
 var _announce_panel: PanelContainer
@@ -55,6 +66,7 @@ var _announce_label: Label
 var _announce_tween: Tween
 var _death_overlay: Control
 var _death_countdown: Label
+var _death_killer_label: Label
 var _result_overlay: Control
 var _result_title: Label
 var _result_sub: Label
@@ -78,6 +90,7 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_build_top_bar()
 	_build_minimap()
+	_build_map_intel()
 	_build_feed()
 	_build_announcement()
 	_build_bottom_panel()
@@ -128,20 +141,142 @@ func _build_minimap() -> void:
 	panel.anchor_left = 0.0
 	panel.anchor_right = 0.0
 	panel.offset_left = 18.0
-	panel.offset_right = 250.0
+	panel.offset_right = 252.0
 	panel.offset_top = 18.0
-	panel.offset_bottom = 264.0
+	panel.offset_bottom = 286.0
 	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.82), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
 	add_child(panel)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 4)
 	panel.add_child(box)
 	_minimap = Minimap.new()
-	_minimap.custom_minimum_size = Vector2(206, 206)
+	_minimap.custom_minimum_size = Minimap.DISPLAY_SIZE
+	_minimap.location_clicked.connect(_on_minimap_location_clicked)
 	box.add_child(_minimap)
 	_objective_label = _make_label("防御塔 蓝 0 : 0 红", 12, GameTheme.MUTED)
 	_objective_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(_objective_label)
+	var hint := _make_label("点击地图查看区域情报", 11, Color(0.6, 0.68, 0.72, 0.8))
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(hint)
+
+func _build_map_intel() -> void:
+	_intel_panel = PanelContainer.new()
+	_intel_panel.anchor_left = 0.0
+	_intel_panel.anchor_top = 0.0
+	_intel_panel.anchor_right = 0.0
+	_intel_panel.anchor_bottom = 0.0
+	_intel_panel.offset_left = 18.0
+	_intel_panel.offset_right = 390.0
+	_intel_panel.offset_top = 294.0
+	_intel_panel.offset_bottom = 502.0
+	_intel_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_intel_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.04, 0.055, 0.94), Color(0.55, 0.44, 0.24, 0.85), 1, 9, 10, 0.5))
+	_intel_panel.visible = false
+	add_child(_intel_panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	_intel_panel.add_child(box)
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 8)
+	box.add_child(header)
+	_intel_title = _make_label("地图情报", 18, GameTheme.GOLD_LIGHT)
+	_intel_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(_intel_title)
+	_intel_close = Button.new()
+	_intel_close.text = "×"
+	_intel_close.flat = true
+	_intel_close.focus_mode = Control.FOCUS_NONE
+	_intel_close.custom_minimum_size = Vector2(48, 48)
+	_intel_close.add_theme_font_size_override("font_size", 20)
+	_intel_close.add_theme_color_override("font_color", GameTheme.MUTED)
+	_intel_close.add_theme_color_override("font_hover_color", GameTheme.GOLD_LIGHT)
+	for state in ["normal", "hover", "pressed"]:
+		_intel_close.add_theme_stylebox_override(state, StyleBoxEmpty.new())
+	_intel_close.pressed.connect(_close_intel)
+	header.add_child(_intel_close)
+	_intel_meta = _make_label("", 12, GameTheme.MUTED)
+	box.add_child(_intel_meta)
+	_intel_detail = _make_label("", 11, Color(0.66, 0.72, 0.76))
+	box.add_child(_intel_detail)
+	_intel_summary = _make_label("", 12, GameTheme.TEXT)
+	box.add_child(_intel_summary)
+	_intel_units = VBoxContainer.new()
+	_intel_units.add_theme_constant_override("separation", 1)
+	box.add_child(_intel_units)
+	_intel_rows.clear()
+	for i in MapIntel.MAX_UNITS:
+		var row := _make_label("", 12, GameTheme.TEXT)
+		row.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
+		row.add_theme_constant_override("outline_size", 2)
+		row.visible = false
+		_intel_units.add_child(row)
+		_intel_rows.append(row)
+
+func _on_minimap_location_clicked(world: Vector2) -> void:
+	_intel_point = world
+	_intel_valid = true
+	_intel_panel.visible = true
+	_refresh_intel()
+
+func _close_intel() -> void:
+	_intel_valid = false
+	if _intel_panel != null:
+		_intel_panel.visible = false
+	if _minimap != null:
+		_minimap.clear_inspect_point()
+
+func _refresh_intel() -> void:
+	if not _intel_valid or _intel_panel == null:
+		return
+	var report := MapIntel.inspect(snapshot, _intel_point, local_owner, local_team)
+	var region: Dictionary = report.region
+	_intel_title.text = "地图情报 · %s" % str(region.get("name", "未知"))
+	var distance_text := "距你 --"
+	if bool(report.get("hero_found", false)):
+		distance_text = "距你 %.1f m" % float(report.get("hero_distance", 0.0))
+	_intel_meta.text = "坐标 (%.1f, %.1f)   ·   %s" % [_intel_point.x, _intel_point.y, distance_text]
+	_intel_detail.text = str(region.get("note", ""))
+	var counts: Dictionary = report.get("counts", {})
+	var blue_count := int(counts.get("blue", 0))
+	var red_count := int(counts.get("red", 0))
+	var total := int(report.get("total", 0))
+	if total == 0:
+		_intel_summary.text = "附近 %d 米内没有可观察单位" % int(round(float(report.get("radius", MapIntel.INSPECT_RADIUS))))
+		_intel_summary.add_theme_color_override("font_color", GameTheme.MUTED)
+	else:
+		_intel_summary.text = "附近单位   蓝方 %d   ·   红方 %d" % [blue_count, red_count]
+		_intel_summary.add_theme_color_override("font_color", GameTheme.TEXT)
+	var units: Array = report.get("units", [])
+	for index in _intel_rows.size():
+		var row := _intel_rows[index]
+		if index < units.size():
+			_apply_intel_row(row, units[index])
+		else:
+			row.visible = false
+
+func _apply_intel_row(label: Label, unit: Dictionary) -> void:
+	var kind := str(unit.get("kind", ""))
+	var mark := "●"
+	if kind == "tower":
+		mark = "■"
+	elif kind == "base":
+		mark = "◆"
+	elif kind == "minion":
+		mark = "·"
+	var team := str(unit.get("team", "blue"))
+	var text := "%s %s（%s" % [mark, str(unit.get("label", "单位")), "蓝方" if team == "blue" else "红方"]
+	if int(unit.get("level", 0)) > 0:
+		text += " Lv.%d" % int(unit.get("level", 0))
+	text += "）  %d/%d   ·   %.1f m" % [
+		int(ceil(float(unit.get("hp", 0.0)))),
+		int(unit.get("max_hp", 1.0)),
+		float(unit.get("distance", 0.0)),
+	]
+	label.text = text
+	label.add_theme_color_override("font_color", GameTheme.BLUE if team == "blue" else GameTheme.RED)
+	label.visible = true
 
 func _build_feed() -> void:
 	_feed_box = VBoxContainer.new()
@@ -405,6 +540,9 @@ func _build_death_overlay() -> void:
 	var title := _make_label("阵  亡", 72, Color(0.92, 0.42, 0.35), "TitleLabel")
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	center.add_child(title)
+	_death_killer_label = _make_label("", 20, Color(1.0, 0.8, 0.4))
+	_death_killer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	center.add_child(_death_killer_label)
 	_death_countdown = _make_label("复活倒计时 6.0", 20, GameTheme.TEXT)
 	_death_countdown.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	center.add_child(_death_countdown)
@@ -563,10 +701,18 @@ func update_snapshot(data: Dictionary) -> void:
 	if not ended and not alive and not _result_overlay.visible:
 		_death_overlay.visible = true
 		_death_countdown.text = "复活倒计时 %.1f" % float(local.get("respawn_timer", 0.0))
+		var killer_name := str(local.get("last_killer_name", ""))
+		if killer_name != "":
+			_death_killer_label.text = "被 %s 击败" % killer_name
+			_death_killer_label.visible = true
+		else:
+			_death_killer_label.visible = false
 	else:
 		_death_overlay.visible = false
 
 	_minimap.set_snapshot(data, local_owner, local_team)
+	if _intel_valid:
+		_refresh_intel()
 	if ended and not result_shown:
 		show_result(str(data.get("winner", "")), local)
 

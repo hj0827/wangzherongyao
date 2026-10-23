@@ -9,6 +9,7 @@ const InputAssist = preload("res://scripts/game/input_assist.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
 const CinematicBackground = preload("res://scripts/ui/cinematic_background.gd")
 const DepthCard = preload("res://scripts/ui/depth_card.gd")
+const UnitVisual = preload("res://scripts/game/unit_visual.gd")
 
 const HERO_ORDER := ["blade", "mage", "tank", "archer"]
 const GAME_PORT := 24680
@@ -55,7 +56,14 @@ var _background: Control
 
 var _hero_cards := {}
 var _hero_marks := {}
+var _hero_videos := {}
 var _hero_confirm: Button
+var _quote_banner: PanelContainer = null
+var _quote_label: Label = null
+var _loading_screen: Control = null
+var _loading_layer: CanvasLayer = null
+var _loading_progress: ProgressBar = null
+var _loading_status: Label = null
 
 var _online_status: Label
 var _name_input: LineEdit
@@ -75,6 +83,7 @@ func _ready() -> void:
 	_connect_session()
 	_build_shell()
 	_show_menu()
+	UnitVisual.warmup()
 
 func _notification(what: int) -> void:
 	if what != NOTIFICATION_WM_GO_BACK_REQUEST:
@@ -135,6 +144,8 @@ func _build_shell() -> void:
 func _show_menu() -> void:
 	screen = "menu"
 	_ui.visible = true
+	if _background != null:
+		_background.set_audio_enabled(true)
 	_clear_screen()
 	discovery.stop()
 	_discovery_hosting = false
@@ -237,10 +248,13 @@ func _on_mode_pressed(mode: String, online: bool) -> void:
 
 func _show_hero_select() -> void:
 	screen = "hero_select"
+	if _background != null:
+		_background.set_audio_enabled(false)
 	_clear_screen()
 	discovery.stop()
 	_hero_cards.clear()
 	_hero_marks.clear()
+	_hero_videos.clear()
 
 	var margin := _full_margin(64, 48)
 	_screen_root.add_child(margin)
@@ -274,6 +288,20 @@ func _show_hero_select() -> void:
 	for hero_type in HERO_ORDER:
 		cards.add_child(_make_hero_card(hero_type))
 
+	# 英雄台词展示横幅（殿堂级金色边框 + 发光台词）
+	_quote_banner = PanelContainer.new()
+	var banner_style := GameTheme.style(Color(0.04, 0.07, 0.1, 0.92), GameTheme.GOLD, 1, 10)
+	banner_style.content_margin_left = 28
+	banner_style.content_margin_right = 28
+	banner_style.content_margin_top = 8
+	banner_style.content_margin_bottom = 8
+	_quote_banner.add_theme_stylebox_override("panel", banner_style)
+	_quote_banner.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	column.add_child(_quote_banner)
+	_quote_label = _make_label("", 16, GameTheme.GOLD_LIGHT)
+	_quote_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_quote_banner.add_child(_quote_label)
+
 	var footer := HBoxContainer.new()
 	footer.add_theme_constant_override("separation", 18)
 	column.add_child(footer)
@@ -304,12 +332,37 @@ func _make_hero_card(hero_type: String) -> PanelContainer:
 	var box: VBoxContainer = card.get_meta("box")
 	box.add_theme_constant_override("separation", 7)
 
+	# 英雄立绘与专属动态视频容器
+	var preview_box := Control.new()
+	preview_box.custom_minimum_size = Vector2(0, 236)
+	preview_box.clip_contents = true
+	box.add_child(preview_box)
+
 	var portrait := TextureRect.new()
 	portrait.texture = load(GameTheme.portrait_path(hero_type))
 	portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-	portrait.custom_minimum_size = Vector2(0, 236)
-	box.add_child(portrait)
+	portrait.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	preview_box.add_child(portrait)
+
+	var video_path: String = str(definition.get("video_path", ""))
+	if video_path != "" and ResourceLoader.exists(video_path):
+		var video_holder := Control.new()
+		video_holder.clip_contents = true
+		video_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		video_holder.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		preview_box.add_child(video_holder)
+
+		var video_player := VideoStreamPlayer.new()
+		# 视频流延迟到真正选中该英雄时再加载，避免进入选人界面时同时解码四路视频。
+		video_player.expand = true
+		video_player.loop = true
+		video_player.visible = false
+		video_holder.add_child(video_player)
+		_hero_videos[hero_type] = video_player
+		# 16:9 素材按「cover」裁切：超宽屏也不会把人物横向拉扁。
+		preview_box.resized.connect(_fit_hero_video.bind(preview_box, video_player))
+		_fit_hero_video(preview_box, video_player)
 
 	var name_row := HBoxContainer.new()
 	name_row.add_theme_constant_override("separation", 10)
@@ -351,6 +404,17 @@ func _make_hero_card(hero_type: String) -> PanelContainer:
 	_ignore_mouse_children(card)
 	return card
 
+func _fit_hero_video(box: Control, video: VideoStreamPlayer) -> void:
+	var area := box.size
+	if area.x <= 0.0 or area.y <= 0.0:
+		return
+	# 展示视频统一为 16:9。按 cover 放大再居中裁切，超宽屏也不会变形。
+	var video_size := Vector2(area.x, area.x * 9.0 / 16.0)
+	if video_size.y < area.y:
+		video_size = Vector2(area.y * 16.0 / 9.0, area.y)
+	video.size = video_size
+	video.position = (area - video_size) * 0.5
+
 func _skill_line(slot: String, skill_name: String, data: Dictionary) -> Label:
 	var detail := ""
 	if float(data.get("damage", 0.0)) > 0.0:
@@ -391,13 +455,127 @@ func _refresh_hero_selection() -> void:
 		style.content_margin_bottom = 6
 		card.add_theme_stylebox_override("panel", style)
 		_hero_marks[hero_type].visible = selected
+
+		# 控制对应英雄视频播放（选中时才加载视频流）
+		var video: VideoStreamPlayer = _hero_videos.get(hero_type)
+		if video != null:
+			if selected:
+				if video.stream == null:
+					var video_path: String = str(HeroDefs.get_hero(hero_type).get("video_path", ""))
+					if video_path != "" and ResourceLoader.exists(video_path):
+						video.stream = load(video_path)
+				video.visible = video.stream != null
+				if video.visible and is_inside_tree() and not video.is_playing():
+					video.play()
+			else:
+				video.visible = false
+				if is_inside_tree() and video.is_playing():
+					video.stop()
+
 	if _hero_confirm != null:
 		_hero_confirm.text = "确 认 出 战   ·   %s" % str(HeroDefs.get_hero(local_hero).name)
+
+	var definition: Dictionary = HeroDefs.get_hero(local_hero)
+	var quote: String = str(definition.get("quote", definition.title))
+
+	# 英雄台词展示横幅更新
+	if _quote_label != null:
+		_quote_label.text = "【%s】「%s」" % [definition.name, quote]
+		if _quote_banner != null and is_inside_tree():
+			_quote_banner.visible = true
+			_quote_banner.modulate.a = 0.0
+			var tween := create_tween()
+			if tween:
+				tween.tween_property(_quote_banner, "modulate:a", 1.0, 0.25)
+
 	var hint := _screen_root.find_child("SelectedHint", true, false) as Label
 	if hint != null:
-		var definition: Dictionary = HeroDefs.get_hero(local_hero)
-		hint.text = "%s · %s     %s" % [definition.name, definition.role, definition.title]
+		hint.text = "%s · %s     「%s」" % [definition.name, definition.role, quote]
 		hint.add_theme_color_override("font_color", GameTheme.GOLD_LIGHT)
+
+func _show_loading_transition(hero_type: String) -> void:
+	if _loading_layer != null and is_instance_valid(_loading_layer):
+		_loading_layer.queue_free()
+	_loading_layer = CanvasLayer.new()
+	_loading_layer.name = "LoadingLayer"
+	# 独立顶层：主菜单 UI 隐藏后加载遮罩仍能覆盖战场与 HUD，直到构建完成。
+	_loading_layer.layer = 20
+	add_child(_loading_layer)
+
+	_loading_screen = Control.new()
+	_loading_screen.name = "LoadingScreen"
+	_loading_screen.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_loading_screen.theme = GameTheme.theme()
+	_loading_layer.add_child(_loading_screen)
+
+	var bg := ColorRect.new()
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.color = Color(0.015, 0.025, 0.04, 0.98)
+	_loading_screen.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_loading_screen.add_child(center)
+
+	var column := VBoxContainer.new()
+	column.custom_minimum_size = Vector2(560, 0)
+	column.add_theme_constant_override("separation", 14)
+	center.add_child(column)
+
+	var def := HeroDefs.get_hero(hero_type)
+	var kicker := _make_label("E N T E R I N G   T H E   C A N Y O N", 13, GameTheme.GOLD)
+	kicker.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(kicker)
+	var title := _make_label("正在进入峡谷战场", 38, GameTheme.GOLD_LIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(title)
+
+	var sub := _make_label("%s  ·  %s     「%s」" % [def.name, def.role, def.get("quote", def.title)], 17, GameTheme.TEXT)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(sub)
+
+	_loading_status = _make_label("正在构筑峡谷战场…   0%", 13, GameTheme.MUTED)
+	_loading_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(_loading_status)
+
+	_loading_progress = ProgressBar.new()
+	_loading_progress.custom_minimum_size = Vector2(0, 8)
+	_loading_progress.show_percentage = false
+	var style_bg := StyleBoxFlat.new()
+	style_bg.bg_color = Color(0.08, 0.12, 0.16)
+	style_bg.set_corner_radius_all(4)
+	var style_fg := StyleBoxFlat.new()
+	style_fg.bg_color = GameTheme.GOLD
+	style_fg.set_corner_radius_all(4)
+	_loading_progress.add_theme_stylebox_override("background", style_bg)
+	_loading_progress.add_theme_stylebox_override("fill", style_fg)
+	_loading_progress.value = 0.0
+	column.add_child(_loading_progress)
+
+func _on_arena_build_progress(value: float, text: String) -> void:
+	if _loading_progress != null:
+		_loading_progress.value = clampf(value, 0.0, 1.0) * 100.0
+	if _loading_status != null:
+		_loading_status.text = "%s   %d%%" % [text, int(round(clampf(value, 0.0, 1.0) * 100.0))]
+
+func _hide_loading_transition() -> void:
+	if _loading_layer == null or not is_instance_valid(_loading_layer):
+		return
+	var layer := _loading_layer
+	var screen := _loading_screen
+	_loading_layer = null
+	_loading_screen = null
+	_loading_progress = null
+	_loading_status = null
+	if screen != null and is_instance_valid(screen):
+		var tween := create_tween()
+		tween.tween_property(screen, "modulate:a", 0.0, 0.28)
+		tween.chain().tween_callback(func():
+			if is_instance_valid(layer):
+				layer.queue_free()
+		)
+	else:
+		layer.queue_free()
 
 func _on_hero_confirm() -> void:
 	if _pending_online:
@@ -829,8 +1007,15 @@ func _leave_online() -> void:
 func _enter_match(config: Dictionary, active_session: Object, authoritative: bool, owner: String) -> void:
 	screen = "game"
 	discovery.stop()
-	_ui.visible = false
 	_lobby_signature = ""
+
+	for vid in _hero_videos.values():
+		if is_instance_valid(vid) and vid is VideoStreamPlayer:
+			vid.stop()
+
+	_show_loading_transition(local_hero)
+	_ui.visible = false
+	await get_tree().process_frame
 
 	_arena = Arena.new()
 	_arena.name = "Arena"
@@ -840,14 +1025,27 @@ func _enter_match(config: Dictionary, active_session: Object, authoritative: boo
 		"local_owner": owner,
 		"session": active_session,
 	})
+	_arena.build_progress.connect(_on_arena_build_progress)
 	add_child(_arena)
 	_arena.exit_requested.connect(_leave_game)
+
+	# 遮罩下分帧构建：构建完成后再多渲染两帧，让首批材质/着色器在
+	# 遮罩后面完成首次编译，避免揭幕瞬间一次卡死。
+	while is_instance_valid(_arena) and not _arena.build_complete:
+		await get_tree().process_frame
+	if not is_instance_valid(_arena) or screen != "game":
+		_hide_loading_transition()
+		return
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_hide_loading_transition()
 
 func _leave_game() -> void:
 	if session != null:
 		session.close()
 	discovery.stop()
 	_discovery_hosting = false
+	_hide_loading_transition()
 	if is_instance_valid(_arena):
 		_arena.queue_free()
 	_arena = null
@@ -899,7 +1097,7 @@ func _on_match_started(config: Dictionary) -> void:
 
 func _on_session_error(code: String) -> void:
 	if screen == "game":
-		if is_instance_valid(_arena):
+		if is_instance_valid(_arena) and _arena.hud != null:
 			_arena.hud.add_feed(_error_text(code), GameTheme.RED)
 			_arena.hud.announce("连接中断", GameTheme.RED, 2.0)
 		if code == "host_disconnected":
@@ -953,14 +1151,24 @@ func _clear_screen() -> void:
 		return
 	for child in _screen_root.get_children():
 		_screen_root.remove_child(child)
-		child.queue_free()
+		_queue_free_tree(child)
 	_hero_cards.clear()
 	_hero_marks.clear()
+	_hero_videos.clear()
 	_hero_confirm = null
+	_quote_banner = null
+	_quote_label = null
 	_online_status = null
 	_name_input = null
 	_offer_box = null
 	_lobby_status = null
+
+func _queue_free_tree(node: Node) -> void:
+	# 逐节点标记：只 queue_free 根节点时，子树各节点在帧末前都不会处于
+	# 「已排队删除」状态，视频/模型资源会多驻留一整个切换帧。
+	for child in node.get_children():
+		_queue_free_tree(child)
+	node.queue_free()
 
 func _menu_button(text: String) -> Button:
 	var button := Button.new()

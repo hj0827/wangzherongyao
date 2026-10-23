@@ -32,6 +32,8 @@ func _initialize() -> void:
 	_run()
 
 func _run() -> void:
+	while not arena.build_complete:
+		await process_frame
 	await create_timer(3.0).timeout
 	var samples: Array[float] = []
 	for i in 12:

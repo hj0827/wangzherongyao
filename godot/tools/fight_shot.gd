@@ -43,7 +43,9 @@ func _fast_forward(seconds: float) -> void:
 	arena.hud.update_snapshot(arena.current_snapshot)
 
 func _run() -> void:
-	await create_timer(1.2).timeout
+	while not arena.build_complete:
+		await process_frame
+	await create_timer(0.4).timeout
 	var hero: Dictionary = arena.sim.get_hero_by_player("p1")
 	hero.pos = Vector2(0.0, 3.0)
 	_fast_forward(18.0)

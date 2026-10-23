@@ -3,6 +3,9 @@ extends RefCounted
 const BOUNDS := 58.0
 const BASE_RADIUS := 7.0
 const TOWER_RADIUS := 2.0
+# 河道平面宽 18m；兵线最外层路面宽 7.5m。区域判定（河道 / 兵线 / 野区）共用这两个值。
+const RIVER_HALF_WIDTH := 9.0
+const LANE_HALF_WIDTH := 3.75
 # 泉水（快速恢复区）半径。要盖住出生点（距基地 8.2），
 # 同时基地脚下的队伍色大圈也用它，让玩家一眼看出泉水边界。
 const FOUNTAIN_RADIUS := 10.0

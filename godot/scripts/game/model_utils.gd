@@ -25,13 +25,22 @@ static func relative_aabb(node: Node, xform: Transform3D = Transform3D.IDENTITY)
 			box = box.merge(child_box)
 	return box
 
+static var _scene_box_cache: Dictionary = {}
+
 static func fit_scene(scene: PackedScene, target_height: float, max_width := 0.0) -> Node3D:
 	var wrapper := Node3D.new()
 	var fit_root := Node3D.new()
 	wrapper.add_child(fit_root)
 	var model: Node3D = scene.instantiate()
 	fit_root.add_child(model)
-	var box := relative_aabb(model)
+	var path := scene.resource_path
+	var box: AABB
+	if path != "" and _scene_box_cache.has(path):
+		box = _scene_box_cache[path]
+	else:
+		box = relative_aabb(model)
+		if path != "":
+			_scene_box_cache[path] = box
 	if box.size.y <= 0.000001:
 		return wrapper
 	var factor := target_height / box.size.y

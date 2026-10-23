@@ -1,6 +1,9 @@
 extends Node3D
 
 signal exit_requested
+# 分帧构建进度：0..1 与阶段说明，交给外层加载遮罩显示。
+signal build_progress(value: float, text: String)
+signal ready_for_battle
 
 const MatchSim = preload("res://sim/match_sim.gd")
 const MapData = preload("res://sim/map_data.gd")
@@ -115,6 +118,17 @@ var _local_input := {
 }
 var _started_announcement := false
 
+# --- 高性能对象池与复用（解决高频分配造成的对战卡顿与 GC 抖动） ---
+const FONT_SC := preload("res://assets/fonts/NotoSansSC.ttf")
+# 首波每方 9 个小兵；预热两波左右，保证前几波刷新不再单帧实例化模型。
+const MINION_PREWARM_PER_TEAM := 18
+const MINION_POOL_LIMIT := 40
+var _minion_pool_blue: Array[UnitVisual] = []
+var _minion_pool_red: Array[UnitVisual] = []
+var _damage_labels_pool: Array[Label3D] = []
+var _hit_particles_pool: Array[GPUParticles3D] = []
+var build_complete := false
+
 func configure(options: Dictionary) -> void:
 	config = options.get("config", {}).duplicate(true)
 	authoritative = bool(options.get("authoritative", true))
@@ -132,14 +146,31 @@ func configure(options: Dictionary) -> void:
 
 func _ready() -> void:
 	touch_mode = InputAssist.wants_touch_controls(config, OS.has_feature("mobile"), DisplayServer.is_touchscreen_available())
+	_build_staged()
+
+# 战场构建拆成多帧：进场时加载遮罩保持可见，每帧只做一小段，
+# 避免一次性实例化近千个节点造成数秒冻结与着色器编译尖峰。
+func _build_staged() -> void:
+	_emit_build(0.02, "架起天空与光照")
 	_build_environment()
 	_props_root = Node3D.new()
 	_props_root.name = "Map"
 	add_child(_props_root)
+	await _next_frame()
+
+	_emit_build(0.08, "铺设峡谷地面")
 	_build_ground()
-	_build_lanes()
+	await _next_frame()
+
+	_emit_build(0.16, "铺开三路兵线")
+	await _build_lanes()
 	_build_river()
-	_build_scenery()
+	await _next_frame()
+
+	_emit_build(0.28, "种下峡谷植被")
+	await _build_scenery()
+
+	_emit_build(0.42, "摆放战场设施")
 	_units_root = Node3D.new()
 	_units_root.name = "Units"
 	add_child(_units_root)
@@ -149,29 +180,84 @@ func _ready() -> void:
 	_effects_root = Node3D.new()
 	_effects_root.name = "Effects"
 	add_child(_effects_root)
+	_init_vfx_pools()
 	_build_camera()
 	_build_aim_marker()
 	_build_move_marker()
 	_build_range_indicators()
 	_build_ambient_particles()
+	await _next_frame()
 
+	_emit_build(0.5, "点亮英雄与防御塔")
 	if sim != null:
 		current_snapshot = sim.snapshot()
 		_sync_structures(current_snapshot, true)
-		_sync_units(current_snapshot, 0.0)
-		if session != null and session.has_method("is_online") and session.is_online():
-			_local_id = int(local_owner) if local_owner.is_valid_int() else -1
+		await _next_frame()
+		await _create_initial_views_staged(current_snapshot)
 
+	_emit_build(0.72, "装配战斗界面")
 	_build_hud()
 	_update_camera(1.0, true)
 	if current_snapshot.is_empty():
 		hud.update_snapshot({})
 	else:
 		hud.update_snapshot(current_snapshot)
+	await _next_frame()
+
+	_emit_build(0.82, "预热战场单位")
+	await _prewarm_minion_pool()
+
+	if session != null and session.has_method("is_online") and session.is_online():
+		_local_id = int(local_owner) if local_owner.is_valid_int() else -1
+
+	build_complete = true
+	_emit_build(1.0, "进入峡谷")
+	ready_for_battle.emit()
 	await get_tree().create_timer(0.45).timeout
 	if is_inside_tree():
 		hud.announce("对 决 开 始", GameTheme.GOLD_LIGHT, 1.5)
 		_started_announcement = true
+
+func _next_frame() -> void:
+	await get_tree().process_frame
+
+func _emit_build(value: float, text: String) -> void:
+	build_progress.emit(clampf(value, 0.0, 1.0), text)
+
+# 初始单位逐个入场：每个英雄/小兵建好后再让出一帧，确保加载界面持续响应。
+func _create_initial_views_staged(snapshot: Dictionary) -> void:
+	var created := 0
+	for entity in snapshot.get("entities", []):
+		var entity_type := str(entity.get("type", ""))
+		if entity_type != "hero" and entity_type != "minion":
+			continue
+		if entity_type == "minion" and not bool(entity.get("alive", false)):
+			continue
+		var entity_id := int(entity.get("id", -1))
+		if _views.has(entity_id):
+			continue
+		var view := _create_unit_view(entity)
+		_views[entity_id] = view
+		created += 1
+		if created % 2 == 0:
+			await _next_frame()
+	_sync_units(snapshot, 0.0)
+
+# 预热小兵模型（不进入 _views）：第一波刷新只做对象复用，不再实例化骨骼与动画。
+func _prewarm_minion_pool() -> void:
+	for team in ["blue", "red"]:
+		var pool := _minion_pool_blue if team == "blue" else _minion_pool_red
+		var made := 0
+		while pool.size() < MINION_PREWARM_PER_TEAM:
+			var view := UnitVisual.new()
+			view.setup("minion", team, "minion", "", false)
+			_units_root.add_child(view)
+			view.visible = false
+			view.recycle()
+			pool.append(view)
+			made += 1
+			if made % 2 == 0:
+				await _next_frame()
 
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -212,6 +298,8 @@ func _exit_game() -> void:
 	exit_requested.emit()
 
 func _unhandled_input(event: InputEvent) -> void:
+	if not build_complete:
+		return
 	if touch_mode and _handle_touch_event(event):
 		return
 	if event is InputEventMouseButton:
@@ -321,6 +409,8 @@ func _close_pause() -> void:
 	hud.show_pause(false, session != null)
 
 func _process(delta: float) -> void:
+	if not build_complete:
+		return
 	if session != null and session.has_method("poll"):
 		session.poll()
 	if _paused:
@@ -551,6 +641,8 @@ func receive_snapshot(data: Dictionary) -> void:
 	})
 	while _snapshot_buffer.size() > NET_BUFFER_LIMIT:
 		_snapshot_buffer.pop_front()
+	if not build_complete:
+		return
 	_process_events(data.get("events", []))
 	_sync_structures(current_snapshot, false)
 	if hud:
@@ -936,6 +1028,7 @@ func _build_lanes() -> void:
 		_props_root.add_child(_lane_ribbon(path, 7.5, 0.008, edge_material))
 		_props_root.add_child(_lane_ribbon(path, 7.0, 0.012, outer_material))
 		_props_root.add_child(_lane_ribbon(path, 5.2, 0.022, inner_material))
+		await _next_frame()
 
 	var plaza_material := StandardMaterial3D.new()
 	plaza_material.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
@@ -1077,6 +1170,8 @@ func _build_scenery() -> void:
 		tree.rotation.y = rng.randf_range(0.0, TAU)
 		ModelUtils.enable_shadows(tree, false)
 		_props_root.add_child(tree)
+		if i % 8 == 7:
+			await _next_frame()
 
 	for i in 18:
 		var angle := rng.randf_range(0.0, TAU)
@@ -1090,6 +1185,8 @@ func _build_scenery() -> void:
 		tree.rotation.y = rng.randf_range(0.0, TAU)
 		ModelUtils.enable_shadows(tree, false)
 		_props_root.add_child(tree)
+		if i % 6 == 5:
+			await _next_frame()
 
 	for i in 16:
 		var angle := rng.randf_range(0.0, TAU)
@@ -1105,6 +1202,8 @@ func _build_scenery() -> void:
 		rock.rotation.y = rng.randf_range(0.0, TAU)
 		ModelUtils.enable_shadows(rock, false)
 		_props_root.add_child(rock)
+		if i % 6 == 5:
+			await _next_frame()
 
 	for i in 12:
 		var angle := TAU * float(i) / 12.0 + 0.16
@@ -1117,9 +1216,13 @@ func _build_scenery() -> void:
 		mountain.rotation.y = rng.randf_range(0.0, TAU)
 		ModelUtils.enable_shadows(mountain, false)
 		_props_root.add_child(mountain)
+		if i % 4 == 3:
+			await _next_frame()
 
 	_build_base_decor(MapData.BLUE_BASE, "blue", rng)
+	await _next_frame()
 	_build_base_decor(MapData.RED_BASE, "red", rng)
+	await _next_frame()
 
 func _build_base_decor(base: Vector2, team: String, rng: RandomNumberGenerator) -> void:
 	var toward := (Vector2.ZERO - base).normalized()
@@ -1188,11 +1291,13 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 	if snapshot.is_empty():
 		return
 	_local_entity_id = -1
+	var seen_ids := {}
 	for entity in snapshot.get("entities", []):
 		var entity_type := str(entity.get("type", ""))
 		if entity_type != "hero" and entity_type != "minion":
 			continue
 		var entity_id := int(entity.get("id", -1))
+		seen_ids[entity_id] = true
 		if entity_type == "hero" and str(entity.get("owner_id", "")) == local_owner:
 			_local_entity_id = entity_id
 		var alive := bool(entity.get("alive", false))
@@ -1201,7 +1306,7 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 			if entity_type == "minion" and not alive:
 				continue
 			if entity_type == "hero" or alive:
-				view = _create_unit_view(entity)
+				view = _acquire_unit_view(entity)
 				_views[entity_id] = view
 		if view == null:
 			continue
@@ -1209,6 +1314,37 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 		var prev_xy: Vector2 = _render_prev_positions.get(entity_id, Vector2(INF, INF))
 		view.set_snapshot(entity, delta, _render_alpha, prev_xy)
 		view.process_visual(delta)
+
+	# 回收死亡完成或在快照中移除的小兵，杜绝死兵泄漏与每帧遍历浪费
+	var to_recycle: Array[int] = []
+	for eid in _views:
+		var view: UnitVisual = _views[eid]
+		if view != null and view.kind == "minion":
+			if view.can_recycle() or not seen_ids.has(eid):
+				to_recycle.append(eid)
+	for eid in to_recycle:
+		var view: UnitVisual = _views[eid]
+		_views.erase(eid)
+		if view:
+			view.recycle()
+			var pool := _minion_pool_blue if view.team == "blue" else _minion_pool_red
+			if pool.size() < MINION_POOL_LIMIT:
+				pool.append(view)
+			else:
+				view.queue_free()
+
+func _acquire_unit_view(entity: Dictionary) -> UnitVisual:
+	var entity_type := str(entity.get("type", "hero"))
+	var team := str(entity.get("team", "blue"))
+	var pos := Vector3(float(entity.get("x", 0.0)), 0.0, float(entity.get("y", 0.0)))
+	if entity_type == "minion":
+		var pool := _minion_pool_blue if team == "blue" else _minion_pool_red
+		if not pool.is_empty():
+			var view: UnitVisual = pool.pop_back()
+			view.reset_minion(team, pos)
+			view.set_snapshot(entity, 1.0)
+			return view
+	return _create_unit_view(entity)
 
 func _create_unit_view(entity: Dictionary) -> UnitVisual:
 	var view := UnitVisual.new()
@@ -1249,7 +1385,8 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 		var max_hp := maxf(1.0, float(entity.get("max_hp", 1.0)))
 		var ratio := clampf(hp / max_hp, 0.0, 1.0)
 		var bar_mat: ShaderMaterial = record.get("bar_mat")
-		if bar_mat:
+		if bar_mat and not is_equal_approx(float(record.get("ratio", -1.0)), ratio):
+			record["ratio"] = ratio
 			bar_mat.set_shader_parameter("ratio", ratio)
 
 func _create_structure_view(entity: Dictionary) -> Dictionary:
@@ -1518,43 +1655,130 @@ func _handle_death_event(event: Dictionary) -> void:
 		_explosion(pos + Vector3(0, 0.8, 0), Color(0.85, 0.5, 0.3), 24)
 		var hero_id := int(event.get("hero", -1))
 		var view: UnitVisual = _views.get(hero_id)
-		var victim := view.display_name if view else "英雄"
-		var color := BLUE if team == "blue" else RED
-		hud.add_feed("%s 被击败" % victim, color)
+		var victim := str(event.get("victim_name", view.display_name if view else "英雄"))
+		var killer_id := int(event.get("killer", -1))
+		var killer_name := str(event.get("killer_name", ""))
+		var killer_type := str(event.get("killer_type", ""))
+		var killer_team := str(event.get("killer_team", ""))
+		if killer_name == "" and killer_id >= 0:
+			var kview: UnitVisual = _views.get(killer_id)
+			if kview:
+				killer_name = kview.display_name
+		if killer_name == "":
+			killer_name = "防御塔" if killer_type == "tower" else ("小兵" if killer_type == "minion" else "战场机关")
+
+		var is_local_victim := (hero_id == _local_entity_id)
+		var is_local_killer := (killer_id == _local_entity_id)
+
 		if not _first_blood:
 			_first_blood = true
-			hud.announce("第一滴血", GameTheme.GOLD_LIGHT, 1.5)
+			hud.announce("第一滴血", GameTheme.GOLD_LIGHT, 2.0)
+		elif is_local_killer:
+			hud.announce("你击败了敌方英雄！", GameTheme.GOLD_LIGHT, 1.8)
+		elif is_local_victim:
+			hud.announce("你被 %s 击败！" % killer_name, RED, 2.0)
+		elif killer_team == local_team and team != local_team:
+			hud.announce("%s 击败了 %s" % [killer_name, victim], BLUE, 1.6)
+		elif killer_team != local_team and team == local_team:
+			hud.announce("友方 %s 被击败" % victim, RED, 1.6)
+
+		var feed_color := GameTheme.GOLD_LIGHT if is_local_killer else (RED if is_local_victim else (BLUE if killer_team == local_team else RED))
+		if killer_type == "hero":
+			hud.add_feed("%s 击败了 %s" % [killer_name, victim], feed_color)
+		else:
+			hud.add_feed("%s 被 %s 击败" % [victim, killer_name], feed_color)
 	elif entity_type == "minion":
 		_spawn_particles(pos, Color(0.75, 0.7, 0.6), 5, 2.0, 0.05, 0.4)
+
+func _init_vfx_pools() -> void:
+	if _effects_root == null:
+		return
+	# 预热飘字 Label3D 池（24个），杜绝每次受击 new / load 字体 / queue_free
+	for i in 24:
+		var label := Label3D.new()
+		label.font = FONT_SC
+		label.font_size = 64
+		label.pixel_size = 0.005
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.no_depth_test = true
+		label.outline_size = 12
+		label.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
+		label.visible = false
+		_effects_root.add_child(label)
+		_damage_labels_pool.append(label)
+
+	# 预热打击粒子池（12个 GPUParticles3D），预先进入渲染树并预热着色器
+	for i in 12:
+		var p := GPUParticles3D.new()
+		p.amount = 14
+		p.lifetime = 0.55
+		p.one_shot = true
+		p.explosiveness = 0.95
+		var process := ParticleProcessMaterial.new()
+		process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+		process.emission_sphere_radius = 0.16
+		process.direction = Vector3(0, 1, 0)
+		process.spread = 180.0
+		process.initial_velocity_min = 1.5
+		process.initial_velocity_max = 3.5
+		process.gravity = Vector3(0, -7.5, 0)
+		process.scale_min = 0.55
+		process.scale_max = 1.25
+		p.process_material = process
+		var quad := QuadMesh.new()
+		quad.size = Vector2(0.12, 0.12)
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		material.vertex_color_use_as_albedo = true
+		quad.material = material
+		p.draw_pass_1 = quad
+		p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		p.emitting = false
+		_effects_root.add_child(p)
+		_hit_particles_pool.append(p)
 
 func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 	if _effects_root == null:
 		return
-	var label := Label3D.new()
+	var label: Label3D
+	if not _damage_labels_pool.is_empty():
+		label = _damage_labels_pool.pop_back()
+	else:
+		label = Label3D.new()
+		label.font = FONT_SC
+		label.font_size = 64
+		label.pixel_size = 0.005
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.no_depth_test = true
+		label.outline_size = 12
+		label.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
+		_effects_root.add_child(label)
 	label.text = str(int(round(amount)))
-	label.font = load("res://assets/fonts/NotoSansSC.ttf")
-	label.font_size = 64
-	label.pixel_size = 0.005
-	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	label.no_depth_test = true
-	label.outline_size = 12
-	label.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
 	label.modulate = color
 	label.position = pos + Vector3(randf_range(-0.25, 0.25), 0.0, randf_range(-0.25, 0.25))
-	_effects_root.add_child(label)
+	label.visible = true
+	var start_y := label.position.y
 	var tween := create_tween()
 	tween.set_parallel(true)
-	tween.tween_property(label, "position:y", label.position.y + 0.9, 0.7)
-	tween.tween_property(label, "modulate:a", 0.0, 0.7)
-	tween.chain().tween_callback(label.queue_free)
+	tween.tween_property(label, "position:y", start_y + 0.9, 0.65)
+	tween.tween_property(label, "modulate:a", 0.0, 0.65)
+	tween.chain().tween_callback(func():
+		if is_instance_valid(label):
+			label.visible = false
+			label.modulate.a = 1.0
+			_damage_labels_pool.append(label)
+	)
 
 func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float) -> void:
 	var ring := MeshInstance3D.new()
 	var torus := TorusMesh.new()
 	torus.inner_radius = 0.62
 	torus.outer_radius = 0.78
-	torus.rings = 40
-	torus.ring_segments = 6
+	torus.rings = 24
+	torus.ring_segments = 5
 	ring.mesh = torus
 	ring.position = Vector3(pos.x, 0.1, pos.z)
 	ring.scale = Vector3.ONE * from_scale
@@ -1577,39 +1801,28 @@ func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float,
 	tween.chain().tween_callback(ring.queue_free)
 
 func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, size := 0.12, lifetime := 0.55) -> void:
-	var particles := GPUParticles3D.new()
-	particles.amount = amount
-	particles.lifetime = lifetime
-	particles.one_shot = true
-	particles.explosiveness = 0.95
-	var process := ParticleProcessMaterial.new()
-	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
-	process.emission_sphere_radius = 0.16
-	process.direction = Vector3(0, 1, 0)
-	process.spread = 180.0
-	process.initial_velocity_min = speed * 0.45
-	process.initial_velocity_max = speed
-	process.gravity = Vector3(0, -7.5, 0)
-	process.scale_min = 0.55
-	process.scale_max = 1.25
-	process.color = color
-	particles.process_material = process
-	var quad := QuadMesh.new()
-	quad.size = Vector2(size, size)
-	var material := StandardMaterial3D.new()
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	material.vertex_color_use_as_albedo = true
-	material.albedo_color = Color(1, 1, 1, 1)
-	quad.material = material
-	particles.draw_pass_1 = quad
-	particles.position = pos
-	particles.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_effects_root.add_child(particles)
-	particles.emitting = true
-	get_tree().create_timer(lifetime + 0.8).timeout.connect(particles.queue_free)
+	if _effects_root == null:
+		return
+	var p: GPUParticles3D
+	if not _hit_particles_pool.is_empty():
+		p = _hit_particles_pool.pop_back()
+	else:
+		return
+	p.position = pos
+	p.amount = amount
+	p.lifetime = lifetime
+	var mat := p.process_material as ParticleProcessMaterial
+	if mat:
+		mat.color = color
+		mat.initial_velocity_min = speed * 0.45
+		mat.initial_velocity_max = speed
+	p.restart()
+	p.emitting = true
+	get_tree().create_timer(lifetime + 0.1).timeout.connect(func():
+		if is_instance_valid(p):
+			p.emitting = false
+			_hit_particles_pool.append(p)
+	)
 
 func _spawn_projectile(from: Vector3, to: Vector3, color: Color, duration: float) -> void:
 	var orb := MeshInstance3D.new()

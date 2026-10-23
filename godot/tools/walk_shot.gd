@@ -39,7 +39,9 @@ func _shot(file_name: String) -> void:
 	print("SHOT ", file_name)
 
 func _run() -> void:
-	await create_timer(1.2).timeout
+	while not arena.build_complete:
+		await process_frame
+	await create_timer(0.4).timeout
 	arena.hud.visible = false
 	arena._mouse_valid = false
 	var hero: Dictionary = arena.sim.get_hero_by_player("p1")

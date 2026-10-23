@@ -28,6 +28,7 @@ var mode: String
 var state: Dictionary
 var ended := false
 var inputs: Dictionary = {}
+var kill_log: Array[Dictionary] = []
 
 func _init(match_config: Dictionary) -> void:
 	config = match_config.duplicate(true)
@@ -154,6 +155,13 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"haste_timer": 0.0,
 		"slow_timer": 0.0,
 		"last_damage_time": -999.0,
+		"last_attacker_id": -1,
+		"last_attacker_time": -999.0,
+		"last_hero_attacker_id": -1,
+		"last_hero_attacker_time": -999.0,
+		"last_killer_id": -1,
+		"last_killer_name": "",
+		"last_killer_type": "",
 		"path": path,
 		"path_index": path_index,
 		"path_dir": 1 if team == "blue" else -1,
@@ -279,6 +287,17 @@ func tick(dt: float) -> void:
 	_update_minions(dt)
 	_update_structures(dt)
 	_update_respawns(dt)
+	_cleanup_dead_minions(dt)
+
+func _cleanup_dead_minions(dt: float) -> void:
+	for i in range(state.entities.size() - 1, -1, -1):
+		var entity: Dictionary = state.entities[i]
+		if entity.type == "minion" and not bool(entity.get("alive", false)):
+			var timer: float = float(entity.get("death_cleanup_timer", 2.0)) - dt
+			if timer <= 0.0:
+				state.entities.remove_at(i)
+			else:
+				entity["death_cleanup_timer"] = timer
 
 # 是否站在己方泉水范围内（基地中心 MapData.FOUNTAIN_RADIUS 以内）。
 func _in_fountain(entity: Dictionary) -> bool:
@@ -622,6 +641,10 @@ func _update_respawns(dt: float) -> void:
 			entity.haste_timer = 0.0
 			entity.slow_timer = 0.0
 			entity.last_damage_time = -999.0
+			entity.last_attacker_id = -1
+			entity.last_attacker_time = -999.0
+			entity.last_hero_attacker_id = -1
+			entity.last_hero_attacker_time = -999.0
 			_emit("respawn", {"hero": entity.id, "x": float(entity.pos.x), "y": float(entity.pos.y)})
 
 func apply_damage(entity_id: int, amount: float, source_id: int = -1) -> void:
@@ -646,6 +669,12 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 	target.hp = float(target.hp) - remaining
 	if target.type == "hero":
 		target.last_damage_time = float(state.time)
+		if not source.is_empty():
+			target.last_attacker_id = int(source.get("id", -1))
+			target.last_attacker_time = float(state.time)
+			if str(source.get("type", "")) == "hero" and str(source.get("team", "")) != str(target.get("team", "")):
+				target.last_hero_attacker_id = int(source.get("id", -1))
+				target.last_hero_attacker_time = float(state.time)
 	_emit("hit", {
 		"target": target.id,
 		"target_type": target.type,
@@ -667,18 +696,80 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		target.respawn_timer = HERO_RESPAWN_BASE + float(target.level) * 0.4
 		target.shield = 0.0
 		target.shield_timer = 0.0
-		if not source.is_empty() and source.type == "hero" and source.team != target.team:
-			source.kills = int(source.kills) + 1
-			state.scores[source.team].kills = int(state.scores[source.team].kills) + 1
-			_add_xp(source, 130.0)
+
+		# 判定真正击杀者 (Killer Attribution)
+		var killer: Dictionary = {}
+		# 1. 致命伤害直接来自敌方英雄
+		if not source.is_empty() and str(source.get("type", "")) == "hero" and str(source.get("team", "")) != str(target.get("team", "")):
+			killer = source
+		# 2. 致命伤害来自防御塔/小兵/机关等非英雄，但近期受到敌方英雄伤害（10秒内判定为英雄击杀）
+		elif float(state.time) - float(target.get("last_hero_attacker_time", -999.0)) <= 10.0:
+			var hero_attacker: Dictionary = _entity_by_id(int(target.get("last_hero_attacker_id", -1)))
+			if not hero_attacker.is_empty() and str(hero_attacker.get("type", "")) == "hero" and str(hero_attacker.get("team", "")) != str(target.get("team", "")):
+				killer = hero_attacker
+		# 3. 致命伤害来自防御塔/小兵，无英雄参与伤害
+		elif not source.is_empty():
+			killer = source
+
+		var killer_id: int = -1
+		var killer_type := "unknown"
+		var killer_name := "战场机关"
+		var killer_team: String = "blue" if str(target.team) == "red" else "red"
+		var killer_hero_type := ""
+
+		if not killer.is_empty():
+			killer_id = int(killer.get("id", -1))
+			killer_type = str(killer.get("type", "unknown"))
+			killer_team = str(killer.get("team", killer_team))
+			if killer_type == "hero":
+				killer_name = str(killer.get("name", "英雄"))
+				killer_hero_type = str(killer.get("hero_type", ""))
+				killer.kills = int(killer.get("kills", 0)) + 1
+				state.scores[killer.team].kills = int(state.scores[killer.team].kills) + 1
+				_add_xp(killer, 130.0)
+			elif killer_type == "tower" or killer_type == "base":
+				killer_name = "防御塔" if killer_type == "tower" else "主堡"
+			elif killer_type == "minion":
+				killer_name = "小兵"
+			else:
+				killer_name = str(killer.get("name", "战场机关"))
+
+		target["last_killer_id"] = killer_id
+		target["last_killer_name"] = killer_name
+		target["last_killer_type"] = killer_type
+		target["last_killer_team"] = killer_team
+
+		var kill_record := {
+			"time": float(state.time),
+			"victim_id": int(target.id),
+			"victim_name": str(target.name),
+			"victim_team": str(target.team),
+			"victim_hero_type": str(target.hero_type),
+			"killer_id": killer_id,
+			"killer_name": killer_name,
+			"killer_team": killer_team,
+			"killer_type": killer_type,
+			"killer_hero_type": killer_hero_type,
+		}
+		kill_log.append(kill_record)
+
 		_emit("death", {
 			"entity_type": "hero",
 			"hero": target.id,
 			"team": target.team,
+			"hero_type": target.hero_type,
+			"victim_name": str(target.name),
+			"victim_team": str(target.team),
+			"killer": killer_id,
+			"killer_type": killer_type,
+			"killer_name": killer_name,
+			"killer_hero_type": killer_hero_type,
+			"killer_team": killer_team,
 			"x": float(target.pos.x),
 			"y": float(target.pos.y),
 		})
 	elif target.type == "minion":
+		target.death_cleanup_timer = 2.0
 		if not source.is_empty() and source.type == "hero":
 			_add_xp(source, 32.0)
 		_emit("death", {
@@ -790,6 +881,7 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["haste_timer"] = float(entity.haste_timer)
 		data["slow_timer"] = float(entity.slow_timer)
 		data["moving"] = bool(entity.get("moving", false))
+		data["last_killer_name"] = str(entity.get("last_killer_name", ""))
 	elif entity.type == "minion":
 		data["lane"] = str(entity.lane)
 		data["speed"] = float(entity.speed)
@@ -798,3 +890,12 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["lane"] = str(entity.lane)
 		data["range"] = float(entity.range)
 	return data
+
+func get_last_kill() -> Dictionary:
+	return kill_log.back() if not kill_log.is_empty() else {}
+
+func get_killer_of(victim_id: int) -> Dictionary:
+	for i in range(kill_log.size() - 1, -1, -1):
+		if int(kill_log[i].victim_id) == victim_id:
+			return kill_log[i]
+	return {}

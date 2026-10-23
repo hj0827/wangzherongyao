@@ -60,6 +60,12 @@ func _notification(what: int) -> void:
 	if _video != null and _video_ready:
 		_video.paused = not shown
 
+## 主菜单才播放背景原声；选人/对战时只保留画面，避免与英雄视频原声叠加。
+func set_audio_enabled(enabled: bool) -> void:
+	if _video == null:
+		return
+	_video.volume_db = 0.0 if enabled else -80.0
+
 func _process(delta: float) -> void:
 	_time += delta
 	if size != _last_size:
@@ -129,7 +135,7 @@ func _build() -> void:
 	_video.name = "VideoBG"
 	_video.expand = true
 	_video.loop = true
-	_video.volume_db = -80.0
+	_video.volume_db = 0.0
 	_video.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_video.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_video.visible = false

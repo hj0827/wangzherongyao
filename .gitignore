@@ -84,10 +84,15 @@ godot/.tmp/
 # 运行时实际使用的是 godot/assets/ 下的成品，故不入库
 sources/
 
+# AI 视频生成的源片、分镜、缓存与检查截图；
+# 运行时成品（.ogv）在 godot/assets/ui/hero_videos/，源料不入库
+.video_gen/
+
 # ---------- 本地 AI 助手状态与记忆 ----------
 .workbuddy/
 .workbuddy-ai/
 .workbuddy-*/
+.dumate/
 
 # ---------- 操作系统 / 编辑器杂项 ----------
 Thumbs.db

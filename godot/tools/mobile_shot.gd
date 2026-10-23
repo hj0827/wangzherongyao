@@ -124,7 +124,9 @@ func _run() -> void:
 	arena = Arena.new()
 	arena.configure({"config": config, "authoritative": true, "local_owner": "p1"})
 	viewport.add_child(arena)
-	await create_timer(1.6).timeout
+	while not arena.build_complete:
+		await process_frame
+	await create_timer(0.4).timeout
 
 	_check(arena.touch_mode, "arena switches to touch mode")
 	_check(arena.hud.touch_mode, "HUD switches to touch mode")

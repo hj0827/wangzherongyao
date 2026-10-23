@@ -247,3 +247,66 @@ func test_bots_move_and_fight_after_spawn() -> void:
 	var start: Vector2 = bot.pos
 	_tick_for(sim, 3.0)
 	gt(bot.pos.distance_to(start), 1.0, "bot leaves spawn")
+
+func test_kill_attribution_direct_hero() -> void:
+	var sim := _match({
+		"humans": [_human("p1", "blue"), _human("p2", "red")],
+	})
+	var blue := _hero(sim, "p1")
+	var red := _hero(sim, "p2")
+	sim.apply_damage(red.id, 99999.0, blue.id)
+	check(not red.alive, "red dies")
+	eq(blue.kills, 1, "blue hero credited with kill")
+	var last_kill: Dictionary = sim.get_last_kill()
+	eq(last_kill.victim_id, red.id, "last kill victim matches")
+	eq(last_kill.killer_id, blue.id, "last kill killer matches")
+	eq(last_kill.killer_type, "hero", "killer type is hero")
+	eq(sim.get_killer_of(red.id).killer_id, blue.id, "get_killer_of matches")
+
+func test_kill_attribution_tower_with_recent_hero_damage() -> void:
+	var sim := _match({
+		"humans": [_human("p1", "blue"), _human("p2", "red")],
+	})
+	var blue := _hero(sim, "p1")
+	var red := _hero(sim, "p2")
+	var tower: Dictionary = _entities(sim, "tower").filter(func(t): return t.team == "blue")[0]
+	sim.apply_damage(red.id, 50.0, blue.id)
+	sim.apply_damage(red.id, 99999.0, tower.id)
+	check(not red.alive, "red dies")
+	eq(blue.kills, 1, "blue hero credited with kill due to recent damage")
+	var last_kill: Dictionary = sim.get_last_kill()
+	eq(last_kill.killer_id, blue.id, "killer credited to blue hero")
+	eq(last_kill.killer_name, blue.name, "killer name matches blue hero")
+
+func test_kill_attribution_pure_tower() -> void:
+	var sim := _match({
+		"humans": [_human("p1", "blue"), _human("p2", "red")],
+	})
+	var red := _hero(sim, "p2")
+	var tower: Dictionary = _entities(sim, "tower").filter(func(t): return t.team == "blue")[0]
+	sim.apply_damage(red.id, 99999.0, tower.id)
+	check(not red.alive, "red dies")
+	var last_kill: Dictionary = sim.get_last_kill()
+	eq(last_kill.killer_type, "tower", "killer type is tower")
+	eq(last_kill.killer_name, "防御塔", "killer name is 防御塔")
+
+func test_in_place_attack_keeps_root_at_origin() -> void:
+	var unit_visual_script := preload("res://scripts/game/unit_visual.gd")
+	unit_visual_script._library_cache.clear()
+	var uv: Node = unit_visual_script.new()
+	uv.setup("hero", "blue", "blade", "你", true)
+	var sk: Skeleton3D = null
+	for node in uv.model_root.find_children("*", "Skeleton3D", true, false):
+		sk = node
+		break
+	check(sk != null, "skeleton found")
+	eq(sk.get_bone_pose_position(0), Vector3.ZERO, "initial root bone is at origin")
+	uv.play_attack()
+	for ap in uv.animation_players:
+		ap.advance(0.2)
+	eq(sk.get_bone_pose_position(0), Vector3.ZERO, "mid-attack root bone stays at origin")
+	for ap in uv.animation_players:
+		ap.advance(0.3)
+	uv.process_visual(0.7)
+	eq(sk.get_bone_pose_position(0), Vector3.ZERO, "post-attack root bone stays at origin")
+	uv.free()

@@ -245,6 +245,7 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["haste_timer"] = clampf(_number(source.get("haste_timer", 0.0)), 0.0, 60.0)
 		entity["slow_timer"] = clampf(_number(source.get("slow_timer", 0.0)), 0.0, 60.0)
 		entity["moving"] = _flag(source.get("moving", false))
+		entity["last_killer_name"] = _short_string(str(source.get("last_killer_name", "")), 32)
 	elif type == "minion":
 		var lane := str(source.get("lane", "mid"))
 		if lane != "top" and lane != "bottom":
@@ -268,7 +269,9 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 	for key in [
 		"type", "hero", "source", "target", "slot", "hero_type", "team",
 		"x", "y", "aim_x", "aim_y", "target_x", "target_y", "value",
-		"damage", "wave", "level", "winner",
+		"damage", "wave", "level", "winner", "entity_type",
+		"killer", "killer_type", "killer_name", "killer_hero_type", "killer_team",
+		"victim_name", "victim_hero_type", "victim_team",
 	]:
 		if not source.has(key):
 			continue
