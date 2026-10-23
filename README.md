@@ -12,6 +12,8 @@ Godot 4.7 制作的移动端 1v1 / 5v5 战场原型，含单人试炼、人机�
 ├── run.cmd                      # 启动器：调用本机 Godot 打开工程
 ├── .gitignore                   # 入库白名单式的忽略规则（见下）
 ├── .gitattributes               # 二进制资源标记、换行符统一
+├── docs/                        # 工程规范与文档
+│   └── ARCHITECTURE.md          # 【核心基准】游戏分层架构、目录规约与开发铁律
 │
 ├── godot/                       # 游戏工程本体（Godot 项目根）
 │   ├── project.godot            # 工程配置（主场景、分辨率、渲染后端）
@@ -81,6 +83,21 @@ godot --path godot --script res://tools/menu_shot.gd
 
 > Windows 下若命令行里 `APPDATA` 为空，启动 Godot 前请显式设置，
 > 否则 `user://` 会退化到工作目录，生成类似 `godot/Godot/app_userdata/` 的垃圾目录。
+
+## 游戏架构与代码分层规约
+
+本项目严格执行 **「Core-View 严格解耦的分层领域架构」（Clean Game Architecture）**，详细架构规约与五大开发铁律参见：  
+👉 **[完整架构规范文档 (docs/ARCHITECTURE.md)](docs/ARCHITECTURE.md)**
+
+### 核心分层（六大核心域）
+1. **`core/`（领域逻辑核）**：纯 GDScript 类，绝不继承 Node 节点，脱离渲染 100% 确定性运行。
+2. **`view/`（3D 表现层）**：只读消费快照，负责平滑插值、模型动画装配、地面指示环与打击反馈。
+3. **`ui/`（2D 交互层）**：HUD、触控摇杆、技能轮盘瞄准、全屏视差菜单，单向产生操作意图。
+4. **`net/`（网络同步层）**：客户端 Jitter Buffer、主机状态广播、协议编解码、局域网房间发现。
+5. **`infra/`（基础设施层）**：全局对象池（Pool，杜绝真机卡顿）、统一输入抽象、音频管理。
+6. **`app/`（应用生命周期）**：全局启动器、着色器预热、场景状态机。
+
+---
 
 ## 开发约定
 
