@@ -11,7 +11,7 @@ const MAX_EVENTS := 32
 const MAX_STRING := 48
 const MAX_AIM := 58.0
 const MODES := ["duel", "team"]
-const ENTITY_TYPES := ["hero", "minion", "tower", "base"]
+const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster"]
 const TYPES := [
 	"hello",
 	"welcome",
@@ -34,6 +34,8 @@ const EMPTY_INPUT := {
 	"attack": false,
 	"skill_q": false,
 	"skill_e": false,
+	"recall": false,
+	"teleport": false,
 }
 
 static func is_valid_type(type: String) -> bool:
@@ -100,6 +102,8 @@ static func sanitize_input(raw: Dictionary) -> Dictionary:
 	input.attack = _flag(raw.get("attack", false))
 	input.skill_q = _flag(raw.get("skill_q", false))
 	input.skill_e = _flag(raw.get("skill_e", false))
+	input.recall = _flag(raw.get("recall", false))
+	input.teleport = _flag(raw.get("teleport", false))
 	return input
 
 static func sanitize_hello(raw: Dictionary) -> Dictionary:
@@ -189,6 +193,8 @@ static func sanitize_snapshot(raw: Variant) -> Dictionary:
 			"scores": _sanitize_scores(data.get("scores", {})),
 			"events": events,
 			"wave": clampi(int(_number(data.get("wave", 1))), 0, 9999),
+			"objectives": _sanitize_objectives(data.get("objectives", {})),
+			"river": _sanitize_river(data.get("river", {})),
 		},
 	}
 
@@ -246,11 +252,24 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["slow_timer"] = clampf(_number(source.get("slow_timer", 0.0)), 0.0, 60.0)
 		entity["moving"] = _flag(source.get("moving", false))
 		entity["last_killer_name"] = _short_string(str(source.get("last_killer_name", "")), 32)
+		entity["recalling"] = _flag(source.get("recalling", false))
+		entity["recall_timer"] = clampf(_number(source.get("recall_timer", 0.0)), 0.0, 60.0)
+		entity["recall_total"] = clampf(_number(source.get("recall_total", 0.0)), 0.0, 60.0)
+		entity["teleporting"] = _flag(source.get("teleporting", false))
+		entity["teleport_timer"] = clampf(_number(source.get("teleport_timer", 0.0)), 0.0, 60.0)
+		entity["teleport_total"] = clampf(_number(source.get("teleport_total", 0.0)), 0.0, 60.0)
+		entity["teleport_cd"] = clampf(_number(source.get("teleport_cd", 0.0)), 0.0, 600.0)
+		entity["buff_red_timer"] = clampf(_number(source.get("buff_red_timer", 0.0)), 0.0, 600.0)
+		entity["buff_blue_timer"] = clampf(_number(source.get("buff_blue_timer", 0.0)), 0.0, 600.0)
 	elif type == "minion":
 		var lane := str(source.get("lane", "mid"))
 		if lane != "top" and lane != "bottom":
 			lane = "mid"
 		entity["lane"] = lane
+		var minion_type := str(source.get("minion_type", "melee"))
+		if not ["melee", "ranged", "cannon", "super"].has(minion_type):
+			minion_type = "melee"
+		entity["minion_type"] = minion_type
 		entity["speed"] = clampf(_number(source.get("speed", 0.0)), 0.0, 64.0)
 		entity["moving"] = _flag(source.get("moving", false))
 	elif type == "tower":
@@ -258,7 +277,37 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		if lane != "top" and lane != "bottom":
 			lane = "mid"
 		entity["lane"] = lane
+		var tier := str(source.get("tier", "outer"))
+		if not ["outer", "inner", "high"].has(tier):
+			tier = "outer"
+		entity["tier"] = tier
+		entity["vulnerable"] = _flag(source.get("vulnerable", true))
 		entity["range"] = clampf(_number(source.get("range", 0.0)), 0.0, 64.0)
+	elif type == "guard":
+		var guard_tier := str(source.get("tier", "twin"))
+		if not ["outer", "inner", "high", "twin"].has(guard_tier):
+			guard_tier = "twin"
+		entity["tier"] = guard_tier
+		var side := str(source.get("side", "left"))
+		entity["side"] = side if side == "left" or side == "right" else "left"
+		entity["vulnerable"] = _flag(source.get("vulnerable", true))
+		entity["range"] = clampf(_number(source.get("range", 0.0)), 0.0, 64.0)
+	elif type == "base":
+		entity["vulnerable"] = _flag(source.get("vulnerable", true))
+		entity["shield"] = clampf(_number(source.get("shield", 0.0)), 0.0, 1000000.0)
+		entity["shield_max"] = clampf(_number(source.get("shield_max", 0.0)), 0.0, 1000000.0)
+		entity["guards_alive"] = clampi(int(_number(source.get("guards_alive", 0))), 0, 2)
+	elif type == "monster":
+		entity["monster_type"] = _short_string(str(source.get("monster_type", "wolf")), 24)
+		entity["camp_id"] = _short_string(str(source.get("camp_id", "")), 32)
+		var buff_type := str(source.get("buff_type", ""))
+		if buff_type != "blue" and buff_type != "red":
+			buff_type = ""
+		entity["buff_type"] = buff_type
+		entity["objective"] = _flag(source.get("objective", false))
+		entity["objective_id"] = _short_string(str(source.get("objective_id", "")), 32)
+		entity["name"] = sanitize_name(source.get("name", "野怪"))
+		entity["respawn_timer"] = clampf(_number(source.get("respawn_timer", 0.0)), 0.0, 600.0)
 	return entity
 
 static func _sanitize_event(raw: Variant) -> Dictionary:
@@ -272,6 +321,8 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		"damage", "wave", "level", "winner", "entity_type",
 		"killer", "killer_type", "killer_name", "killer_hero_type", "killer_team",
 		"victim_name", "victim_hero_type", "victim_team",
+		"tier", "side", "guards_left", "buff", "objective_id", "name",
+		"pad", "to_x", "to_y",
 	]:
 		if not source.has(key):
 			continue
@@ -281,6 +332,43 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		elif value is bool or value is int or value is float:
 			event[key] = value
 	return event
+
+static func _sanitize_objectives(raw: Variant) -> Dictionary:
+	var objectives := {"spawn_timer": 0.0, "blue_buff": 0.0, "red_buff": 0.0}
+	if not (raw is Dictionary):
+		return objectives
+	objectives.spawn_timer = clampf(_number(raw.get("spawn_timer", 0.0)), 0.0, 3600.0)
+	objectives.blue_buff = clampf(_number(raw.get("blue_buff", 0.0)), 0.0, 600.0)
+	objectives.red_buff = clampf(_number(raw.get("red_buff", 0.0)), 0.0, 600.0)
+	return objectives
+
+static func _sanitize_river(raw: Variant) -> Dictionary:
+	var river := {
+		"spawn_timer": 0.0,
+		"reveals": {"blue": [], "red": []},
+	}
+	if not (raw is Dictionary):
+		return river
+	river.spawn_timer = clampf(_number(raw.get("spawn_timer", 0.0)), 0.0, 3600.0)
+	var reveals: Variant = raw.get("reveals", null)
+	if not (reveals is Dictionary):
+		return river
+	for team in ["blue", "red"]:
+		var source: Variant = reveals.get(team, [])
+		if not (source is Array):
+			continue
+		for item in source:
+			if river.reveals[team].size() >= 8:
+				break
+			if not (item is Dictionary):
+				continue
+			river.reveals[team].append({
+				"x": clampf(_number(item.get("x", 0.0)), -512.0, 512.0),
+				"y": clampf(_number(item.get("y", 0.0)), -512.0, 512.0),
+				"radius": clampf(_number(item.get("radius", 0.0)), 0.0, 64.0),
+				"timer": clampf(_number(item.get("timer", 0.0)), 0.0, 600.0),
+			})
+	return river
 
 static func _sanitize_scores(raw: Variant) -> Dictionary:
 	var scores := {

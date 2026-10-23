@@ -1,0 +1,149 @@
+# ============================================================================
+#  烽火峡谷 · AI 任务路由表（机器可读）
+#  与 docs/ai/README.md 的路由表内容一致，用途不同：
+#    README.md  给模型读的自然语言说明
+#    routing.yaml 给编排层/脚本读的结构化路由
+#  改任何一边，必须同步另一边。
+# ============================================================================
+
+version: 1
+project: fenghuo-gorge
+updated: 2026-10-23
+
+# 每次会话开始必读（约 5 分钟）
+always_read:
+  - docs/ai/README.md
+  - docs/ai/00-hard-rules.md
+  - docs/ai/01-repo-reality.md
+
+# 全局验证命令
+verify:
+  tests: "godot --headless --path godot --script res://tests/run_tests.gd"
+  ui_shot: "godot --path godot --script res://tools/ui_shot.gd"
+  mobile_shot: "godot --path godot --script res://tools/mobile_shot.gd"
+  perf: "godot --path godot --script res://tools/perf_check.gd"
+  clean_check: "git status --porcelain"
+  wiring_check: "grep -rn <ClassName> --include=*.gd godot/scripts godot/sim godot/net"
+
+tasks:
+  - id: combat-numbers
+    when: 修改英雄数值、技能、伤害公式、经济、野怪、防御塔、全局常量
+    read:
+      - docs/ai/04-combat-chain.md
+      - docs/ai/03-tdd.md
+    touch:
+      - godot/sim/hero_defs.gd
+      - godot/sim/match_sim.gd
+      - godot/sim/skill_system.gd
+    verify: tests
+
+  - id: add-hero-field
+    when: 给英雄字典新增一个字段
+    read:
+      - docs/ai/04-combat-chain.md
+    required_steps: 6
+    touch:
+      - godot/sim/match_sim.gd
+      - godot/net/net_protocol.gd
+      - godot/scripts/game/unit_visual.gd
+      - godot/scripts/ui/game_hud.gd
+    verify: tests
+
+  - id: input-and-skill-buttons
+    when: 新增或修改玩家可用的操作（技能键、召唤师技能、攻击键）
+    read:
+      - docs/ai/05-ui-and-feel.md
+      - docs/ai/04-combat-chain.md
+    required_steps: 5
+    touch:
+      - godot/scripts/game/arena.gd
+      - godot/scripts/ui/game_hud.gd
+      - godot/scripts/ui/touch_layout.gd
+      - godot/net/net_protocol.gd
+    verify: 单机 + 双实例联机各验一次
+
+  - id: hud-and-feel
+    when: 改 HUD、触控布局、特效、震屏、飘字、播报
+    read:
+      - docs/ai/05-ui-and-feel.md
+    touch:
+      - godot/scripts/ui/game_hud.gd
+      - godot/scripts/ui/skill_button.gd
+      - godot/scripts/ui/touch_layout.gd
+      - godot/scripts/game/arena.gd
+    verify: ui_shot + mobile_shot
+
+  - id: networking
+    when: 改联机、同步、房间、协议、断线
+    read:
+      - docs/ai/06-net-sync.md
+    touch:
+      - godot/net/net_protocol.gd
+      - godot/net/game_session.gd
+      - godot/net/room_manager.gd
+      - godot/net/lan_discovery.gd
+    verify: tests
+
+  - id: new-file
+    when: 新建任何文件（代码、脚本、资源、文档）
+    read:
+      - docs/ai/07-files-and-git.md
+    verify: clean_check
+
+  - id: test
+    when: 写测试、修 bug、TDD
+    read:
+      - docs/ai/03-tdd.md
+    notes:
+      - 断言只有 check / eq / near / lt / gt，没有 ne
+      - 测试文件自动发现，不需要注册
+      - 必须做变异验证
+    verify: tests
+
+  - id: run-and-capture
+    when: 启动游戏、截图、打包 APK、排查环境问题
+    read:
+      - docs/ai/02-godot-pitfalls.md
+    verify: 截图落到 godot/shots/（不入库）
+
+  - id: delivery
+    when: 任务收尾、提交前
+    read:
+      - docs/ai/08-delivery-checklist.md
+    verify: tests + clean_check
+
+# 已实现、已测试、但生产代码引用为 0 的模块。
+# 汇报"已完成"前必须先跑 wiring_check，否则就是假交付。
+known_gaps:
+  unwired:
+    - path: scripts/ui/targeting_system.gd
+      class: TargetingSystem
+      note: 锁敌/补刀/推塔优先级；sim 的 _try_attack 仍走老的 _nearest_enemy
+    - path: scripts/ui/skill_indicator.gd
+      class: SkillIndicator
+      note: 技能指示器；HUD 未挂
+    - path: scripts/ui/cancel_cast_zone.gd
+      class: CancelCastZone
+      note: 取消施法区；HUD 未挂
+    - path: scripts/view/hit_stop_manager.gd
+      class: HitStopManager
+      note: 顿帧；arena 未调用
+    - path: sim/combat_announcer.gd
+      class: CombatAnnouncer
+      note: 多杀/团灭播报；arena 未调用
+    - path: net/client_prediction.gd
+      class: ClientPrediction
+      note: 客户端预测；arena 未调用
+    - path: sim/economy_system.gd
+      class: EconomySystem
+      note: 金币；match_sim 无 gold 字段
+    - path: sim/item_shop.gd
+      class: ItemShop
+      note: 装备；无商店 UI
+
+  gameplay:
+    - 玩家只能施放 Q/E + 回城；W/R 与召唤师技能无输入键
+    - 单机无战争迷雾（仅联机客机经 snapshot_for 过滤）
+    - 协议白名单缺 skill_w_cd / skill_r_cd / summoner_cd / summoner_spell
+    - 全项目零音频（无音效资产、无 AudioStreamPlayer）
+    - arena.gd 与 main.gd 均超 ARCHITECTURE 的 500 行上限 2~4 倍

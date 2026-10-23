@@ -138,6 +138,29 @@ func broadcast_snapshot(snapshot: Dictionary) -> void:
 	var bytes := NetProtocol.encode("snapshot", snapshot)
 	_send_bytes(0, bytes, true)
 
+# 按队伍分别构建并下发快照（视野过滤）。同一队伍的多个客户端共用一份编码结果。
+func broadcast_team_snapshots(build: Callable) -> void:
+	if not is_server or peer == null or not build.is_valid():
+		return
+	var players: Array = []
+	if room_manager != null and room_code != "":
+		var info: Dictionary = room_manager.get_room_info(room_code)
+		players = info.get("players", [])
+	if players.is_empty():
+		players = match_config.get("humans", [])
+	var packets := {}
+	for player in players:
+		var peer_id := int(player.get("id", player.get("peer_id", 0)))
+		if peer_id <= 1:
+			continue
+		var team := str(player.get("team", "blue"))
+		if not packets.has(team):
+			var snapshot: Variant = build.call(team)
+			if not (snapshot is Dictionary) or (snapshot as Dictionary).is_empty():
+				continue
+			packets[team] = NetProtocol.encode("snapshot", snapshot)
+		_send_bytes(peer_id, packets[team], true)
+
 func is_online() -> bool:
 	return peer != null and state in ["lobby", "match"]
 

@@ -2,16 +2,30 @@ extends RefCounted
 
 const MapData = preload("res://sim/map_data.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const SkillSystem = preload("res://sim/skill_system.gd")
+const MapLayout = preload("res://sim/map/map_layout.gd")
+const Collision = preload("res://sim/map/collision.gd")
+const Vision = preload("res://sim/map/vision.gd")
+const TowerRules = preload("res://sim/map/tower_rules.gd")
+const WaveRules = preload("res://sim/map/wave_rules.gd")
+const Jungle = preload("res://sim/map/jungle.gd")
+const Objectives = preload("res://sim/map/objectives.gd")
+const RecallRules = preload("res://sim/map/recall.gd")
+const Crystal = preload("res://sim/map/crystal.gd")
+const River = preload("res://sim/map/river.gd")
+const Teleport = preload("res://sim/map/teleport.gd")
 
 const TICK_RATE := 30.0
 const HERO_RESPAWN_BASE := 6.0
 const WAVE_INTERVAL := 18.0
 const FIRST_WAVE_DELAY := 1.0
-const MINIONS_PER_LANE := 3
 const MINION_AGGRO_RANGE := 5.5
 const STRUCTURE_RANGE := 8.0
 const BASE_RANGE := 9.0
 const MAX_LEVEL := 15
+
+const TOWER_HP := {"outer": 2800.0, "inner": 3200.0, "high": 3600.0}
+const TOWER_DAMAGE := {"outer": 150.0, "inner": 170.0, "high": 190.0}
 
 # 野外脱战回血（每秒 % 最大生命）与基础回蓝
 const FIELD_HP_REGEN := 0.025
@@ -49,10 +63,14 @@ func _init(match_config: Dictionary) -> void:
 			"blue": {"kills": 0, "towers": 0},
 			"red": {"kills": 0, "towers": 0},
 		},
+		"objective": {"spawn_timer": Objectives.FIRST_SPAWN, "spawned": false},
+		"objectives": {"buffs": {"blue": 0.0, "red": 0.0}},
+		"river": River.initial_state(),
 		"bot_ai": bool(config.get("bot_ai", false)),
 	}
 	_setup_teams()
 	_setup_structures()
+	_setup_jungle()
 	_update_wave(FIRST_WAVE_DELAY)
 
 func _next_id() -> int:
@@ -148,7 +166,13 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"alive": true,
 		"respawn_timer": 0.0,
 		"skill_q_cd": 0.0,
+		"skill_w_cd": 0.0,
 		"skill_e_cd": 0.0,
+		"skill_r_cd": 0.0,
+		"summoner_spell": "flash",
+		"summoner_cd": 0.0,
+		"passive_stacks": 0,
+		"cc_immune_timer": 0.0,
 		"facing": Vector2(0.0, -1.0) if team == "blue" else Vector2(0.0, 1.0),
 		"shield": 0.0,
 		"shield_timer": 0.0,
@@ -162,6 +186,17 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"last_killer_id": -1,
 		"last_killer_name": "",
 		"last_killer_type": "",
+		"recalling": false,
+		"recall_timer": 0.0,
+		"recall_total": 0.0,
+		"teleporting": false,
+		"teleport_timer": 0.0,
+		"teleport_total": 0.0,
+		"teleport_cd": 0.0,
+		"teleport_pad": "",
+		"teleport_from": spawn,
+		"buff_red_timer": 0.0,
+		"buff_blue_timer": 0.0,
 		"path": path,
 		"path_index": path_index,
 		"path_dir": 1 if team == "blue" else -1,
@@ -170,28 +205,30 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 
 func _setup_structures() -> void:
 	var lanes: Array = ["mid"] if mode == "duel" else MapData.LANE_ORDER
-	for lane in lanes:
-		var lpath: Array = MapData.lane_path(str(lane))
-		_add_tower("blue", lpath[MapData.TOWER_INNER_INDEX], str(lane))
-		_add_tower("blue", lpath[MapData.TOWER_OUTER_INDEX], str(lane))
-		_add_tower("red", lpath[MapData.TOWER_RED_OUTER_INDEX], str(lane))
-		_add_tower("red", lpath[MapData.TOWER_RED_INNER_INDEX], str(lane))
+	for slot in MapLayout.tower_slots():
+		if not lanes.has(str(slot.lane)):
+			continue
+		_add_tower(str(slot.team), slot.pos, str(slot.lane), str(slot.tier))
 	_add_base("blue", MapData.BLUE_BASE)
 	_add_base("red", MapData.RED_BASE)
+	for slot in MapLayout.guardian_slots():
+		_add_guard(str(slot.team), slot.pos, str(slot.side))
 
-func _add_tower(team: String, pos: Vector2, lane: String) -> void:
+func _add_tower(team: String, pos: Vector2, lane: String, tier: String) -> void:
+	var hp: float = float(TOWER_HP.get(tier, 2800.0))
 	state.entities.append({
 		"id": _next_id(),
 		"type": "tower",
 		"team": team,
 		"lane": lane,
+		"tier": tier,
 		"pos": pos,
 		"radius": MapData.TOWER_RADIUS,
-		"hp": 3200.0,
-		"max_hp": 3200.0,
+		"hp": hp,
+		"max_hp": hp,
 		"alive": true,
 		"range": STRUCTURE_RANGE,
-		"attack_damage": 150.0,
+		"attack_damage": float(TOWER_DAMAGE.get(tier, 150.0)),
 		"attack_interval": 1.1,
 		"attack_cd": 0.0,
 	})
@@ -211,7 +248,47 @@ func _add_base(team: String, pos: Vector2) -> void:
 		"attack_damage": 180.0,
 		"attack_interval": 1.2,
 		"attack_cd": 0.0,
+		"shield": 0.0,
+		"shield_max": 0.0,
+		"guards_alive": 0,
+		"exposed": false,
+		"last_shield_hit_time": -999.0,
 	})
+
+func _add_guard(team: String, pos: Vector2, side: String) -> void:
+	state.entities.append({
+		"id": _next_id(),
+		"type": "guard",
+		"team": team,
+		"lane": "core",
+		"side": side,
+		"tier": "twin",
+		"pos": pos,
+		"radius": MapData.TOWER_RADIUS * 0.85,
+		"hp": 3200.0,
+		"max_hp": 3200.0,
+		"alive": true,
+		"range": STRUCTURE_RANGE - 1.0,
+		"attack_damage": 160.0,
+		"attack_interval": 1.1,
+		"attack_cd": 0.0,
+	})
+
+func _setup_jungle() -> void:
+	for camp in Jungle.CAMPS:
+		_spawn_monster(Jungle.monster_stats(camp))
+
+func _spawn_monster(stats: Dictionary) -> Dictionary:
+	var monster: Dictionary = stats.duplicate(true)
+	var pos: Vector2 = stats.get("pos", Vector2.ZERO)
+	monster["id"] = _next_id()
+	monster["pos"] = pos
+	monster["home_pos"] = pos
+	monster["attack_cd"] = 0.0
+	monster["respawn_timer"] = 0.0
+	monster["alive"] = true
+	state.entities.append(monster)
+	return monster
 
 func _update_wave(dt: float) -> void:
 	state.wave_timer = float(state.wave_timer) - dt
@@ -223,32 +300,36 @@ func _update_wave(dt: float) -> void:
 	for lane in lanes:
 		var path: Array = MapData.lane_path(str(lane))
 		for team in ["blue", "red"]:
-			for i in MINIONS_PER_LANE:
-				_spawn_minion(str(team), str(lane), path, i)
+			var super_enabled := WaveRules.super_unlocked(str(lane), str(team), state.entities)
+			var composition: Array = WaveRules.composition(int(state.wave), super_enabled)
+			for index in composition.size():
+				_spawn_minion(str(team), str(lane), path, index, str(composition[index]))
 	_emit("wave", {"wave": state.wave})
 
-func _spawn_minion(team: String, lane: String, path: Array, index: int) -> void:
+func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_type: String) -> void:
 	var blue := team == "blue"
 	var base: Vector2 = path[0] if blue else path[path.size() - 1]
 	var path_index := 1 if blue else path.size() - 2
 	var waypoint: Vector2 = path[path_index]
 	var toward := (waypoint - base).normalized()
 	var side := Vector2(-toward.y, toward.x)
-	var pos := base + toward * 2.6 + side * (float(index) - 1.0) * 0.95
+	var pos := base + toward * 2.6 + side * (float(index) - 1.0) * 1.0
+	var stats: Dictionary = WaveRules.stats(minion_type, int(state.wave))
 	var minion := {
 		"id": _next_id(),
 		"type": "minion",
 		"team": team,
 		"lane": lane,
+		"minion_type": minion_type,
 		"pos": pos,
-		"radius": 0.36,
-		"hp": 260.0,
-		"max_hp": 260.0,
+		"radius": float(stats.radius),
+		"hp": float(stats.hp),
+		"max_hp": float(stats.max_hp),
 		"alive": true,
-		"speed": 3.3,
-		"attack_damage": 16.0 + float(state.wave - 1) * 2.0,
-		"attack_range": 2.2,
-		"attack_interval": 1.0,
+		"speed": float(stats.move_speed),
+		"attack_damage": float(stats.attack_damage),
+		"attack_range": float(stats.attack_range),
+		"attack_interval": float(stats.attack_interval),
 		"attack_cd": 0.0,
 		"path": path,
 		"path_index": path_index,
@@ -281,13 +362,101 @@ func tick(dt: float) -> void:
 	for entity in state.entities:
 		entity.moving = false
 	_update_wave(dt)
+	_update_objectives(dt)
+	for spot in River.tick(state, dt):
+		_spawn_monster(River.spirit_stats(spot))
 	_update_hero_timers(dt)
 	_apply_human_inputs(dt)
 	_update_bots(dt)
 	_update_minions(dt)
+	_update_monsters(dt)
 	_update_structures(dt)
+	Crystal.tick(state, dt)
 	_update_respawns(dt)
 	_cleanup_dead_minions(dt)
+	Objectives.tick(state, dt)
+
+func _update_objectives(dt: float) -> void:
+	if bool(state.objective.get("spawned", false)):
+		return
+	state.objective.spawn_timer = maxf(0.0, float(state.objective.spawn_timer) - dt)
+	if float(state.objective.spawn_timer) > 0.0:
+		return
+	state.objective.spawned = true
+	state.objective.spawn_timer = 0.0
+	for pit in Objectives.PITS:
+		_spawn_monster(Objectives.monster_stats(pit))
+	_emit("objective_spawn", {"name": "暴君与主宰"})
+
+func _update_monsters(dt: float) -> void:
+	for entity in state.entities:
+		if entity.type != "monster":
+			continue
+		entity.attack_cd = maxf(0.0, float(entity.get("attack_cd", 0.0)) - dt)
+		if not bool(entity.get("alive", false)):
+			entity.respawn_timer = maxf(0.0, float(entity.get("respawn_timer", 0.0)) - dt)
+			if float(entity.respawn_timer) <= 0.0:
+				_respawn_monster(entity)
+			continue
+		var target: Dictionary = _monster_target(entity)
+		if target.is_empty():
+			_advance_monster_home(entity, dt)
+			continue
+		var reach: float = float(entity.attack_range) + float(target.get("radius", 0.0))
+		if entity.pos.distance_to(target.pos) <= reach:
+			if float(entity.attack_cd) <= 0.0:
+				entity.attack_cd = float(entity.attack_interval)
+				entity.facing = (target.pos - entity.pos).normalized()
+				_damage(target, float(entity.attack_damage), entity)
+		elif not bool(entity.get("objective", false)):
+			var home: Vector2 = entity.get("home_pos", entity.pos)
+			if entity.pos.distance_to(home) <= float(entity.get("leash_range", 11.0)):
+				var next: Vector2 = entity.pos + (target.pos - entity.pos).normalized() * float(entity.move_speed) * dt
+				entity.pos = Collision.move(entity.pos, next, float(entity.get("radius", 1.0)))
+				entity.moving = true
+
+func _monster_target(monster: Dictionary) -> Dictionary:
+	var best: Dictionary = {}
+	var best_distance := float(monster.get("aggro_range", 5.5))
+	for entity in state.entities:
+		if not bool(entity.get("alive", false)) or str(entity.get("type", "")) != "hero":
+			continue
+		if str(entity.get("team", "")) == "neutral" or str(entity.get("team", "")) == str(monster.get("team", "")):
+			continue
+		var distance: float = monster.pos.distance_to(entity.pos)
+		if distance < best_distance:
+			best_distance = distance
+			best = entity
+	if not best.is_empty():
+		return best
+	var attacker: Dictionary = _entity_by_id(int(monster.get("last_attacker_id", -1)))
+	if not attacker.is_empty() and bool(attacker.get("alive", false)) and str(attacker.get("type", "")) == "hero":
+		if monster.pos.distance_to(attacker.pos) <= float(monster.get("leash_range", 11.0)):
+			return attacker
+	return {}
+
+func _advance_monster_home(monster: Dictionary, dt: float) -> void:
+	var home: Vector2 = monster.get("home_pos", monster.pos)
+	if monster.pos.distance_to(home) <= 0.2:
+		return
+	var next: Vector2 = monster.pos + (home - monster.pos).normalized() * float(monster.get("move_speed", 3.0)) * dt
+	monster.pos = Collision.move(monster.pos, next, float(monster.get("radius", 1.0)))
+
+func _respawn_monster(monster: Dictionary) -> void:
+	monster.alive = true
+	monster.hp = float(monster.max_hp)
+	monster.pos = monster.get("home_pos", monster.pos)
+	monster.respawn_timer = 0.0
+	monster.attack_cd = 0.0
+	monster.last_attacker_id = -1
+	monster.last_attacker_time = -999.0
+	monster.last_hero_attacker_id = -1
+	monster.last_hero_attacker_time = -999.0
+	_emit("monster_respawn", {
+		"name": str(monster.get("name", "野怪")),
+		"x": float(monster.pos.x),
+		"y": float(monster.pos.y),
+	})
 
 func _cleanup_dead_minions(dt: float) -> void:
 	for i in range(state.entities.size() - 1, -1, -1):
@@ -304,11 +473,18 @@ func _in_fountain(entity: Dictionary) -> bool:
 	var base := MapData.BLUE_BASE if str(entity.team) == "blue" else MapData.RED_BASE
 	return (entity.pos as Vector2).distance_to(base) <= MapData.FOUNTAIN_RADIUS
 
-func _update_hero_timers(dt: float) -> void:	for entity in state.entities:
+func _update_hero_timers(dt: float) -> void:
+	for entity in state.entities:
 		if entity.type != "hero" or not entity.alive:
 			continue
+		Jungle.tick_buffs(entity, dt)
 		entity.skill_q_cd = maxf(0.0, float(entity.skill_q_cd) - dt)
+		entity.skill_w_cd = maxf(0.0, float(entity.get("skill_w_cd", 0.0)) - dt)
 		entity.skill_e_cd = maxf(0.0, float(entity.skill_e_cd) - dt)
+		entity.skill_r_cd = maxf(0.0, float(entity.get("skill_r_cd", 0.0)) - dt)
+		entity.summoner_cd = maxf(0.0, float(entity.get("summoner_cd", 0.0)) - dt)
+		entity.teleport_cd = maxf(0.0, float(entity.get("teleport_cd", 0.0)) - dt)
+		entity.cc_immune_timer = maxf(0.0, float(entity.get("cc_immune_timer", 0.0)) - dt)
 		entity.attack_cd = maxf(0.0, float(entity.attack_cd) - dt)
 		entity.shield_timer = maxf(0.0, float(entity.shield_timer) - dt)
 		if float(entity.shield_timer) <= 0.0:
@@ -335,6 +511,26 @@ func _apply_human_inputs(dt: float) -> void:
 		var move: Vector2 = input.get("move", Vector2.ZERO)
 		if move.length() > 1.0:
 			move = move.normalized()
+		if bool(input.get("teleport", false)) and not bool(entity.get("teleporting", false)):
+			if Teleport.start(entity):
+				RecallRules.interrupt(entity)
+		if bool(entity.get("teleporting", false)):
+			var departure: Vector2 = entity.get("teleport_from", entity.pos)
+			if Teleport.tick(entity, input, dt):
+				_emit("teleport", {
+					"team": entity.team,
+					"pad": str(entity.get("teleport_pad", "")),
+					"x": float(departure.x),
+					"y": float(departure.y),
+					"to_x": float(entity.pos.x),
+					"to_y": float(entity.pos.y),
+				})
+				continue
+		if bool(input.get("recall", false)) and not bool(entity.get("recalling", false)) and not _in_fountain(entity):
+			RecallRules.start(entity)
+		if bool(entity.get("recalling", false)):
+			if RecallRules.tick(entity, input, dt):
+				continue
 		if move.length() > 0.01:
 			# 移动时朝向移动方向：点击移动经常是「往身后走」，若还朝着准星就成了倒着走。
 			# 站住时才看向准星；技能与普攻随后各自把 facing 改回目标方向，瞄准手感不变。
@@ -344,8 +540,14 @@ func _apply_human_inputs(dt: float) -> void:
 			entity.facing = aim_vector.normalized()
 		if bool(input.get("skill_q", false)):
 			_cast_q(entity, aim)
+		if bool(input.get("skill_w", false)):
+			SkillSystem.cast_skill(entity, "w", aim, self)
 		if bool(input.get("skill_e", false)):
 			_cast_e(entity, aim)
+		if bool(input.get("skill_r", false)):
+			SkillSystem.cast_skill(entity, "r", aim, self)
+		if bool(input.get("summoner", false)):
+			SkillSystem.cast_summoner_spell(entity, str(entity.get("summoner_spell", "flash")), aim, self)
 		if bool(input.get("attack", false)):
 			_try_attack(entity)
 
@@ -385,9 +587,9 @@ func _move_hero(hero: Dictionary, direction: Vector2, dt: float) -> void:
 		speed *= 1.4
 	if float(hero.slow_timer) > 0.0:
 		speed *= 0.65
-	hero.pos += direction * speed * dt
+	var destination: Vector2 = hero.pos + direction * speed * dt
+	hero.pos = Collision.move(hero.pos, destination, float(hero.get("radius", 0.55)))
 	hero.moving = true
-	_clamp_position(hero)
 
 func _advance_along_path(entity: Dictionary, dt: float) -> void:
 	var path: Array = entity.path
@@ -407,9 +609,9 @@ func _advance_along_path(entity: Dictionary, dt: float) -> void:
 		waypoint = path[index]
 		to_point = waypoint - entity.pos
 	if to_point.length() > 0.01:
-		entity.pos += to_point.normalized() * speed * dt
+		var destination: Vector2 = entity.pos + to_point.normalized() * speed * dt
+		entity.pos = Collision.move(entity.pos, destination, float(entity.get("radius", 0.4)))
 		entity.moving = true
-		_clamp_position(entity)
 
 func _update_minions(dt: float) -> void:
 	for entity in state.entities:
@@ -430,13 +632,17 @@ func _update_minions(dt: float) -> void:
 				_damage(target, float(entity.attack_damage), entity)
 		else:
 			var step: Vector2 = (target.pos - entity.pos).normalized()
-			entity.pos += step * float(entity.speed) * dt
+			var destination: Vector2 = entity.pos + step * float(entity.speed) * dt
+			entity.pos = Collision.move(entity.pos, destination, float(entity.get("radius", 0.4)))
 			entity.moving = true
-			_clamp_position(entity)
 
 func _update_structures(dt: float) -> void:
 	for entity in state.entities:
-		if (entity.type != "tower" and entity.type != "base") or not entity.alive:
+		if entity.type != "tower" and entity.type != "base" and entity.type != "guard":
+			continue
+		if not entity.alive:
+			continue
+		if entity.type == "guard" and not Crystal.is_guard_vulnerable(entity, state.entities):
 			continue
 		entity.attack_cd = maxf(0.0, float(entity.attack_cd) - dt)
 		var target: Dictionary = _structure_target(entity)
@@ -455,28 +661,7 @@ func _update_structures(dt: float) -> void:
 			_damage(target, float(entity.attack_damage), entity)
 
 func _structure_target(structure: Dictionary) -> Dictionary:
-	var minion_target: Dictionary = {}
-	var minion_dist := INF
-	var hero_target: Dictionary = {}
-	var hero_dist := INF
-	var attack_range: float = float(structure.range)
-	for entity in state.entities:
-		if not entity.alive or entity.team == structure.team:
-			continue
-		if entity.type != "minion" and entity.type != "hero":
-			continue
-		var dist: float = structure.pos.distance_to(entity.pos)
-		if dist > attack_range:
-			continue
-		if entity.type == "minion" and dist < minion_dist:
-			minion_dist = dist
-			minion_target = entity
-		elif entity.type == "hero" and dist < hero_dist:
-			hero_dist = dist
-			hero_target = entity
-	if not minion_target.is_empty():
-		return minion_target
-	return hero_target
+	return TowerRules.select_target(structure, state.entities, float(state.time))
 
 func _nearest_enemy(seeker: Dictionary, max_range: float) -> Dictionary:
 	var best: Dictionary = {}
@@ -491,7 +676,7 @@ func _nearest_enemy(seeker: Dictionary, max_range: float) -> Dictionary:
 				best = entity
 			continue
 		var dist: float = seeker.pos.distance_to(entity.pos)
-		if entity.type == "tower" or entity.type == "base":
+		if entity.type == "tower" or entity.type == "base" or entity.type == "guard":
 			dist -= float(entity.radius) * 0.7
 		if dist < best_dist:
 			best_dist = dist
@@ -507,7 +692,7 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 	if target.is_empty():
 		return false
 	hero.mp = float(hero.mp) - float(skill.cost)
-	hero.skill_q_cd = float(skill.cooldown)
+	hero.skill_q_cd = float(skill.cooldown) * Jungle.cooldown_scale(hero)
 	var kind := str(skill.kind)
 	var damage: float = float(skill.damage) + float(hero.attack_damage) * 0.5 + float(hero.level - 1) * 8.0
 	hero.facing = (target.pos - hero.pos).normalized()
@@ -526,7 +711,7 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 		for entity in state.entities:
 			if not entity.alive or entity.team == hero.team:
 				continue
-			if entity.type != "hero" and entity.type != "minion":
+			if entity.type != "hero" and entity.type != "minion" and entity.type != "monster":
 				continue
 			if entity.pos.distance_to(target.pos) <= radius:
 				_damage(entity, damage, hero)
@@ -546,8 +731,8 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 		var direction: Vector2 = aim - hero.pos
 		if direction.length() < 0.2:
 			direction = hero.facing
-		hero.pos += direction.normalized() * float(skill.range)
-		_clamp_position(hero)
+		var destination: Vector2 = hero.pos + direction.normalized() * float(skill.range)
+		hero.pos = Collision.move(hero.pos, destination, float(hero.get("radius", 0.55)))
 	elif kind == "shield":
 		hero.shield = 350.0 + float(hero.level - 1) * 25.0
 		hero.shield_timer = 4.0
@@ -560,13 +745,13 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 		for entity in state.entities:
 			if not entity.alive or entity.team == hero.team:
 				continue
-			if entity.type != "hero" and entity.type != "minion":
+			if entity.type != "hero" and entity.type != "minion" and entity.type != "monster":
 				continue
 			if entity.pos.distance_to(target.pos) <= 3.0:
 				entity.slow_timer = maxf(float(entity.get("slow_timer", 0.0)), 2.5)
 				_damage(entity, float(skill.damage), hero)
 	hero.mp = float(hero.mp) - float(skill.cost)
-	hero.skill_e_cd = float(skill.cooldown)
+	hero.skill_e_cd = float(skill.cooldown) * Jungle.cooldown_scale(hero)
 	_emit("skill", {
 		"slot": "e",
 		"hero": hero.id,
@@ -589,7 +774,7 @@ func _pick_skill_target(hero: Dictionary, aim: Vector2, max_range: float) -> Dic
 	for entity in state.entities:
 		if not entity.alive or entity.team == hero.team:
 			continue
-		if entity.type != "hero" and entity.type != "minion" and entity.type != "tower":
+		if entity.type != "hero" and entity.type != "minion" and entity.type != "tower" and entity.type != "guard" and entity.type != "monster":
 			continue
 		var dist: float = hero.pos.distance_to(entity.pos)
 		if dist > max_range:
@@ -659,13 +844,29 @@ func apply_damage(entity_id: int, amount: float, source_id: int = -1) -> void:
 func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 	if target.is_empty() or not target.alive or amount <= 0.0:
 		return
-	var remaining := amount
+	if target.type == "tower" and not TowerRules.is_tower_vulnerable(target, state.entities):
+		return
+	if target.type == "guard" and not Crystal.is_guard_vulnerable(target, state.entities):
+		return
+	if target.type == "base" and not TowerRules.is_base_vulnerable(target, state.entities):
+		return
+	var incoming := amount
+	if target.type == "tower":
+		incoming *= TowerRules.damage_scale(target, state.time)
+	if not source.is_empty() and str(source.get("type", "")) == "hero":
+		incoming *= Jungle.damage_scale(source) * Objectives.damage_scale(state, str(source.get("team", "")))
+	var remaining := incoming
 	if float(target.get("shield", 0.0)) > 0.0:
 		var absorbed: float = minf(float(target.shield), remaining)
 		target.shield = float(target.shield) - absorbed
 		remaining -= absorbed
+		if target.type == "base":
+			target["last_shield_hit_time"] = float(state.time)
 	if remaining <= 0.0:
 		return
+	if target.type == "hero":
+		RecallRules.interrupt(target)
+		Teleport.interrupt(target)
 	target.hp = float(target.hp) - remaining
 	if target.type == "hero":
 		target.last_damage_time = float(state.time)
@@ -696,6 +897,7 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		target.respawn_timer = HERO_RESPAWN_BASE + float(target.level) * 0.4
 		target.shield = 0.0
 		target.shield_timer = 0.0
+		RecallRules.interrupt(target)
 
 		# 判定真正击杀者 (Killer Attribution)
 		var killer: Dictionary = {}
@@ -731,6 +933,8 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 				killer_name = "防御塔" if killer_type == "tower" else "主堡"
 			elif killer_type == "minion":
 				killer_name = "小兵"
+			elif killer_type == "monster":
+				killer_name = str(killer.get("name", "野怪"))
 			else:
 				killer_name = str(killer.get("name", "战场机关"))
 
@@ -778,6 +982,72 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 			"x": float(target.pos.x),
 			"y": float(target.pos.y),
 		})
+	elif target.type == "monster":
+		target.respawn_timer = float(target.get("respawn_time", Jungle.RESPAWN_TIME))
+		target.last_attacker_id = -1
+		target.last_attacker_time = -999.0
+		if bool(target.get("objective", false)):
+			if not source.is_empty() and str(source.get("type", "")) == "hero":
+				Objectives.grant_buff(state, str(source.get("team", "")))
+				_add_xp(source, 160.0)
+			_emit("objective_killed", {
+				"team": str(source.get("team", "")),
+				"name": str(target.get("name", "首领")),
+				"objective_id": str(target.get("objective_id", "")),
+				"x": float(target.pos.x),
+				"y": float(target.pos.y),
+			})
+		elif bool(target.get("river_spirit", false)):
+			if not source.is_empty() and str(source.get("type", "")) == "hero":
+				River.grant_reveal(state, str(source.get("team", "")), target.pos)
+				_add_xp(source, River.SPIRIT_XP)
+			_emit("river_spirit_killed", {
+				"team": str(source.get("team", "")),
+				"name": str(target.get("name", "河道之灵")),
+				"x": float(target.pos.x),
+				"y": float(target.pos.y),
+			})
+		else:
+			if not source.is_empty() and str(source.get("type", "")) == "hero":
+				Jungle.apply_buff(source, str(target.get("buff_type", "")))
+				_add_xp(source, 45.0)
+			_emit("buff_taken", {
+				"team": str(source.get("team", "")),
+				"buff": str(target.get("buff_type", "")),
+				"name": str(target.get("name", "野怪")),
+				"x": float(target.pos.x),
+				"y": float(target.pos.y),
+			})
+		_emit("death", {
+			"entity_type": "monster",
+			"team": "neutral",
+			"name": str(target.get("name", "野怪")),
+			"x": float(target.pos.x),
+			"y": float(target.pos.y),
+		})
+	elif target.type == "guard":
+		var info: Dictionary = Crystal.on_guard_destroyed(state, target)
+		if not source.is_empty() and source.type == "hero":
+			_add_xp(source, 120.0)
+		_emit("guard_destroyed", {
+			"team": target.team,
+			"side": str(target.get("side", "")),
+			"guards_left": int(info.get("guards_alive", 0)),
+			"x": float(target.pos.x),
+			"y": float(target.pos.y),
+		})
+		if bool(info.get("broken", false)):
+			_emit("crystal_shield_broken", {
+				"team": target.team,
+				"x": float(target.pos.x),
+				"y": float(target.pos.y),
+			})
+		_emit("death", {
+			"entity_type": "guard",
+			"team": target.team,
+			"x": float(target.pos.x),
+			"y": float(target.pos.y),
+		})
 	elif target.type == "tower":
 		var winner_team := "blue" if target.team == "red" else "red"
 		state.scores[winner_team].towers = int(state.scores[winner_team].towers) + 1
@@ -786,9 +1056,12 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		_emit("tower_destroyed", {
 			"team": target.team,
 			"lane": target.lane,
+			"tier": str(target.get("tier", "")),
 			"x": float(target.pos.x),
 			"y": float(target.pos.y),
 		})
+		if str(target.get("tier", "")) == "high":
+			_emit("base_exposed", {"team": target.team, "lane": target.lane})
 	elif target.type == "base":
 		state.winner = "blue" if target.team == "red" else "red"
 		ended = true
@@ -818,13 +1091,6 @@ func _entity_by_id(entity_id: int) -> Dictionary:
 			return entity
 	return {}
 
-func _clamp_position(entity: Dictionary) -> void:
-	var limit: float = MapData.BOUNDS - float(entity.get("radius", 0.0))
-	entity.pos = Vector2(
-		clampf(float(entity.pos.x), -limit, limit),
-		clampf(float(entity.pos.y), -limit, limit)
-	)
-
 func snapshot() -> Dictionary:
 	var entities: Array = []
 	for entity in state.entities:
@@ -842,6 +1108,46 @@ func snapshot() -> Dictionary:
 		"scores": state.scores.duplicate(true),
 		"events": events,
 		"wave": state.wave,
+		"objectives": _snapshot_objectives(),
+		"river": _snapshot_river(),
+	}
+
+# 客机视角快照：只包含己方与视野内目标，避免全图透视。
+func snapshot_for(team: String) -> Dictionary:
+	return Vision.filter_snapshot(snapshot(), team)
+
+func _snapshot_objectives() -> Dictionary:
+	var spawn_timer := float(state.objective.get("spawn_timer", 0.0))
+	if bool(state.objective.get("spawned", false)):
+		spawn_timer = 0.0
+		var pending := 0.0
+		var waiting := false
+		for entity in state.entities:
+			if entity.type != "monster" or not bool(entity.get("objective", false)):
+				continue
+			if bool(entity.get("alive", true)):
+				continue
+			var timer: float = float(entity.get("respawn_timer", Objectives.RESPAWN))
+			pending = timer if not waiting else minf(pending, timer)
+			waiting = true
+		if waiting:
+			spawn_timer = pending
+	var buffs: Dictionary = state.objectives.get("buffs", {})
+	return {
+		"spawn_timer": spawn_timer,
+		"blue_buff": float(buffs.get("blue", 0.0)),
+		"red_buff": float(buffs.get("red", 0.0)),
+	}
+
+func _snapshot_river() -> Dictionary:
+	River.ensure_state(state)
+	var reveals: Dictionary = state.river.reveals
+	return {
+		"spawn_timer": float(state.river.get("spawn_timer", 0.0)),
+		"reveals": {
+			"blue": (reveals.get("blue", []) as Array).duplicate(true),
+			"red": (reveals.get("red", []) as Array).duplicate(true),
+		},
 	}
 
 func _snapshot_entity(entity: Dictionary) -> Dictionary:
@@ -872,7 +1178,11 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["deaths"] = int(entity.deaths)
 		data["respawn_timer"] = 0.0 if entity.alive else float(entity.respawn_timer)
 		data["skill_q_cd"] = float(entity.skill_q_cd)
+		data["skill_w_cd"] = float(entity.get("skill_w_cd", 0.0))
 		data["skill_e_cd"] = float(entity.skill_e_cd)
+		data["skill_r_cd"] = float(entity.get("skill_r_cd", 0.0))
+		data["summoner_cd"] = float(entity.get("summoner_cd", 0.0))
+		data["summoner_spell"] = str(entity.get("summoner_spell", "flash"))
 		data["speed"] = float(entity.speed)
 		data["shield"] = float(entity.shield)
 		data["facing_x"] = float(facing.x)
@@ -882,13 +1192,44 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["slow_timer"] = float(entity.slow_timer)
 		data["moving"] = bool(entity.get("moving", false))
 		data["last_killer_name"] = str(entity.get("last_killer_name", ""))
+		data["recalling"] = bool(entity.get("recalling", false))
+		data["recall_timer"] = float(entity.get("recall_timer", 0.0))
+		data["recall_total"] = float(entity.get("recall_total", 0.0))
+		data["teleporting"] = bool(entity.get("teleporting", false))
+		data["teleport_timer"] = float(entity.get("teleport_timer", 0.0))
+		data["teleport_total"] = float(entity.get("teleport_total", 0.0))
+		data["teleport_cd"] = float(entity.get("teleport_cd", 0.0))
+		data["buff_red_timer"] = float(entity.get("buff_red_timer", 0.0))
+		data["buff_blue_timer"] = float(entity.get("buff_blue_timer", 0.0))
 	elif entity.type == "minion":
 		data["lane"] = str(entity.lane)
+		data["minion_type"] = str(entity.get("minion_type", "melee"))
 		data["speed"] = float(entity.speed)
 		data["moving"] = bool(entity.get("moving", false))
 	elif entity.type == "tower":
 		data["lane"] = str(entity.lane)
+		data["tier"] = str(entity.get("tier", "outer"))
 		data["range"] = float(entity.range)
+		data["vulnerable"] = TowerRules.is_tower_vulnerable(entity, state.entities)
+	elif entity.type == "guard":
+		data["lane"] = str(entity.get("lane", "core"))
+		data["tier"] = str(entity.get("tier", "twin"))
+		data["side"] = str(entity.get("side", ""))
+		data["range"] = float(entity.get("range", 7.0))
+		data["vulnerable"] = Crystal.is_guard_vulnerable(entity, state.entities)
+	elif entity.type == "base":
+		data["vulnerable"] = TowerRules.is_base_vulnerable(entity, state.entities)
+		data["shield"] = float(entity.get("shield", 0.0))
+		data["shield_max"] = float(entity.get("shield_max", 0.0))
+		data["guards_alive"] = int(entity.get("guards_alive", 0))
+	elif entity.type == "monster":
+		data["monster_type"] = str(entity.get("monster_type", "wolf"))
+		data["camp_id"] = str(entity.get("camp_id", ""))
+		data["buff_type"] = str(entity.get("buff_type", ""))
+		data["objective"] = bool(entity.get("objective", false))
+		data["objective_id"] = str(entity.get("objective_id", ""))
+		data["name"] = str(entity.get("name", "野怪"))
+		data["respawn_timer"] = float(entity.get("respawn_timer", 0.0)) if not bool(entity.get("alive", true)) else 0.0
 	return data
 
 func get_last_kill() -> Dictionary:

@@ -10,10 +10,24 @@ Godot 4.7 制作的移动端 1v1 / 5v5 战场原型，含单人试炼、人机�
 ```
 .
 ├── run.cmd                      # 启动器：调用本机 Godot 打开工程
+├── AGENTS.md                    # 【AI 入口】任何模型动手前先读这一页
 ├── .gitignore                   # 入库白名单式的忽略规则（见下）
 ├── .gitattributes               # 二进制资源标记、换行符统一
 ├── docs/                        # 工程规范与文档
-│   └── ARCHITECTURE.md          # 【核心基准】游戏分层架构、目录规约与开发铁律
+│   ├── ARCHITECTURE.md          # 【核心基准】游戏分层架构、目录规约与开发铁律
+│   ├── ai/                      # 【AI 必读】按任务分类的工作规则（见 docs/ai/README.md）
+│   │   ├── README.md            # 索引 + 任务路由表
+│   │   ├── routing.yaml         # 路由表的机器可读版
+│   │   ├── 00-hard-rules.md     # 十条硬规则
+│   │   ├── 01-repo-reality.md   # 真实目录 vs 文档描述（含空目录陷阱）
+│   │   ├── 02-godot-pitfalls.md # Godot 4.7 / Windows 环境坑
+│   │   ├── 03-tdd.md            # 测试流程与断言 API
+│   │   ├── 04-combat-chain.md   # 字段与输入键的改动链路
+│   │   ├── 05-ui-and-feel.md    # UI / 手感 / 表现现状
+│   │   ├── 06-net-sync.md       # 联机同步与协议白名单
+│   │   ├── 07-files-and-git.md  # 文件归属与入库
+│   │   └── 08-delivery-checklist.md  # 交付前自查
+│   └── upgrades/                # 功能升级路线（愿景，不代表已完成）
 │
 ├── godot/                       # 游戏工程本体（Godot 项目根）
 │   ├── project.godot            # 工程配置（主场景、分辨率、渲染后端）

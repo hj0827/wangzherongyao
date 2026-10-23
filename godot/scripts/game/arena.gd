@@ -14,10 +14,16 @@ const GameHUD = preload("res://scripts/ui/game_hud.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const InputAssist = preload("res://scripts/game/input_assist.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
+const MapView = preload("res://scripts/game/map_view.gd")
+const BushFeedback = preload("res://scripts/game/bush_feedback.gd")
+const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
 const ENV_DIR := "res://assets/environment/"
 const TICK := 1.0 / 30.0
+const BASE_FOV := 42.0
+# 焦段过渡速率（度/秒）。进出草丛只差约 3.4°，0.15s 左右走完。
+const FOV_GLIDE_SPEED := 24.0
 # 相机缩放的滑行速率（zoom 单位/秒）。滚轮一次 ±2，约 0.14s 走完，匀速不突兀。
 const ZOOM_GLIDE_SPEED := 14.0
 # 客机渲染相对服务端的固定延迟。要略大于一个快照周期（服务端 10Hz ≈ 0.1s），
@@ -85,6 +91,11 @@ var _local_id := -1
 var _local_entity_id := -1
 var _first_blood := false
 var _camera_shake := 0.0
+# 草丛进出：状态机 → HUD 隐匿提示 + 焦段目标 + 合成音效。
+var _bush_feedback = BushFeedback.new()
+var _bush_hidden := false
+var _camera_fov_target := BASE_FOV
+var _bush_audio: AudioStreamPlayer
 var touch_mode := false
 var _mouse_ground := Vector2.ZERO
 var _mouse_valid := false
@@ -109,12 +120,16 @@ var _prev_q := false
 var _prev_e := false
 var _queued_q := false
 var _queued_e := false
+var _queued_recall := false
+var _queued_teleport := false
 var _local_input := {
 	"move": Vector2.ZERO,
 	"aim": Vector2.ZERO,
 	"skill_q": false,
 	"skill_e": false,
 	"attack": false,
+	"recall": false,
+	"teleport": false,
 }
 var _started_announcement := false
 
@@ -169,6 +184,8 @@ func _build_staged() -> void:
 
 	_emit_build(0.28, "种下峡谷植被")
 	await _build_scenery()
+	_build_map_features()
+	await _next_frame()
 
 	_emit_build(0.42, "摆放战场设施")
 	_units_root = Node3D.new()
@@ -182,6 +199,7 @@ func _build_staged() -> void:
 	add_child(_effects_root)
 	_init_vfx_pools()
 	_build_camera()
+	_build_bush_audio()
 	_build_aim_marker()
 	_build_move_marker()
 	_build_range_indicators()
@@ -229,9 +247,9 @@ func _create_initial_views_staged(snapshot: Dictionary) -> void:
 	var created := 0
 	for entity in snapshot.get("entities", []):
 		var entity_type := str(entity.get("type", ""))
-		if entity_type != "hero" and entity_type != "minion":
+		if entity_type != "hero" and entity_type != "minion" and entity_type != "monster":
 			continue
-		if entity_type == "minion" and not bool(entity.get("alive", false)):
+		if entity_type != "hero" and not bool(entity.get("alive", false)):
 			continue
 		var entity_id := int(entity.get("id", -1))
 		if _views.has(entity_id):
@@ -277,8 +295,12 @@ func _build_hud() -> void:
 func _on_skill_button(slot: String) -> void:
 	if slot == "q":
 		_queued_q = true
-	else:
+	elif slot == "e":
 		_queued_e = true
+	elif slot == "recall":
+		_queued_recall = true
+	elif slot == "teleport":
+		_queued_teleport = true
 
 func _on_touch_move(value: Vector2) -> void:
 	_touch_move = value
@@ -450,14 +472,18 @@ func _process(delta: float) -> void:
 			_snapshot_timer += delta
 			if _snapshot_timer >= 0.1:
 				_snapshot_timer = 0.0
-				var outgoing := current_snapshot.duplicate()
-				outgoing["events"] = _pending_events.duplicate()
+				var outgoing_events: Array = _pending_events.duplicate()
 				_pending_events.clear()
-				session.broadcast_snapshot(outgoing)
+				# 视野过滤必须按队伍分别下发，否则客机能看到全图敌人。
+				session.broadcast_team_snapshots(func(team: String) -> Dictionary:
+					var team_snapshot: Dictionary = sim.snapshot_for(team)
+					team_snapshot["events"] = outgoing_events.duplicate()
+					return team_snapshot
+				)
 	elif session != null:
 		_gather_input()
 		_input_timer += delta
-		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_e:
+		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_e or _local_input.recall or _local_input.teleport:
 			_input_timer = 0.0
 			session.submit_input(_local_input.duplicate())
 			_consume_skill_queue()
@@ -473,6 +499,7 @@ func _process(delta: float) -> void:
 		# 客机：视觉用缓冲里回放出的那一格，HUD / 准星仍用最新快照。
 		_sync_units(_render_snapshot, delta)
 	_sync_structures(current_snapshot, false)
+	_update_bush_feedback()
 	_update_camera(delta, false)
 	_update_aim_marker()
 	_update_range_indicators()
@@ -518,6 +545,8 @@ func _gather_input() -> void:
 		_local_input.aim = _mouse_ground
 	# 左键已经让给「走到那」，普攻改到右键 / 空格。
 	_local_input.attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or Input.is_key_pressed(KEY_SPACE)
+	_local_input.recall = Input.is_key_pressed(KEY_B) or _queued_recall
+	_local_input.teleport = Input.is_key_pressed(KEY_T) or _queued_teleport
 
 # 点击移动：算出本 tick 该走的向量。
 # 返回值长度可能小于 1（模拟侧只在 >1 时才归一化），一步能走完时按剩余距离缩短。
@@ -582,6 +611,10 @@ func _gather_touch_input() -> void:
 	if _queued_e:
 		_local_input.skill_e = true
 		_flash_skill_range("e")
+	if _queued_recall:
+		_local_input.recall = true
+	if _queued_teleport:
+		_local_input.teleport = true
 	_local_input.move = InputAssist.camera_relative_move(_touch_move, _camera_forward_2d())
 	_local_input.aim = _resolve_touch_aim()
 	_local_input.attack = _touch_attack
@@ -610,8 +643,12 @@ func _snapshot_local_hero() -> Dictionary:
 func _consume_skill_queue() -> void:
 	_local_input.skill_q = false
 	_local_input.skill_e = false
+	_local_input.recall = false
+	_local_input.teleport = false
 	_queued_q = false
 	_queued_e = false
+	_queued_recall = false
+	_queued_teleport = false
 
 func _update_mouse_ground() -> void:
 	_project_ground(get_viewport().get_mouse_position())
@@ -738,8 +775,10 @@ func _update_camera(delta: float, instant: bool) -> void:
 	# 用恒定速率而非指数衰减——指数衰减「前快后慢」，首帧就会走掉一大截。
 	if instant or not _cam_initialized:
 		_zoom_current = zoom
+		camera.fov = _camera_fov_target
 	else:
 		_zoom_current = move_toward(_zoom_current, zoom, delta * ZOOM_GLIDE_SPEED)
+		camera.fov = move_toward(camera.fov, _camera_fov_target, delta * FOV_GLIDE_SPEED)
 	var desired := _camera_desired(target)
 	# 目标位置本身已是逐帧插值后的平滑轨迹，相机再叠一层 lerp 只会引入滞后；
 	# 而 look_at 用的是即时 target，两者相位不一致正是移动时画面抖动的主因。
@@ -754,7 +793,7 @@ func _update_camera(delta: float, instant: bool) -> void:
 func _build_camera() -> void:
 	camera = Camera3D.new()
 	camera.name = "Camera"
-	camera.fov = 42.0
+	camera.fov = BASE_FOV
 	camera.near = 0.2
 	camera.far = 320.0
 	camera.current = true
@@ -763,6 +802,51 @@ func _build_camera() -> void:
 	var target := Vector3(base.x, 0.0, base.y)
 	camera.position = _camera_desired(target)
 	camera.look_at(target + Vector3(0.0, 0.55, 0.0), Vector3.UP)
+
+func _build_bush_audio() -> void:
+	_bush_audio = AudioStreamPlayer.new()
+	_bush_audio.name = "BushAudio"
+	_bush_audio.volume_db = -6.0
+	add_child(_bush_audio)
+
+func _update_bush_feedback() -> void:
+	var local := _find_entity_by_owner(local_owner)
+	if local.is_empty() or not bool(local.get("alive", false)):
+		_clear_bush_feedback()
+		return
+	_bush_feedback_step(Vector2(float(local.get("x", 0.0)), float(local.get("y", 0.0))))
+
+func _bush_feedback_step(point: Vector2) -> String:
+	var transition: String = _bush_feedback.update(point)
+	if transition == "none":
+		return "none"
+	_bush_hidden = bool(_bush_feedback.in_bush)
+	_camera_fov_target = _bush_feedback.target_fov(BASE_FOV)
+	if hud != null:
+		hud.set_bush_hidden(_bush_hidden)
+	if _bush_audio != null:
+		var cue := _bush_cue_for(transition)
+		if cue != null:
+			_bush_audio.stream = cue
+			_bush_audio.play()
+	return transition
+
+func _bush_cue_for(transition: String) -> AudioStreamWAV:
+	if transition == "enter":
+		return AudioCues.enter_bush()
+	if transition == "exit":
+		return AudioCues.exit_bush()
+	return null
+
+# 死亡时清空隐匿态，避免 HUD 与焦段停在草丛里；重生点不在草里，不需要补 exit。
+func _clear_bush_feedback() -> void:
+	if not _bush_hidden and not _bush_feedback.in_bush:
+		return
+	_bush_feedback.reset()
+	_bush_hidden = false
+	_camera_fov_target = BASE_FOV
+	if hud != null:
+		hud.set_bush_hidden(false)
 
 func _update_aim_marker() -> void:
 	if aim_marker == null:
@@ -1024,7 +1108,7 @@ func _build_lanes() -> void:
 	edge_material.albedo_color = Color(0.16, 0.14, 0.11)
 	edge_material.roughness = 1.0
 	for lane in MapData.LANE_ORDER:
-		var path: Array = MapData.lane_path(lane)
+		var path: Array = MapView.lane_path(lane)
 		_props_root.add_child(_lane_ribbon(path, 7.5, 0.008, edge_material))
 		_props_root.add_child(_lane_ribbon(path, 7.0, 0.012, outer_material))
 		_props_root.add_child(_lane_ribbon(path, 5.2, 0.022, inner_material))
@@ -1144,6 +1228,154 @@ void fragment() {
 	bridge.material_override = bridge_material
 	_props_root.add_child(bridge)
 
+# 地图机制的可视化：墙体、草丛、野区营地与首领坑都从 MapLayout 取坐标，
+# 与碰撞/视野/野怪刷新点严格同源，避免「看得见走不过去」或「打到空气墙」。
+func _build_map_features() -> void:
+	var marks := MapView.map_marks()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 90210
+	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
+	var stone := StandardMaterial3D.new()
+	stone.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
+	stone.albedo_color = Color(0.52, 0.5, 0.46)
+	stone.roughness = 1.0
+	stone.uv1_scale = Vector3(2, 2, 1)
+
+	for wall in marks.walls:
+		var a: Vector2 = wall.a
+		var b: Vector2 = wall.b
+		var center := (a + b) * 0.5
+		var length := a.distance_to(b)
+		var dir := (b - a) / maxf(length, 0.001)
+		var barrier := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(length, 1.7, 1.3)
+		barrier.mesh = box
+		barrier.material_override = stone
+		barrier.position = Vector3(center.x, 0.85, center.y)
+		barrier.rotation.y = -atan2(dir.y, dir.x)
+		ModelUtils.enable_shadows(barrier, true)
+		_props_root.add_child(barrier)
+		for i in 3:
+			var p := a.lerp(b, (float(i) + 0.5) / 3.0)
+			var rock := ModelUtils.fit_scene(rock_scene, rng.randf_range(1.5, 2.2), rng.randf_range(1.8, 2.8))
+			rock.position = Vector3(p.x + rng.randf_range(-0.8, 0.8), 0.0, p.y + rng.randf_range(-0.8, 0.8))
+			rock.rotation.y = rng.randf_range(0.0, TAU)
+			ModelUtils.enable_shadows(rock, false)
+			_props_root.add_child(rock)
+
+	var bush_mat := StandardMaterial3D.new()
+	bush_mat.albedo_color = Color(0.12, 0.31, 0.14)
+	bush_mat.roughness = 1.0
+	for bush in marks.bushes:
+		var disc_mat := StandardMaterial3D.new()
+		disc_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		disc_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		disc_mat.albedo_color = Color(0.09, 0.24, 0.11, 0.42)
+		var disc := MeshInstance3D.new()
+		var plane := PlaneMesh.new()
+		plane.size = Vector2(float(bush.radius) * 2.0, float(bush.radius) * 2.0)
+		disc.mesh = plane
+		disc.material_override = disc_mat
+		disc.position = Vector3(bush.pos.x, 0.035, bush.pos.y)
+		disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_props_root.add_child(disc)
+		for i in 7:
+			var angle := TAU * float(i) / 7.0
+			var offset := Vector2(cos(angle), sin(angle)) * float(bush.radius) * rng.randf_range(0.25, 0.62)
+			var clump := MeshInstance3D.new()
+			var sphere := SphereMesh.new()
+			sphere.radius = rng.randf_range(0.55, 0.95)
+			sphere.height = sphere.radius * 2.0
+			clump.mesh = sphere
+			clump.material_override = bush_mat
+			clump.scale = Vector3(1.0, 0.72, 1.0)
+			clump.position = Vector3(bush.pos.x + offset.x, 0.42, bush.pos.y + offset.y)
+			clump.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			_props_root.add_child(clump)
+
+	for camp in marks.camps:
+		var buff := str(camp.get("buff", ""))
+		var color := Color(0.95, 0.62, 0.22) if buff == "red" else Color(0.34, 0.58, 0.98)
+		_add_map_disc(camp.pos, 3.4, Color(color.r, color.g, color.b, 0.2), color)
+		_add_map_totem(camp.pos + Vector2(0.0, -2.0), 2.2, color)
+
+	for pit in marks.objectives:
+		_add_map_disc(pit.pos, 5.6, Color(0.35, 0.2, 0.5, 0.26), Color(0.72, 0.5, 0.92))
+		for i in 4:
+			var angle := TAU * float(i) / 4.0 + PI * 0.25
+			var pillar_pos: Vector2 = pit.pos + Vector2(cos(angle), sin(angle)) * 5.0
+			_add_map_totem(pillar_pos, 3.0, Color(0.62, 0.5, 0.82))
+
+	for pad in marks.teleports:
+		var pad_color := Color(0.4, 0.82, 0.92)
+		_add_map_disc(pad.pos, 3.0, Color(pad_color.r, pad_color.g, pad_color.b, 0.2), pad_color)
+		_add_map_totem(pad.pos + Vector2(0.0, -2.8), 2.6, pad_color)
+
+func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> void:
+	var disc_material := StandardMaterial3D.new()
+	disc_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	disc_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	disc_material.albedo_color = fill
+	var disc := MeshInstance3D.new()
+	var cylinder := CylinderMesh.new()
+	cylinder.top_radius = radius
+	cylinder.bottom_radius = radius
+	cylinder.height = 0.03
+	cylinder.radial_segments = 40
+	disc.mesh = cylinder
+	disc.material_override = disc_material
+	disc.position = Vector3(pos.x, 0.04, pos.y)
+	disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(disc)
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = radius - 0.14
+	torus.outer_radius = radius
+	torus.rings = 40
+	ring.mesh = torus
+	var ring_material := StandardMaterial3D.new()
+	ring_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	ring_material.albedo_color = edge
+	ring_material.emission_enabled = true
+	ring_material.emission = edge
+	ring_material.emission_energy_multiplier = 0.9
+	ring.material_override = ring_material
+	ring.position = Vector3(pos.x, 0.07, pos.y)
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(ring)
+
+func _add_map_totem(pos: Vector2, height: float, color: Color) -> void:
+	var pole := MeshInstance3D.new()
+	var cylinder := CylinderMesh.new()
+	cylinder.top_radius = 0.16
+	cylinder.bottom_radius = 0.26
+	cylinder.height = height
+	cylinder.radial_segments = 8
+	pole.mesh = cylinder
+	var stone := StandardMaterial3D.new()
+	stone.albedo_color = Color(0.32, 0.3, 0.28)
+	stone.roughness = 1.0
+	pole.material_override = stone
+	pole.position = Vector3(pos.x, height * 0.5, pos.y)
+	ModelUtils.enable_shadows(pole, true)
+	_props_root.add_child(pole)
+	var gem := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.26
+	sphere.height = 0.52
+	gem.mesh = sphere
+	var glow := StandardMaterial3D.new()
+	glow.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glow.albedo_color = color
+	glow.emission_enabled = true
+	glow.emission = color
+	glow.emission_energy_multiplier = 1.8
+	gem.material_override = glow
+	gem.position = Vector3(pos.x, height + 0.15, pos.y)
+	gem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(gem)
+
 func _build_scenery() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20261022
@@ -1163,6 +1395,8 @@ func _build_scenery() -> void:
 		var pos := Vector2(cos(angle), sin(angle)) * radius
 		if _lane_distance(pos) < 9.0 or _base_distance(pos) < 24.0 or _river_distance(pos) < 10.0:
 			continue
+		if not _feature_clear(pos, 2.0):
+			continue
 		var scene: PackedScene = pine if i % 3 != 1 else broadleaf
 		var height := rng.randf_range(7.0, 12.5)
 		var tree := ModelUtils.fit_scene(scene, height, height * 1.1)
@@ -1179,6 +1413,8 @@ func _build_scenery() -> void:
 		var pos := Vector2(cos(angle), sin(angle)) * radius
 		if _lane_distance(pos) < 8.0 or _base_distance(pos) < 22.0 or _river_distance(pos) < 8.0:
 			continue
+		if not _feature_clear(pos, 2.0):
+			continue
 		var height := rng.randf_range(5.0, 8.0)
 		var tree := ModelUtils.fit_scene(single_tree, height, height * 0.8)
 		tree.position = Vector3(pos.x, 0.0, pos.y)
@@ -1193,6 +1429,8 @@ func _build_scenery() -> void:
 		var radius := rng.randf_range(18.0, 62.0)
 		var pos := Vector2(cos(angle), sin(angle)) * radius
 		if _lane_distance(pos) < 7.0 or _base_distance(pos) < 18.0:
+			continue
+		if not _feature_clear(pos, 1.5):
 			continue
 		if _river_distance(pos) > 16.0 and i % 2 == 0:
 			continue
@@ -1287,6 +1525,31 @@ func _base_distance(point: Vector2) -> float:
 func _river_distance(point: Vector2) -> float:
 	return absf(point.x + point.y) * 0.70710678
 
+# 墙体/草丛/营地/首领坑周围留白，避免随机植被长进可交互区域。
+func _feature_clear(point: Vector2, margin: float) -> bool:
+	var marks := MapView.map_marks()
+	for wall in marks.walls:
+		if _segment_distance(point, wall.a, wall.b) < 1.5 + margin:
+			return false
+	for bush in marks.bushes:
+		if point.distance_to(bush.pos) < float(bush.radius) + margin:
+			return false
+	for camp in marks.camps:
+		if point.distance_to(camp.pos) < 3.4 + margin:
+			return false
+	for pit in marks.objectives:
+		if point.distance_to(pit.pos) < 5.6 + margin:
+			return false
+	return true
+
+func _segment_distance(point: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var length_sq := ab.length_squared()
+	if length_sq < 0.0001:
+		return point.distance_to(a)
+	var t := clampf((point - a).dot(ab) / length_sq, 0.0, 1.0)
+	return point.distance_to(a + ab * t)
+
 func _sync_units(snapshot: Dictionary, delta: float) -> void:
 	if snapshot.is_empty():
 		return
@@ -1294,7 +1557,7 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 	var seen_ids := {}
 	for entity in snapshot.get("entities", []):
 		var entity_type := str(entity.get("type", ""))
-		if entity_type != "hero" and entity_type != "minion":
+		if entity_type != "hero" and entity_type != "minion" and entity_type != "monster":
 			continue
 		var entity_id := int(entity.get("id", -1))
 		seen_ids[entity_id] = true
@@ -1303,11 +1566,10 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 		var alive := bool(entity.get("alive", false))
 		var view: UnitVisual = _views.get(entity_id)
 		if view == null:
-			if entity_type == "minion" and not alive:
+			if entity_type != "hero" and not alive:
 				continue
-			if entity_type == "hero" or alive:
-				view = _acquire_unit_view(entity)
-				_views[entity_id] = view
+			view = _acquire_unit_view(entity)
+			_views[entity_id] = view
 		if view == null:
 			continue
 		# jitter buffer 模式下调用方显式给出上一格位置（可能跳过多格）。
@@ -1315,23 +1577,30 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 		view.set_snapshot(entity, delta, _render_alpha, prev_xy)
 		view.process_visual(delta)
 
-	# 回收死亡完成或在快照中移除的小兵，杜绝死兵泄漏与每帧遍历浪费
+	# 回收死亡完成或在快照中移除的小兵/野怪，杜绝泄漏与每帧遍历浪费。
 	var to_recycle: Array[int] = []
 	for eid in _views:
 		var view: UnitVisual = _views[eid]
-		if view != null and view.kind == "minion":
-			if view.can_recycle() or not seen_ids.has(eid):
-				to_recycle.append(eid)
+		if view == null:
+			continue
+		if view.kind == "minion" and (view.can_recycle() or not seen_ids.has(eid)):
+			to_recycle.append(eid)
+		elif view.kind == "monster" and not seen_ids.has(eid):
+			to_recycle.append(eid)
 	for eid in to_recycle:
 		var view: UnitVisual = _views[eid]
 		_views.erase(eid)
-		if view:
+		if view == null:
+			continue
+		if view.kind == "minion":
 			view.recycle()
 			var pool := _minion_pool_blue if view.team == "blue" else _minion_pool_red
 			if pool.size() < MINION_POOL_LIMIT:
 				pool.append(view)
 			else:
 				view.queue_free()
+		else:
+			view.queue_free()
 
 func _acquire_unit_view(entity: Dictionary) -> UnitVisual:
 	var entity_type := str(entity.get("type", "hero"))
@@ -1354,6 +1623,8 @@ func _create_unit_view(entity: Dictionary) -> UnitVisual:
 	var is_local := entity_type == "hero" and str(entity.get("owner_id", "")) == local_owner
 	if entity_type == "hero":
 		view.setup("hero", team, str(entity.get("hero_type", "blade")), str(entity.get("name", "英雄")), is_local)
+	elif entity_type == "monster":
+		view.setup("monster", "neutral", str(entity.get("monster_type", "wolf")), str(entity.get("name", "野怪")), false)
 	else:
 		view.setup("minion", team, "minion", "", false)
 	_units_root.add_child(view)
@@ -1366,7 +1637,7 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 		return
 	for entity in snapshot.get("entities", []):
 		var entity_type := str(entity.get("type", ""))
-		if entity_type != "tower" and entity_type != "base":
+		if entity_type != "tower" and entity_type != "guard" and entity_type != "base":
 			continue
 		var entity_id := int(entity.get("id", -1))
 		var record: Dictionary = _structure_views.get(entity_id, {})
@@ -1381,6 +1652,13 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 		var spin: Node3D = record.get("spin")
 		if spin:
 			spin.rotation.y = float(Time.get_ticks_msec()) * 0.0006
+		var shield: Node3D = record.get("shield")
+		if shield:
+			shield.visible = MapView.structure_locked(entity)
+		if entity_type == "base":
+			var crystal_shield: Node3D = record.get("crystal_shield")
+			if crystal_shield:
+				crystal_shield.visible = float(entity.get("shield", 0.0)) > 0.0
 		var hp := float(entity.get("hp", 0.0))
 		var max_hp := maxf(1.0, float(entity.get("max_hp", 1.0)))
 		var ratio := clampf(hp / max_hp, 0.0, 1.0)
@@ -1393,6 +1671,8 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	var team := str(entity.get("team", "blue"))
 	var team_color := BLUE if team == "blue" else RED
 	var entity_type := str(entity.get("type", "tower"))
+	var tier := str(entity.get("tier", "outer"))
+	var visual_scale := MapView.tower_scale(tier) if (entity_type == "tower" or entity_type == "guard") else 1.0
 	var root := Node3D.new()
 	var pos := Vector3(float(entity.get("x", 0.0)), 0.0, float(entity.get("y", 0.0)))
 	root.position = pos
@@ -1403,6 +1683,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	var bar_width: float
 	var ring_radius: float
 	var spin_node: Node3D = null
+	var crystal_shield: Node3D = null
 	if entity_type == "base":
 		var stone := StandardMaterial3D.new()
 		stone.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
@@ -1499,11 +1780,33 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		beam.position = Vector3(0, 13.0, 0)
 		beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		root.add_child(beam)
+		# 水晶护盾：双塔存活且基地已暴露时罩住整座水晶，破碎后直接消失。
+		var bubble := MeshInstance3D.new()
+		var bubble_mesh := SphereMesh.new()
+		bubble_mesh.radius = 4.6
+		bubble_mesh.height = 9.2
+		bubble_mesh.radial_segments = 32
+		bubble_mesh.rings = 16
+		bubble.mesh = bubble_mesh
+		var bubble_material := StandardMaterial3D.new()
+		bubble_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		bubble_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		bubble_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		bubble_material.albedo_color = Color(0.56, 0.82, 1.0, 0.14)
+		bubble_material.emission_enabled = true
+		bubble_material.emission = Color(0.5, 0.78, 1.0)
+		bubble_material.emission_energy_multiplier = 0.8
+		bubble.material_override = bubble_material
+		bubble.position.y = 3.0
+		bubble.visible = float(entity.get("shield", 0.0)) > 0.0
+		bubble.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(bubble)
+		crystal_shield = bubble
 	else:
-		model = ModelUtils.fit_scene(load(ENV_DIR + "WatchTower_SecondAge_Level3.glb"), 7.3, 3.8)
-		bar_height = 8.5
-		bar_width = 2.7
-		ring_radius = 2.5
+		model = ModelUtils.fit_scene(load(ENV_DIR + "WatchTower_SecondAge_Level3.glb"), 7.3 * visual_scale, 3.8 * visual_scale)
+		bar_height = 8.5 * visual_scale
+		bar_width = 2.7 * visual_scale
+		ring_radius = 2.5 * visual_scale
 		var crystal := MeshInstance3D.new()
 		var sphere := SphereMesh.new()
 		sphere.radius = 0.32
@@ -1516,7 +1819,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		crystal_material.emission = team_color
 		crystal_material.emission_energy_multiplier = 2.2
 		crystal.material_override = crystal_material
-		crystal.position = Vector3(0, 7.0, 0)
+		crystal.position = Vector3(0, 7.0 * visual_scale, 0)
 		crystal.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		root.add_child(crystal)
 	ModelUtils.tint(model, team_color, 0.08)
@@ -1540,8 +1843,40 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	ring.material_override = ring_material
 	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(ring)
+	# 未解锁的塔/主堡罩一层光环，提示「现在打不动」。
+	var shield := MeshInstance3D.new()
+	var shield_torus := TorusMesh.new()
+	shield_torus.inner_radius = ring_radius + 1.1
+	shield_torus.outer_radius = ring_radius + 1.28
+	shield_torus.rings = 40
+	shield_torus.ring_segments = 6
+	shield.mesh = shield_torus
+	shield.position.y = 0.12
+	var shield_material := StandardMaterial3D.new()
+	shield_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	shield_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	shield_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	shield_material.albedo_color = Color(0.62, 0.78, 0.9, 0.42)
+	shield_material.emission_enabled = true
+	shield_material.emission = Color(0.55, 0.72, 0.9)
+	shield_material.emission_energy_multiplier = 1.2
+	shield.material_override = shield_material
+	shield.visible = MapView.structure_locked(entity)
+	shield.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(shield)
 	var fill := _add_structure_bar(root, bar_height, bar_width, team_color)
-	return {"root": root, "bar": fill[0], "bar_mat": fill[1], "bar_width": bar_width, "spin": spin_node}
+	return {
+		"root": root,
+		"bar": fill[0],
+		"bar_mat": fill[1],
+		"bar_width": bar_width,
+		"spin": spin_node,
+		"shield": shield,
+		"crystal_shield": crystal_shield,
+		"scale": visual_scale,
+		"tier": tier,
+		"team_color": team_color,
+	}
 
 func _add_structure_bar(root: Node3D, height: float, width: float, color: Color) -> Array:
 	var holder := Node3D.new()
@@ -1567,6 +1902,12 @@ func _process_events(events: Array) -> void:
 	for event in events:
 		if not (event is Dictionary):
 			continue
+		var banner := MapView.event_banner(event)
+		if not banner.is_empty() and hud != null:
+			var banner_color: Color = banner.get("color", GameTheme.GOLD_LIGHT)
+			if bool(banner.get("announce", false)):
+				hud.announce(str(banner.get("text", "")), banner_color, float(banner.get("duration", 1.6)))
+			hud.add_feed(str(banner.get("feed", "")), banner_color)
 		match str(event.get("type", "")):
 			"attack":
 				var attacker: UnitVisual = _views.get(int(event.get("hero", -1)))
@@ -1581,7 +1922,37 @@ func _process_events(events: Array) -> void:
 			"tower_destroyed":
 				var pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(pos, RED if str(event.get("team", "red")) == "red" else BLUE, 32)
-				hud.add_feed("防御塔被摧毁", GameTheme.GOLD_LIGHT)
+			"guard_destroyed":
+				var guard_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
+				_explosion(guard_pos, RED if str(event.get("team", "red")) == "red" else BLUE, 30)
+				_camera_shake = maxf(_camera_shake, 0.14)
+			"crystal_shield_broken":
+				var crystal_pos := Vector3(float(event.get("x", 0.0)), 2.0, float(event.get("y", 0.0)))
+				_spawn_ring(crystal_pos, Color(0.55, 0.84, 1.0), 1.0, 8.0, 1.0)
+				_spawn_particles(crystal_pos + Vector3(0, 2.0, 0), Color(0.62, 0.86, 1.0), 30, 6.0)
+				_camera_shake = maxf(_camera_shake, 0.22)
+			"teleport":
+				var from_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
+				var to_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
+				_spawn_ring(from_pos, Color(0.42, 0.82, 0.95), 0.8, 3.2, 0.7)
+				_spawn_particles(from_pos + Vector3(0, 1.0, 0), Color(0.5, 0.88, 1.0), 24, 5.0)
+				_spawn_ring(to_pos, Color(0.42, 0.82, 0.95), 0.8, 3.2, 0.7)
+				_spawn_particles(to_pos + Vector3(0, 1.0, 0), Color(0.5, 0.88, 1.0), 24, 5.0)
+			"river_spirit_killed":
+				var spirit_pos := Vector3(float(event.get("x", 0.0)), 0.5, float(event.get("y", 0.0)))
+				_spawn_ring(spirit_pos, Color(0.46, 0.86, 0.94), 0.6, 4.0, 0.8)
+			"objective_killed":
+				var boss_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
+				_explosion(boss_pos, GOLD, 40)
+				_spawn_ring(Vector3(boss_pos.x, 0.1, boss_pos.z), GOLD, 1.0, 6.0, 0.9)
+				_camera_shake = maxf(_camera_shake, 0.2)
+			"buff_taken":
+				var buff_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
+				var buff_color := BLUE if str(event.get("buff", "")) == "blue" else RED
+				_spawn_ring(buff_pos, buff_color, 0.6, 3.0, 0.7)
+				_spawn_particles(buff_pos + Vector3(0, 0.8, 0), buff_color, 16, 3.0)
+			"base_exposed":
+				_camera_shake = maxf(_camera_shake, 0.16)
 			"level_up":
 				var hero: UnitVisual = _views.get(int(event.get("hero", -1)))
 				if hero:
@@ -1689,6 +2060,9 @@ func _handle_death_event(event: Dictionary) -> void:
 			hud.add_feed("%s 被 %s 击败" % [victim, killer_name], feed_color)
 	elif entity_type == "minion":
 		_spawn_particles(pos, Color(0.75, 0.7, 0.6), 5, 2.0, 0.05, 0.4)
+	elif entity_type == "monster":
+		var boss := str(event.get("name", "")).contains("暴君") or str(event.get("name", "")).contains("主宰")
+		_spawn_particles(pos + Vector3(0, 0.8, 0), GOLD if boss else Color(0.7, 0.8, 0.52), 18 if boss else 8, 3.0, 0.1, 0.5)
 
 func _init_vfx_pools() -> void:
 	if _effects_root == null:

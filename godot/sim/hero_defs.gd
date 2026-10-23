@@ -19,8 +19,11 @@ const HEROES := {
 		"attack_damage": 78.0,
 		"attack_range": 2.0,
 		"attack_interval": 0.88,
+		"passive": {"name": "绝影疾刃", "desc": "连续普攻积攒刀气，达到3层后下一次攻击附带额外伤害。"},
 		"q": {"name": "裂空斩", "cost": 60.0, "cooldown": 4.5, "range": 5.5, "damage": 190.0, "kind": "slash"},
+		"w": {"name": "旋风斩", "cost": 50.0, "cooldown": 6.0, "range": 3.8, "damage": 160.0, "kind": "spin"},
 		"e": {"name": "疾风步", "cost": 40.0, "cooldown": 8.0, "range": 6.5, "damage": 0.0, "kind": "dash"},
+		"r": {"name": "裂地崩山", "cost": 100.0, "cooldown": 28.0, "range": 7.0, "damage": 380.0, "kind": "leap_slam"},
 	},
 	"mage": {
 		"name": "星璃",
@@ -38,8 +41,11 @@ const HEROES := {
 		"attack_damage": 55.0,
 		"attack_range": 5.6,
 		"attack_interval": 1.0,
+		"passive": {"name": "星灵共鸣", "desc": "技能命中目标时返还法力并造成法术印记。"},
 		"q": {"name": "星陨", "cost": 80.0, "cooldown": 5.5, "range": 8.0, "damage": 215.0, "kind": "burst"},
+		"w": {"name": "虚空织流", "cost": 65.0, "cooldown": 7.5, "range": 7.2, "damage": 140.0, "kind": "line"},
 		"e": {"name": "星界禁锢", "cost": 70.0, "cooldown": 10.0, "range": 6.5, "damage": 80.0, "kind": "slow"},
+		"r": {"name": "星河天倾", "cost": 130.0, "cooldown": 32.0, "range": 8.5, "damage": 420.0, "kind": "meteor_storm"},
 	},
 	"tank": {
 		"name": "铁壁",
@@ -57,8 +63,11 @@ const HEROES := {
 		"attack_damage": 62.0,
 		"attack_range": 2.1,
 		"attack_interval": 1.0,
+		"passive": {"name": "不屈重甲", "desc": "生命值低于40%时触发减伤与自动回血护盾。"},
 		"q": {"name": "震地", "cost": 55.0, "cooldown": 6.0, "range": 4.5, "damage": 145.0, "kind": "quake"},
+		"w": {"name": "野蛮冲撞", "cost": 50.0, "cooldown": 8.0, "range": 5.5, "damage": 120.0, "kind": "charge"},
 		"e": {"name": "守护壁垒", "cost": 65.0, "cooldown": 12.0, "range": 0.0, "damage": 0.0, "kind": "shield"},
+		"r": {"name": "不破要塞", "cost": 90.0, "cooldown": 30.0, "range": 5.0, "damage": 220.0, "kind": "taunt_aura"},
 	},
 	"archer": {
 		"name": "翎羽",
@@ -76,8 +85,11 @@ const HEROES := {
 		"attack_damage": 66.0,
 		"attack_range": 6.4,
 		"attack_interval": 0.82,
+		"passive": {"name": "灵动之风", "desc": "普攻命中敌方英雄提升移速与攻速。"},
 		"q": {"name": "穿云箭", "cost": 55.0, "cooldown": 4.8, "range": 9.0, "damage": 185.0, "kind": "arrow"},
+		"w": {"name": "爆裂疾射", "cost": 60.0, "cooldown": 7.0, "range": 7.5, "damage": 150.0, "kind": "aoe_shot"},
 		"e": {"name": "鹰眼", "cost": 50.0, "cooldown": 10.0, "range": 0.0, "damage": 0.0, "kind": "haste"},
+		"r": {"name": "万箭归宗", "cost": 110.0, "cooldown": 26.0, "range": 9.5, "damage": 390.0, "kind": "arrow_barrage"},
 	},
 }
 

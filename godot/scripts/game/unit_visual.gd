@@ -123,6 +123,7 @@ var team := "blue"
 var hero_type := "blade"
 var display_name := ""
 var is_local := false
+var monster_type := ""
 
 var model_root: Node3D
 var body_root: Node3D
@@ -174,10 +175,14 @@ func setup(unit_kind: String, unit_team: String, type_id: String, label: String,
 	kind = unit_kind
 	team = unit_team
 	hero_type = type_id
+	if kind == "monster":
+		monster_type = type_id
 	display_name = label
 	is_local = local
 	if kind == "hero":
 		_build_hero()
+	elif kind == "monster":
+		_build_monster()
 	else:
 		_build_minion()
 
@@ -309,8 +314,82 @@ func _build_minion() -> void:
 	_set_anim("Idle", true)
 	ModelUtils.enable_shadows(self, false)
 
+func _build_monster() -> void:
+	if monster_type == "spirit":
+		_build_river_spirit()
+		return
+	var scene: PackedScene
+	var target_height := 1.5
+	if monster_type == "orc":
+		scene = preload("res://assets/characters/Orc.glb")
+		target_height = 2.4
+	else:
+		scene = preload("res://assets/characters/Wolf.glb")
+		target_height = 1.4
+	var fitted := ModelUtils.fit_scene(scene, target_height)
+	fitted.name = "Model"
+	model_root = fitted
+	add_child(model_root)
+	for node in model_root.find_children("*", "AnimationPlayer", true, false):
+		var player := node as AnimationPlayer
+		if player:
+			animation_players.append(player)
+			player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
+	_add_ring(0.6)
+	_add_health_bar(target_height + 0.25, 0.9)
+	_set_anim("Idle", true)
+	ModelUtils.enable_shadows(self, false)
+
+func _build_river_spirit() -> void:
+	var root := Node3D.new()
+	root.name = "Model"
+	model_root = root
+	add_child(root)
+	var body := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.62
+	sphere.height = 1.24
+	sphere.radial_segments = 20
+	sphere.rings = 12
+	body.mesh = sphere
+	var body_material := StandardMaterial3D.new()
+	body_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	body_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	body_material.albedo_color = Color(0.4, 0.86, 0.95, 0.88)
+	body_material.emission_enabled = true
+	body_material.emission = Color(0.38, 0.82, 0.96)
+	body_material.emission_energy_multiplier = 1.8
+	body.material_override = body_material
+	body.position.y = 1.0
+	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(body)
+	var halo := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.86
+	torus.outer_radius = 0.94
+	torus.rings = 28
+	torus.ring_segments = 6
+	halo.mesh = torus
+	halo.rotation.x = -PI * 0.4
+	var halo_material := StandardMaterial3D.new()
+	halo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	halo_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	halo_material.albedo_color = Color(0.8, 0.97, 1.0, 0.55)
+	halo_material.emission_enabled = true
+	halo_material.emission = Color(0.7, 0.95, 1.0)
+	halo_material.emission_energy_multiplier = 1.4
+	halo.material_override = halo_material
+	halo.position.y = 1.0
+	halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(halo)
+	_add_ring(0.7)
+	_add_health_bar(2.0, 0.9)
+	_set_anim("Idle", true)
+	ModelUtils.enable_shadows(self, false)
+
 func _add_ring(radius: float) -> void:
-	team_ring = _make_ring(radius, BLUE if team == "blue" else RED, 0.8)
+	var ring_color := BLUE if team == "blue" else (RED if team == "red" else Color(0.86, 0.74, 0.4))
+	team_ring = _make_ring(radius, ring_color, 0.8)
 	add_child(team_ring)
 
 func _make_ring(radius: float, color: Color, alpha: float) -> MeshInstance3D:
@@ -491,7 +570,7 @@ func _equip_weapon(setup_data: Dictionary) -> void:
 	weapon.position = setup_data.weapon_offset
 	attachment.add_child(weapon)
 
-func set_snapshot(data: Dictionary, delta: float, alpha: float = 1.0, prev_xy: Vector2 = Vector2(INF, INF)) -> void:
+func set_snapshot(data: Dictionary, delta: float = 0.016, alpha: float = 1.0, prev_xy: Vector2 = Vector2(INF, INF)) -> void:
 	var target := Vector3(float(data.get("x", 0.0)), 0.0, float(data.get("y", 0.0)))
 	# alpha 变小 = 进入新的一格（tick / 快照区间推进）。
 	var wrapped := alpha + 0.0001 < _last_alpha

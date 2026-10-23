@@ -161,3 +161,40 @@ func test_host_loss_is_reported_to_guest() -> void:
 	eq(client.state, "disconnected", "guest notices host loss")
 	check(errors.has("host_disconnected"), "host loss error surfaced")
 	client.close()
+
+func test_team_snapshot_broadcast_filters_each_team() -> void:
+	var host := _host()
+	var client := _join(host)
+	_pump([host, client])
+	host.start_match()
+	_pump([host, client])
+	var received: Array = []
+	var built_teams: Array = []
+	client.snapshot_received.connect(func(snapshot): received.append(snapshot))
+	host.broadcast_team_snapshots(func(team: String) -> Dictionary:
+		built_teams.append(team)
+		return {
+			"time": 2.0,
+			"mode": "duel",
+			"bounds": 58.0,
+			"ended": false,
+			"winner": "",
+			"wave": 1,
+			"objectives": {},
+			"scores": {},
+			"entities": [{
+				"id": 1, "type": "hero", "team": team, "x": 0.0, "y": 0.0,
+				"hp": 100.0, "max_hp": 100.0, "alive": true,
+				"owner_id": "1", "hero_type": "blade", "name": "Alice",
+			}],
+			"events": [],
+		}
+	)
+	_pump([host, client], 1.0)
+	eq(received.size(), 1, "guest received one team snapshot")
+	if received.size() == 1:
+		eq(received[0].entities.size(), 1, "team snapshot kept one hero")
+		eq(str(received[0].entities[0].team), "red", "guest receives only its own team snapshot")
+	eq(built_teams, ["red"], "host builds one snapshot for the guest team only")
+	host.close()
+	client.close()

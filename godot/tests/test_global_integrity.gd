@@ -197,7 +197,7 @@ func test_global_5v5_team_all_heroes_and_towers() -> void:
 			base_count += 1
 
 	eq(hero_count, 10, "5v5 team match must contain exactly 10 heroes")
-	eq(tower_count, 12, "Standard map must contain 12 outer/inner towers across 3 lanes")
+	eq(tower_count, 18, "Standard map must contain 18 outer/inner/high towers across 3 lanes")
 	eq(base_count, 2, "Standard map must contain 2 headquarters bases")
 
 	# 推进密集交火 60 个 Tick（2.0 秒）
@@ -276,7 +276,16 @@ func test_global_match_victory_and_teardown() -> void:
 	})
 	check(not sim.ended, "Game should not be ended initially")
 
-	# 直接摧毁红方基地
+	# 基地受高地塔保护：先按外→内→高顺序拆掉中路塔
+	for tier in ["outer", "inner", "high"]:
+		var tower: Dictionary = {}
+		for s in sim.state.entities:
+			if s.get("type") == "tower" and s.get("team") == "red" and s.get("lane") == "mid" and s.get("tier") == tier:
+				tower = s
+				break
+		check(not tower.is_empty(), "Red mid %s tower must exist" % tier)
+		sim.apply_damage(int(tower.get("id")), 999999.0)
+
 	var red_base: Dictionary = {}
 	for s in sim.state.entities:
 		if s.get("type") == "base" and s.get("team") == "red":
@@ -285,7 +294,7 @@ func test_global_match_victory_and_teardown() -> void:
 	check(not red_base.is_empty(), "Red base must exist")
 
 	# 施加毁灭伤害以触发死亡逻辑
-	sim.apply_damage(int(red_base.get("id")), 99999.0)
+	sim.apply_damage(int(red_base.get("id")), 999999.0)
 
 	check(sim.ended, "Destroying enemy base must trigger ended")
 	eq(sim.state.winner, "blue", "Winner must be blue")

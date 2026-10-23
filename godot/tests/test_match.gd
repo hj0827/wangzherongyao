@@ -64,7 +64,7 @@ func test_team_mode_creates_ten_humans_and_full_tower_map() -> void:
 		humans.append(_human("p%d" % i, "blue" if i < 5 else "red", "blade"))
 	var sim := _match({"mode": "team", "humans": humans})
 	eq(_entities(sim, "hero").size(), 10, "5v5 has ten heroes")
-	eq(_entities(sim, "tower").size(), 12, "two towers per lane per team")
+	eq(_entities(sim, "tower").size(), 18, "three tiers of towers per lane per team")
 	eq(_entities(sim, "base").size(), 2, "two bases")
 
 func test_team_mode_fills_empty_slots_with_bots() -> void:
@@ -206,6 +206,11 @@ func test_destroying_base_ends_match() -> void:
 		"humans": [_human("p1", "blue"), _human("p2", "red")],
 	})
 	var blue := _hero(sim, "p1")
+	for tier in ["outer", "inner", "high"]:
+		var tower: Dictionary = _entities(sim, "tower").filter(
+			func(t): return t.team == "red" and t.lane == "mid" and t.tier == tier
+		)[0]
+		sim.apply_damage(tower.id, 99999.0, blue.id)
 	var red_base: Dictionary = _entities(sim, "base").filter(func(base): return base.team == "red")[0]
 	sim.apply_damage(red_base.id, 99999.0, blue.id)
 	eq(sim.state.winner, "blue", "blue wins")

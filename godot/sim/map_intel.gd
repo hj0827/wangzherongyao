@@ -4,6 +4,7 @@ extends RefCounted
 # 纯数学 + 快照读取，不依赖任何节点，可在无头测试里直接验证。
 
 const MapData = preload("res://sim/map_data.gd")
+const MapLayout = preload("res://sim/map/map_layout.gd")
 
 const INSPECT_RADIUS := 16.0
 const MAX_UNITS := 4
@@ -12,7 +13,9 @@ const TYPE_LABEL := {
 	"hero": "英雄",
 	"minion": "小兵",
 	"tower": "防御塔",
+	"guard": "双子塔",
 	"base": "主堡",
+	"monster": "野怪",
 }
 const LANE_LABEL := {
 	"mid": "中路",
@@ -24,6 +27,34 @@ const LANE_LABEL := {
 # 河道压在兵线上面，是因为中路桥面同时落在两者范围内，玩家点击桥面时
 # 更想知道「这是河道要冲」而不是「这是中路」。
 static func region_at(point: Vector2) -> Dictionary:
+	var pit: Dictionary = MapLayout.objective_at(point)
+	if not pit.is_empty():
+		return {
+			"name": str(pit.get("name", "首领坑")),
+			"kind": "objective",
+			"team": "",
+			"lane": "",
+			"note": "%s首领坑 · 争夺团队级增伤与推进增益" % str(pit.get("name", "首领")),
+		}
+	var camp: Dictionary = MapLayout.camp_at(point)
+	if not camp.is_empty():
+		var buff_desc := "蓝BUFF（技能冷却缩减）" if str(camp.get("buff", "")) == "blue" else "红BUFF（攻击减速与增伤）"
+		return {
+			"name": "%s营地" % str(camp.get("name", "野怪")),
+			"kind": "camp",
+			"team": "",
+			"lane": "",
+			"note": "野区营地 · 击杀获得%s" % buff_desc,
+		}
+	var bush: Dictionary = MapLayout.bush_at(point)
+	if not bush.is_empty():
+		return {
+			"name": "草丛",
+			"kind": "bush",
+			"team": "",
+			"lane": "",
+			"note": "草丛隐匿 · 避开敌方视野进行埋伏或脱身",
+		}
 	if point.distance_to(MapData.BLUE_BASE) <= MapData.FOUNTAIN_RADIUS:
 		return {
 			"name": "蓝方泉水",

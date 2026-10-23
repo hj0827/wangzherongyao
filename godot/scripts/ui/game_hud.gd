@@ -31,6 +31,8 @@ var online_mode := false
 var _joystick: TouchJoystick
 var _attack_button: TouchActionButton
 var _pause_button: TouchActionButton
+var _recall_button: TouchActionButton
+var _teleport_button: TouchActionButton
 
 var _score_blue: Label
 var _score_red: Label
@@ -75,6 +77,7 @@ var _pause_overlay: Control
 var _pause_title: Label
 var _pause_hint: Label
 var _loading_overlay: Control
+var _bush_label: Label
 
 func setup(owner_id: String, team: String, type_id: String, display: String, mobile := false, online := false) -> void:
 	local_owner = owner_id
@@ -89,6 +92,7 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_build_top_bar()
+	_build_bush_indicator()
 	_build_minimap()
 	_build_map_intel()
 	_build_feed()
@@ -135,6 +139,25 @@ func _build_top_bar() -> void:
 	_score_red.custom_minimum_size.x = 132
 	_score_red.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	row.add_child(_score_red)
+
+func _build_bush_indicator() -> void:
+	_bush_label = _make_label("草丛隐匿 · 敌方无法直接看到你", 15, Color(0.62, 0.92, 0.66))
+	_bush_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_bush_label.add_theme_color_override("font_outline_color", Color(0.0, 0.08, 0.03, 0.85))
+	_bush_label.add_theme_constant_override("outline_size", 4)
+	_bush_label.anchor_left = 0.5
+	_bush_label.anchor_right = 0.5
+	_bush_label.offset_left = -150.0
+	_bush_label.offset_right = 150.0
+	_bush_label.offset_top = 88.0
+	_bush_label.offset_bottom = 114.0
+	_bush_label.visible = false
+	add_child(_bush_label)
+
+func set_bush_hidden(value: bool) -> void:
+	if _bush_label == null:
+		return
+	_bush_label.visible = value
 
 func _build_minimap() -> void:
 	var panel := PanelContainer.new()
@@ -423,12 +446,12 @@ func _build_hints() -> void:
 	# 操作提示拆两行：左键改成「移动到点」之后键位变多，单行会顶到英雄信息面板底下。
 	var lines: Array[String] = [
 		"左键 移动   ·   右键 / 空格 普攻   ·   Q / E 技能",
-		"WASD 走位   ·   滚轮 缩放   ·   Esc 菜单",
+		"WASD 走位   ·   B 回城   ·   T 传送阵   ·   滚轮 缩放   ·   Esc 菜单",
 	]
 	var top := -50.0
 	var bottom := -12.0
 	if touch_mode:
-		lines = ["左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放"]
+		lines = ["左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放   ·   回城 / 传送键"]
 		top = -332.0
 		bottom = -304.0
 	var box := VBoxContainer.new()
@@ -503,6 +526,38 @@ func _build_touch_controls() -> void:
 	_pause_button.offset_bottom = 276.0 + TouchLayout.PAUSE_BUTTON_SIZE.y
 	_pause_button.pressed.connect(func(): pause_requested.emit())
 	add_child(_pause_button)
+
+	_recall_button = TouchActionButton.new()
+	_recall_button.touch_mode = true
+	_recall_button.label = "回城"
+	_recall_button.hint = "B"
+	_recall_button.accent = Color(0.45, 0.78, 0.62)
+	_recall_button.anchor_left = 1.0
+	_recall_button.anchor_top = 1.0
+	_recall_button.anchor_right = 1.0
+	_recall_button.anchor_bottom = 1.0
+	_recall_button.offset_left = -500.0
+	_recall_button.offset_top = -190.0
+	_recall_button.offset_right = -404.0
+	_recall_button.offset_bottom = -94.0
+	_recall_button.pressed.connect(func(): skill_pressed.emit("recall"))
+	add_child(_recall_button)
+
+	_teleport_button = TouchActionButton.new()
+	_teleport_button.touch_mode = true
+	_teleport_button.label = "传送"
+	_teleport_button.hint = "T"
+	_teleport_button.accent = Color(0.42, 0.8, 0.9)
+	_teleport_button.anchor_left = 1.0
+	_teleport_button.anchor_top = 1.0
+	_teleport_button.anchor_right = 1.0
+	_teleport_button.anchor_bottom = 1.0
+	_teleport_button.offset_left = -596.0
+	_teleport_button.offset_top = -190.0
+	_teleport_button.offset_right = -500.0
+	_teleport_button.offset_bottom = -94.0
+	_teleport_button.pressed.connect(func(): skill_pressed.emit("teleport"))
+	add_child(_teleport_button)
 
 func _place_touch_skill(button: Control, arc_index: int) -> void:
 	var angle := deg_to_rad(float(TouchLayout.SKILL_ARC_ANGLES_DEG[arc_index]))
@@ -667,7 +722,12 @@ func update_snapshot(data: Dictionary) -> void:
 	_score_red.text = "%d  红方" % red_kills
 	_timer_label.text = _format_time(float(data.get("time", 0.0)))
 	_wave_label.text = "第 %d 波" % int(data.get("wave", 1))
-	_objective_label.text = "防御塔  蓝 %d : %d 红" % [int(blue_score.get("towers", 0)), int(red_score.get("towers", 0))]
+	var objectives: Dictionary = data.get("objectives", {})
+	var spawn_timer := float(objectives.get("spawn_timer", 0.0))
+	if spawn_timer > 0.0:
+		_objective_label.text = "暴君/主宰 %s" % _format_time(spawn_timer)
+	else:
+		_objective_label.text = "防御塔  蓝 %d : %d 红" % [int(blue_score.get("towers", 0)), int(red_score.get("towers", 0))]
 
 	var max_hp := maxf(1.0, float(local.get("max_hp", 1.0)))
 	var hp := float(local.get("hp", 0.0))
@@ -690,7 +750,16 @@ func update_snapshot(data: Dictionary) -> void:
 	_level_label.text = "Lv.%d" % int(local.get("level", 1))
 	_kd_label.text = "击杀 %d   /   阵亡 %d" % [int(local.get("kills", 0)), int(local.get("deaths", 0))]
 	var hero_def: Dictionary = HeroDefs.get_hero(str(local.get("hero_type", hero_type)))
-	_role_label.text = "%s · %s" % [hero_def.role, hero_def.title]
+	var role_text := "%s · %s" % [hero_def.role, hero_def.title]
+	if float(local.get("buff_blue_timer", 0.0)) > 0.0:
+		role_text += " [蓝BUFF %.0fs]" % float(local.get("buff_blue_timer", 0.0))
+	if float(local.get("buff_red_timer", 0.0)) > 0.0:
+		role_text += " [红BUFF %.0fs]" % float(local.get("buff_red_timer", 0.0))
+	if bool(local.get("recalling", false)):
+		role_text += " [回城中...]"
+	if bool(local.get("teleporting", false)):
+		role_text += " [传送中...]"
+	_role_label.text = role_text
 	var alive := bool(local.get("alive", true))
 	var q_def: Dictionary = hero_def.q
 	var e_def: Dictionary = hero_def.e
