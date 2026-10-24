@@ -97,8 +97,7 @@ const HEROES := {
 		"role": "刺客",
 		"title": "暗影之刺",
 		"quote": "三息之内，取你首级！",
-		# 选人视频是可选的增强资产：刺客暂无 ogv，留空让选人界面回落到立绘。
-		"video_path": "",
+		"video_path": "res://assets/ui/hero_videos/hero_assassin.ogv",
 		"max_hp": 940.0,
 		"max_mp": 400.0,
 		"hp_growth": 66.0,
