@@ -34,6 +34,11 @@ const TOWER_DAMAGE := {"outer": 150.0, "inner": 170.0, "high": 190.0}
 # 野外脱战回血（每秒 % 最大生命）与基础回蓝
 const FIELD_HP_REGEN := 0.025
 const FIELD_MP_REGEN := 6.0
+# 小兵 / 野怪（非主宰暴君）打英雄时的伤害系数。
+# 为什么只对英雄打折、不去改 wave_rules / jungle 的原始攻击力：
+# 那一改会连带把小兵互殴的清兵速度、小兵推塔速度一起压低，兵线节奏会整条崩掉。
+# 英雄血池抬到 1.2 倍之后，这个系数把「一波兵 8 秒打死 1 级英雄」拉回到 15 秒以上。
+const PVE_HERO_DAMAGE_SCALE := 0.62
 # 出手或受击后脱离草丛隐身的显形时长（秒）。
 const REVEAL_AFTER_COMBAT := 1.5
 # 泉水恢复速率（每秒 % 最大生命 / 法力）。约 5 秒回满，
@@ -185,6 +190,7 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"attack_drag": Vector2.ZERO,
 		"gold": 0,
 		"gold_fraction": 0.0,
+		"cs": 0,
 		"inventory": [],
 		"base_hp": float(hero_def.max_hp),
 		"base_ad": float(hero_def.attack_damage),
@@ -212,6 +218,7 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"recalling": false,
 		"recall_timer": 0.0,
 		"recall_total": 0.0,
+		"recall_from": spawn,
 		"teleporting": false,
 		"teleport_timer": 0.0,
 		"teleport_total": 0.0,
@@ -504,6 +511,58 @@ func _in_fountain(entity: Dictionary) -> bool:
 	var base := MapData.BLUE_BASE if str(entity.team) == "blue" else MapData.RED_BASE
 	return (entity.pos as Vector2).distance_to(base) <= MapData.FOUNTAIN_RADIUS
 
+# 回城与传送的引导推进。返回 true 表示本 tick 已被引导消费（完成瞬移后不该再处理移动与施法）。
+# 单独成函数是因为它不能挂在「有输入」这个前提上：客户端站着不动时推的是空字典。
+func _tick_channels(entity: Dictionary, input: Dictionary, dt: float) -> bool:
+	if bool(input.get("teleport", false)) and not bool(entity.get("teleporting", false)):
+		if Teleport.start(entity):
+			# 传送优先。这里静默取消回城而不发打断事件：客户端会看到 kind 从
+			# recall 直接切到 teleport，法阵就地换配色，不需要多播一次断裂音。
+			RecallRules.interrupt(entity)
+	if bool(entity.get("teleporting", false)):
+		var departure: Vector2 = entity.get("teleport_from", entity.pos)
+		if Teleport.tick(entity, input, dt):
+			_emit("teleport", {
+				"team": entity.team,
+				"hero": entity.id,
+				"pad": str(entity.get("teleport_pad", "")),
+				"x": float(departure.x),
+				"y": float(departure.y),
+				"to_x": float(entity.pos.x),
+				"to_y": float(entity.pos.y),
+			})
+			return true
+		elif not bool(entity.get("teleporting", false)):
+			# tick 返回 false 且引导标记已被清空 = 中途被打断（移动/施法/受击）。
+			_emit("teleport_interrupt", {
+				"team": entity.team,
+				"hero": entity.id,
+				"x": float(departure.x),
+				"y": float(departure.y),
+			})
+	if bool(input.get("recall", false)) and not bool(entity.get("recalling", false)) and not _in_fountain(entity):
+		RecallRules.start(entity)
+	if bool(entity.get("recalling", false)):
+		var recall_from: Vector2 = entity.get("recall_from", entity.pos)
+		if RecallRules.tick(entity, input, dt):
+			_emit("recall", {
+				"team": entity.team,
+				"hero": entity.id,
+				"x": float(recall_from.x),
+				"y": float(recall_from.y),
+				"to_x": float(entity.pos.x),
+				"to_y": float(entity.pos.y),
+			})
+			return true
+		elif not bool(entity.get("recalling", false)):
+			_emit("recall_interrupt", {
+				"team": entity.team,
+				"hero": entity.id,
+				"x": float(recall_from.x),
+				"y": float(recall_from.y),
+			})
+	return false
+
 func _update_hero_timers(dt: float) -> void:
 	for entity in state.entities:
 		if entity.type != "hero" or not entity.alive:
@@ -538,6 +597,9 @@ func _apply_human_inputs(dt: float) -> void:
 			continue
 		var input: Dictionary = inputs.get(entity.owner_id, {})
 		if input.is_empty():
+			# 站着不动时客户端仍会推空输入。引导必须照常推进，
+			# 否则「按 B 回城然后松手」会永远卡在引导里（旧实现就卡在这儿）。
+			_tick_channels(entity, input, dt)
 			continue
 		var aim: Vector2 = input.get("aim", Vector2.ZERO)
 		var aim_vector: Vector2 = aim - entity.pos
@@ -567,26 +629,8 @@ func _apply_human_inputs(dt: float) -> void:
 				_emit("sold", {"hero": entity.id, "sell_slot": sell_slot})
 		if move.length() > 1.0:
 			move = move.normalized()
-		if bool(input.get("teleport", false)) and not bool(entity.get("teleporting", false)):
-			if Teleport.start(entity):
-				RecallRules.interrupt(entity)
-		if bool(entity.get("teleporting", false)):
-			var departure: Vector2 = entity.get("teleport_from", entity.pos)
-			if Teleport.tick(entity, input, dt):
-				_emit("teleport", {
-					"team": entity.team,
-					"pad": str(entity.get("teleport_pad", "")),
-					"x": float(departure.x),
-					"y": float(departure.y),
-					"to_x": float(entity.pos.x),
-					"to_y": float(entity.pos.y),
-				})
-				continue
-		if bool(input.get("recall", false)) and not bool(entity.get("recalling", false)) and not _in_fountain(entity):
-			RecallRules.start(entity)
-		if bool(entity.get("recalling", false)):
-			if RecallRules.tick(entity, input, dt):
-				continue
+		if _tick_channels(entity, input, dt):
+			continue
 		if move.length() > 0.01:
 			# 移动时朝向移动方向：点击移动经常是「往身后走」，若还朝着准星就成了倒着走。
 			# 站住时才看向准星；技能与普攻随后各自把 facing 改回目标方向，瞄准手感不变。
@@ -959,6 +1003,14 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 	var incoming := amount
 	if target.type == "tower":
 		incoming *= TowerRules.damage_scale(target, state.time)
+	# 小兵 / 野怪（不含主宰暴君这类大目标）对英雄的伤害单独收一档。
+	# 只影响"英雄挨打"这一侧，小兵打小兵、打塔的实际数值保持不变。
+	if target.type == "hero" and not source.is_empty():
+		var source_type := str(source.get("type", ""))
+		if source_type == "minion":
+			incoming *= PVE_HERO_DAMAGE_SCALE
+		elif source_type == "monster" and not bool(source.get("objective", false)):
+			incoming *= PVE_HERO_DAMAGE_SCALE
 	if not source.is_empty() and str(source.get("type", "")) == "hero":
 		incoming *= Jungle.damage_scale(source) * Objectives.damage_scale(state, str(source.get("team", "")))
 	# 交手即暴露：草丛里的英雄一出手/一挨打就短暂显形，否则回放里会出现
@@ -977,8 +1029,21 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 	if remaining <= 0.0:
 		return
 	if target.type == "hero":
-		RecallRules.interrupt(target)
-		Teleport.interrupt(target)
+		# 受击打断引导：只有真正中断的那一次才发事件（interrupt 幂等）。
+		if RecallRules.interrupt(target):
+			_emit("recall_interrupt", {
+				"team": target.team,
+				"hero": target.id,
+				"x": float(target.get("recall_from", target.pos).x),
+				"y": float(target.get("recall_from", target.pos).y),
+			})
+		if Teleport.interrupt(target):
+			_emit("teleport_interrupt", {
+				"team": target.team,
+				"hero": target.id,
+				"x": float(target.get("teleport_from", target.pos).x),
+				"y": float(target.get("teleport_from", target.pos).y),
+			})
 	target.hp = float(target.hp) - remaining
 	if target.type == "hero":
 		target.last_damage_time = float(state.time)
@@ -1276,6 +1341,7 @@ func snapshot() -> Dictionary:
 		"ended": ended,
 		"entities": entities,
 		"scores": state.scores.duplicate(true),
+		"board": _snapshot_board(),
 		"events": events,
 		"wave": state.wave,
 		"objectives": _snapshot_objectives(),
@@ -1290,6 +1356,69 @@ func snapshot_for(team: String, events_override: Variant = null) -> Dictionary:
 	if events_override is Array:
 		shot["events"] = (events_override as Array).duplicate(true)
 	return Vision.filter_snapshot(shot, team)
+
+# 双方账本：计分板用的全员公开统计。
+#
+# 为什么不复用 entities：entities 要过视野过滤，敌方英雄在战争迷雾里会被剔掉，
+# 计分板就会缺人。而「对面几级、几个人头、多少钱」在 MOBA 里是公开战报。
+# 这张表只放统计，不放坐标，所以不会变成透视。
+func _snapshot_board() -> Dictionary:
+	var blue: Array = []
+	var red: Array = []
+	for entity in state.entities:
+		if str(entity.type) != "hero":
+			continue
+		var inventory: Array = entity.get("inventory", [])
+		var item_value := 0
+		for item_id in inventory:
+			item_value += int(ItemShop.get_item(str(item_id)).get("cost", 0))
+		var gold := int(entity.get("gold", 0))
+		var alive := bool(entity.get("alive", true))
+		var hero_type := str(entity.get("hero_type", "blade"))
+		var row := {
+			"id": int(entity.id),
+			"owner_id": str(entity.get("owner_id", "")),
+			"name": str(entity.get("name", "")),
+			"team": str(entity.team),
+			"hero_type": hero_type,
+			"role": str(HeroDefs.get_hero(hero_type).get("role", "")),
+			"lane": str(entity.get("lane", "")),
+			"controller": str(entity.get("controller", "")),
+			"level": int(entity.level),
+			"kills": int(entity.kills),
+			"deaths": int(entity.deaths),
+			"cs": int(entity.get("cs", 0)),
+			"gold": gold,
+			# 总经济的口径 = 手上的钱 + 已买装备的原价。
+			# 买装备不改变总经济，只改变它的形态；这符合玩家的直觉。
+			"net_worth": gold + item_value,
+			"alive": alive,
+			"respawn_timer": 0.0 if alive else float(entity.get("respawn_timer", 0.0)),
+			"inventory": inventory.duplicate(),
+		}
+		if str(entity.team) == "blue":
+			blue.append(row)
+		else:
+			red.append(row)
+	blue.sort_custom(_board_row_before)
+	red.sort_custom(_board_row_before)
+	return {
+		"blue": blue,
+		"red": red,
+		"net_worth": {
+			"blue": _sum_net_worth(blue),
+			"red": _sum_net_worth(red),
+		},
+	}
+
+func _board_row_before(a: Dictionary, b: Dictionary) -> bool:
+	return int(a.get("id", 0)) < int(b.get("id", 0))
+
+func _sum_net_worth(rows: Array) -> int:
+	var total := 0
+	for row in rows:
+		total += int(row.get("net_worth", 0))
+	return total
 
 func _snapshot_objectives() -> Dictionary:
 	var spawn_timer := float(state.objective.get("spawn_timer", 0.0))
@@ -1359,6 +1488,7 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["summoner_cd"] = float(entity.get("summoner_cd", 0.0))
 		data["summoner_spell"] = str(entity.get("summoner_spell", "flash"))
 		data["gold"] = int(entity.get("gold", 0))
+		data["cs"] = int(entity.get("cs", 0))
 		data["inventory"] = (entity.get("inventory", []) as Array).duplicate()
 		data["ability_power"] = float(entity.get("ability_power", 0.0))
 		data["crit_rate"] = float(entity.get("crit_rate", 0.0))

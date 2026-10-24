@@ -4,8 +4,7 @@ extends "res://tests/test_base.gd"
 #
 # 对应三条需求：
 #   1. 能看到普攻范围与技能范围（地面圆环，以英雄为圆心）
-#   2. 英雄血条一律红色、蓝条一律蓝色。原先血条按阵营着色，
-#      蓝方英雄的血条是蓝的，和蓝条撞色，根本分不清哪条是血。
+#   2. 血条按「与本地玩家的关系」着色：自己绿、友军蓝、敌军红；蓝条一律蓝色。
 #   3. 站在己方泉水里回血要明显快于野外脱战回血。
 
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
@@ -18,7 +17,14 @@ func _is_red(c: Color) -> bool:
 	return c.r > 0.6 and c.g < 0.45 and c.b < 0.45
 
 func _is_blue(c: Color) -> bool:
-	return c.b > 0.7 and c.r < 0.45
+	# b - g 这道门槛是防「蓝被渲染成青」的：
+	# 场景用 FILMIC + exposure 1.05，蓝血条如果 G 太高，渲染后 G 和 B 一起顶到 1.0，
+	# 屏幕上就是青白色。旧的 (0.34,0.74,1.0) 满足 b>0.7 和 r<0.45，肉眼却是青的，
+	# 所以必须再要求 B 和 G 拉开距离。MANA 和 HP_ALLY 都要过这一关。
+	return c.b > 0.7 and c.r < 0.45 and (c.b - c.g) > 0.40
+
+func _is_green(c: Color) -> bool:
+	return c.g > 0.6 and c.r < 0.6 and c.b < 0.6 and (c.g - c.b) > 0.25
 
 func _sim() -> Object:
 	return MatchSim.new({
@@ -32,17 +38,58 @@ func _tick_for(sim: Object, seconds: float) -> void:
 	for i in steps:
 		sim.tick(1.0 / 30.0)
 
-# --- 血条 / 蓝条 ---
+# --- 血条配色：自己绿 / 友军蓝 / 敌军红 ---
 
-func test_hero_bars_are_red_hp_and_blue_mana() -> void:
+func _hp_color(view) -> Color:
+	return view.bar_material.get_shader_parameter("fill_color")
+
+func test_own_hero_bar_is_green() -> void:
+	# 本地玩家在哪一方，自己头顶的血条都必须是绿色。
 	for team in ["blue", "red"]:
 		var view = UnitVisual.new()
-		view.setup("hero", team, "blade", "测试", false)
-		check(view.bar_material != null, "%s hero must have a health bar" % team)
-		check(view.mp_material != null, "%s hero must have a mana bar" % team)
+		view.setup("hero", team, "blade", "测试", true, team)
+		check(view.bar_material != null, "%s local hero must have a health bar" % team)
 		if view.bar_material:
-			var hp: Color = view.bar_material.get_shader_parameter("fill_color")
-			check(_is_red(hp), "%s hero health bar must be red, got %s" % [team, str(hp)])
+			var hp := _hp_color(view)
+			check(_is_green(hp), "%s local hero health bar must be green, got %s" % [team, str(hp)])
+			check(not _is_blue(hp), "%s local hero bar must not read as an ally bar" % team)
+			check(not _is_red(hp), "%s local hero bar must not read as an enemy bar" % team)
+		view.free()
+
+func test_hero_bars_follow_the_viewer_side() -> void:
+	# 关键：颜色取决于「相对本地玩家」而不是绝对阵营。
+	# 本地在蓝方时蓝方英雄是友军（蓝），本地切到红方后同一支蓝方英雄必须变红。
+	# 只按 team == "blue" 取色的实现在后两条用例上会露馅。
+	var cases := [
+		["blue", "blue", true],
+		["red", "blue", false],
+		["red", "red", true],
+		["blue", "red", false],
+	]
+	for c in cases:
+		var team: String = c[0]
+		var viewer: String = c[1]
+		var is_ally: bool = c[2]
+		var view = UnitVisual.new()
+		view.setup("hero", team, "blade", "测试", false, viewer)
+		var hp := _hp_color(view)
+		if is_ally:
+			check(_is_blue(hp), "%s hero seen from %s side must be blue, got %s" % [team, viewer, str(hp)])
+			check(not _is_red(hp), "%s ally hero must not be red, got %s" % [team, str(hp)])
+			# 友军英雄头顶同时有蓝条，血条要比蓝条更亮才分得清
+			var mp: Color = view.mp_material.get_shader_parameter("fill_color")
+			check(not hp.is_equal_approx(mp), "%s ally hero HP bar must differ from its mana bar" % team)
+			check(hp.g > mp.g, "%s ally hero HP bar must be brighter than its mana bar" % team)
+		else:
+			check(_is_red(hp), "%s hero seen from %s side must be red, got %s" % [team, viewer, str(hp)])
+			check(not _is_blue(hp), "%s enemy hero must not be blue, got %s" % [team, str(hp)])
+		view.free()
+
+func test_hero_mana_bar_stays_blue_below_health() -> void:
+	for team in ["blue", "red"]:
+		var view = UnitVisual.new()
+		view.setup("hero", team, "blade", "测试", false, team)
+		check(view.mp_material != null, "%s hero must have a mana bar" % team)
 		if view.mp_material:
 			var mp: Color = view.mp_material.get_shader_parameter("fill_color")
 			check(_is_blue(mp), "%s hero mana bar must be blue, got %s" % [team, str(mp)])
@@ -50,19 +97,30 @@ func test_hero_bars_are_red_hp_and_blue_mana() -> void:
 			lt(view.mp_mesh.position.y, 0.0, "%s hero mana bar must sit below the health bar" % team)
 		view.free()
 
-func test_minion_bar_keeps_team_color() -> void:
-	# 小兵没有蓝条，血条继续按阵营着色，别被英雄的改动带跑。
-	var blue = UnitVisual.new()
-	blue.setup("minion", "blue", "minion", "", false)
-	var blue_color: Color = blue.bar_material.get_shader_parameter("fill_color")
-	check(_is_blue(blue_color), "blue minion keeps a blue bar, got %s" % str(blue_color))
-	blue.free()
+func test_minion_bar_follows_relation_not_absolute_team() -> void:
+	# 小兵没有蓝条，但血条同样按「与本地玩家的关系」着色。
+	var ally = UnitVisual.new()
+	ally.setup("minion", "red", "minion", "", false, "red")
+	check(_is_blue(_hp_color(ally)), "allied minion must have a blue bar, got %s" % str(_hp_color(ally)))
+	ally.free()
 
-	var red = UnitVisual.new()
-	red.setup("minion", "red", "minion", "", false)
-	var red_color: Color = red.bar_material.get_shader_parameter("fill_color")
-	check(_is_red(red_color), "red minion keeps a red bar, got %s" % str(red_color))
-	red.free()
+	var enemy = UnitVisual.new()
+	enemy.setup("minion", "blue", "minion", "", false, "red")
+	check(_is_red(_hp_color(enemy)), "enemy minion must have a red bar, got %s" % str(_hp_color(enemy)))
+	enemy.free()
+
+	var monster = UnitVisual.new()
+	monster.setup("monster", "neutral", "wolf", "霜狼", false, "blue")
+	check(_is_red(_hp_color(monster)), "neutral monster must read as an enemy (red), got %s" % str(_hp_color(monster)))
+	monster.free()
+
+func test_arena_passes_viewer_side_into_unit_visuals() -> void:
+	# 配色逻辑再对，arena 不把 local_team 传进去也白搭（单元测试全绿但线上全是红）。
+	# 这里用源码守卫钉住接线，防止后续重构悄悄把第 6 个参数丢掉。
+	var src := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	check(src.contains(", is_local, local_team)"), "arena must pass local_team for hero views")
+	check(src.contains("\"\", false, local_team)"), "arena must pass local_team for minion views")
+	check(src.contains("\"野怪\")), false, local_team)"), "arena must pass local_team for monster views")
 
 # --- 射程数据 ---
 

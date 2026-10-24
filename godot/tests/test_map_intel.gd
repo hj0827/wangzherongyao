@@ -4,12 +4,11 @@ extends "res://tests/test_base.gd"
 # 1. 地图位置 → 区域分类（泉水 / 河道 / 三路 / 野区）必须确定且可无头验证。
 # 2. 情报只统计半径内「存活、非自己」的单位，按距离排序并限条数。
 # 3. 小地图点击坐标必须能反投影回世界坐标，边框点击不触发。
-# 4. 点击小地图后 HUD 情报面板出现，并随快照刷新；关闭后清理地图标记。
+# 4. 情报面板已移除：HUD 侧只负责把点击转成相机定位（见 test_minimap_camera_focus）。
 
 const MapIntel = preload("res://sim/map_intel.gd")
 const MapData = preload("res://sim/map_data.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
-const GameHUD = preload("res://scripts/ui/game_hud.gd")
 
 func _entity(type: String, team: String, pos: Vector2, hp := 100.0, alive := true, extra := {}) -> Dictionary:
 	var data := {
@@ -114,7 +113,6 @@ func test_minimap_click_emits_world_position() -> void:
 	minimap._gui_input(click)
 	eq(hits.size(), 1, "点击小地图应发出一次位置信号")
 	near(hits[0].length(), 0.0, 0.01, "小地图中心对应世界原点")
-	check(minimap._inspect_valid, "点击后应记录情报标记点")
 	minimap.free()
 
 func test_minimap_ignores_clicks_on_the_border() -> void:
@@ -162,49 +160,6 @@ func test_minimap_touch_tap_also_inspects() -> void:
 	tap.pressed = true
 	tap.position = Vector2(140.0, 103.0)
 	minimap._gui_input(tap)
-	eq(hits.size(), 1, "移动端点按小地图同样应查看情报")
+	eq(hits.size(), 1, "移动端点按小地图同样应发出定位")
 	gt(hits[0].x, 0.0, "点击右侧应对应世界 x 正方向")
 	minimap.free()
-
-# ---------------------------------------------------------------- HUD 面板联动
-
-func _visible_intel_rows(hud: Control) -> int:
-	var count := 0
-	for row in hud._intel_rows:
-		if (row as Label).visible:
-			count += 1
-	return count
-
-func test_hud_shows_and_refreshes_location_report() -> void:
-	var hud := GameHUD.new()
-	hud.setup("p1", "blue", "blade", "你", false, false)
-	hud._ready()
-	hud.update_snapshot(_snapshot())
-	# 测试里 HUD 不在场景树中，容器不会执行排版，手动给地图一个真实尺寸。
-	hud._minimap.size = Vector2(206.0, 206.0)
-
-	var click := InputEventMouseButton.new()
-	click.button_index = MOUSE_BUTTON_LEFT
-	click.pressed = true
-	click.position = Vector2(103.0, 103.0)
-	hud._minimap._gui_input(click)
-
-	check(hud._intel_panel.visible, "点击小地图后情报面板必须出现")
-	check(hud._intel_title.text.contains("河道"), "面板标题显示区域名")
-	check(hud._intel_meta.text.contains("0.0"), "面板显示点击点与自己距离")
-	check(hud._intel_summary.text.contains("红方"), "面板显示附近双方单位计数")
-	eq(_visible_intel_rows(hud), 3, "面板按距离列出附近单位")
-	check(hud._intel_rows[0].text.contains("星璃"), "第一条行显示最近的单位")
-
-	var before := _visible_intel_rows(hud)
-	var moved := _snapshot()
-	moved.entities.append(_entity("hero", "red", Vector2(3.0, 4.0), 500.0, true, {"id": 9, "name": "新增敌人", "max_hp": 500.0}))
-	hud.update_snapshot(moved)
-	eq(_visible_intel_rows(hud), before + 1, "快照刷新时情报列表应同步更新")
-	check(hud._intel_rows[0].text.contains("新增敌人"), "按最新距离重新排序")
-	check(hud._intel_panel.visible, "刷新期间面板保持可见")
-
-	hud._close_intel()
-	check(not hud._intel_panel.visible, "关闭按钮应隐藏情报面板")
-	check(not hud._minimap._inspect_valid, "关闭后应清理地图上的情报标记")
-	hud.free()

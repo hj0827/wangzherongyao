@@ -96,6 +96,7 @@ const BUILD_ORDERS := {
 	"mage": ["spell_tome", "boots", "echo_wand", "cloth_armor", "ominous_shield", "resistance_boots"],
 	"tank": ["cloth_armor", "boots", "ominous_shield", "resistance_boots", "iron_sword", "infinity_edge"],
 	"archer": ["boots", "iron_sword", "infinity_edge", "cloth_armor", "resistance_boots", "ominous_shield"],
+	"assassin": ["boots", "iron_sword", "infinity_edge", "resistance_boots", "cloth_armor", "ominous_shield"],
 }
 
 static func get_item(item_id: String) -> Dictionary:

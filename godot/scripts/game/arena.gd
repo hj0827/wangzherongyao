@@ -9,6 +9,8 @@ const MatchSim = preload("res://sim/match_sim.gd")
 const MapData = preload("res://sim/map_data.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const ModelUtils = preload("res://scripts/game/model_utils.gd")
+const TerrainBuilder = preload("res://scripts/game/terrain_builder.gd")
+const GrassField = preload("res://scripts/game/grass_field.gd")
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
@@ -16,8 +18,12 @@ const InputAssist = preload("res://scripts/game/input_assist.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const MapView = preload("res://scripts/game/map_view.gd")
 const BushFeedback = preload("res://scripts/game/bush_feedback.gd")
+const ChannelFeedback = preload("res://scripts/game/channel_feedback.gd")
+const ChannelFx = preload("res://scripts/game/channel_fx.gd")
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
+const AudioDirector = preload("res://scripts/game/audio_director.gd")
 const HitStopManager = preload("res://scripts/view/hit_stop_manager.gd")
+const CameraFocus = preload("res://scripts/game/camera_focus.gd")
 const ClientPrediction = preload("res://net/client_prediction.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
@@ -28,6 +34,12 @@ const BASE_FOV := 42.0
 const FOV_GLIDE_SPEED := 24.0
 # 相机缩放的滑行速率（zoom 单位/秒）。滚轮一次 ±2，约 0.14s 走完，匀速不突兀。
 const ZOOM_GLIDE_SPEED := 14.0
+# 小地图定位时注视点的滑行速率（世界单位/秒）。要跟得上手指拖动，
+# 所以比相机缩放快得多：跨半张图（约 58m）0.3s 走完。
+const CAMERA_FOCUS_GLIDE_SPEED := 200.0
+# 松手归位的速率。比观察更快 —— 「不按了立刻回到自己的画面」，
+# 跨整张图（116m）0.36s，体感是「唰一下回来」而不是「慢慢飘回去」。
+const CAMERA_FOCUS_RETURN_SPEED := 320.0
 # 客机渲染相对服务端的固定延迟。要略大于一个快照周期（服务端 10Hz ≈ 0.1s），
 # 否则缓冲里凑不齐两格；取 0.16 给网络抖动留余量。
 const NET_RENDER_DELAY := 0.16
@@ -76,6 +88,9 @@ var _units_root: Node3D
 var _structures_root: Node3D
 var _effects_root: Node3D
 var _props_root: Node3D
+# 地形实例：布景（山 / 树 / 石头）要靠它取实际地面高度，
+# 否则摆件会悬在坡上或陷进土里。
+var _terrain = null
 var camera: Camera3D
 var hud: GameHUD
 var aim_marker: Node3D
@@ -89,6 +104,12 @@ var zoom := 21.0
 # 渲染用的平滑缩放值。相机位置必须刚性跟随角色（否则与 look_at 产生相位差而抖动），
 # 但 zoom 突变会让整台相机瞬移，所以单独对 zoom 这个标量做插值。
 var _zoom_current := 21.0
+# 小地图定位（点 / 拖）时的相机注视点。常态下它返回英雄位置（刚性跟随），
+# 只有观察态才滑行到别处，所以移动稳定性不受影响。
+var _camera_focus = CameraFocus.new()
+# 上一帧是否有操作意图。只在「从无到有」时收回镜头，避免持续按住移动时
+# 把拖地图的操作打断掉。
+var _last_intent := false
 var _cam_initialized := false
 var _accumulator := 0.0
 # 渲染插值系数：0 = 上一 tick 的位置，1 = 当前 tick 的位置。
@@ -119,6 +140,14 @@ var _bush_feedback = BushFeedback.new()
 var _bush_hidden := false
 var _camera_fov_target := BASE_FOV
 var _bush_audio: AudioStreamPlayer
+# 回城 / 传送：每个英雄一套引导状态机与地面法阵，按需创建，引导结束自动淡出。
+var _channel_feedback: Dictionary = {}
+var _channel_fx: Dictionary = {}
+var _channel_audio: AudioStreamPlayer
+# 音频导演：BGM + 战斗音效。由 main.gd 传入（与菜单共用一个播放器），
+# 单独跑 arena 的工具/截图场景会自建一个。
+var _audio: Node = null
+var _shared_audio: Node = null
 var touch_mode := false
 var _mouse_ground := Vector2.ZERO
 var _mouse_valid := false
@@ -223,6 +252,7 @@ func _build_staged() -> void:
 
 	_emit_build(0.28, "种下峡谷植被")
 	await _build_scenery()
+	_build_grass_tufts()
 	_build_map_features()
 	await _next_frame()
 
@@ -236,9 +266,15 @@ func _build_staged() -> void:
 	_effects_root = Node3D.new()
 	_effects_root.name = "Effects"
 	add_child(_effects_root)
+	# 合成战斗配乐要跑几十万次采样（约 0.3~0.6s），必须摊在加载遮罩下面做，
+	# 否则会变成进场瞬间的一次卡顿。
+	_emit_build(0.46, "调音：合成战斗配乐")
+	_build_audio()
+	await _next_frame()
 	_init_vfx_pools()
 	_build_camera()
 	_build_bush_audio()
+	_build_channel_audio()
 	_build_aim_marker()
 	_build_move_marker()
 	_build_range_indicators()
@@ -308,7 +344,7 @@ func _prewarm_minion_pool() -> void:
 		var made := 0
 		while pool.size() < MINION_PREWARM_PER_TEAM:
 			var view := UnitVisual.new()
-			view.setup("minion", team, "minion", "", false)
+			view.setup("minion", team, "minion", "", false, local_team)
 			_units_root.add_child(view)
 			view.visible = false
 			view.recycle()
@@ -336,9 +372,17 @@ func _build_hud() -> void:
 	hud.move_changed.connect(_on_touch_move)
 	hud.attack_changed.connect(_on_touch_attack)
 	hud.pause_requested.connect(_toggle_pause)
+	hud.map_focus_requested.connect(focus_world_point)
+	hud.map_focus_released.connect(release_camera_focus)
 	layer.add_child(hud)
 
 func _on_skill_button(slot: String) -> void:
+	# 按了但放不出来（CD / 蓝不够）必须有声音反馈：手机上玩家看不到 CD 数字时，
+	# 「按了没反应」是最容易让人以为游戏卡住的状态。
+	if _skill_blocked(slot):
+		if _audio != null:
+			_audio.play_cue(AudioCues.CUE_DENIED)
+		return
 	if slot == "q":
 		_queued_q = true
 	elif slot == "w":
@@ -492,6 +536,9 @@ func _toggle_pause() -> void:
 
 func _open_pause() -> void:
 	var online := session != null
+	if _audio != null:
+		# 暂停时音乐压低而不是停播：回来时不需要重新起拍，也不会和战斗节奏错位。
+		_audio.set_paused(true)
 	if MatchMenu.freezes_simulation(online):
 		_paused = true
 		_touch_points.clear()
@@ -507,6 +554,8 @@ func _close_pause() -> void:
 	if hud == null:
 		return
 	_paused = false
+	if _audio != null:
+		_audio.set_paused(false)
 	hud.show_pause(false, session != null)
 
 func _process(delta: float) -> void:
@@ -514,6 +563,10 @@ func _process(delta: float) -> void:
 		return
 	if session != null and session.has_method("poll"):
 		session.poll()
+	if _audio != null:
+		# 音频的距离衰减 / 残血心跳 / 强度层都读这份上下文。
+		_refresh_audio_context()
+		_audio.set_context(_audio_ctx)
 	if _paused:
 		return
 	_hit_stop.tick(delta)
@@ -588,6 +641,12 @@ func _process(delta: float) -> void:
 		_apply_predicted_visual()
 	_sync_structures(current_snapshot, false)
 	_update_bush_feedback()
+	_update_channel_feedback(delta)
+	var intent := _has_local_intent()
+	if intent and not _last_intent and _camera_focus.is_active():
+		# 玩家开始操作英雄就立刻收回镜头：否则人已经打起来了，画面还停在地图另一头。
+		_camera_focus.release()
+	_last_intent = intent
 	_update_camera(delta, false)
 	_update_aim_marker()
 	_update_range_indicators()
@@ -597,6 +656,7 @@ func _process(delta: float) -> void:
 		_hud_timer = 0.0
 		_validate_lock_target()
 		hud.update_snapshot(current_snapshot)
+		hud.set_camera_view(camera_view_rect())
 
 func _gather_input() -> void:
 	if touch_mode:
@@ -767,6 +827,38 @@ func _snapshot_local_hero() -> Dictionary:
 		if str(entity.get("type", "")) == "hero" and str(entity.get("owner_id", "")) == local_owner:
 			return entity
 	return {}
+
+# 音频导演每帧要的三件事：我是谁（判「自己的」事件）、我在哪（距离衰减）、我剩多少血（心跳）。
+# 复用同一个字典原地更新：这是每帧都要跑的路径，不在这里分配新对象。
+var _audio_ctx := {"local": -1, "x": 0.0, "y": 0.0, "team": "blue", "hp_ratio": 1.0}
+
+func _refresh_audio_context() -> void:
+	var hero := _snapshot_local_hero()
+	if hero.is_empty():
+		_audio_ctx["local"] = -1
+		return
+	var max_hp := maxf(float(hero.get("max_hp", 1.0)), 1.0)
+	_audio_ctx["local"] = int(hero.get("id", -1))
+	_audio_ctx["x"] = float(hero.get("x", 0.0))
+	_audio_ctx["y"] = float(hero.get("y", 0.0))
+	_audio_ctx["team"] = str(hero.get("team", local_team))
+	_audio_ctx["hp_ratio"] = clampf(float(hero.get("hp", max_hp)) / max_hp, 0.0, 1.0)
+
+# 技能是否放不出来。只判 CD 与蓝量 —— 距离/目标由模拟侧决定，
+# 这里判错了也只是多一声「不行」，不会影响真实施法。
+func _skill_blocked(slot: String) -> bool:
+	if slot != "q" and slot != "w" and slot != "e" and slot != "r":
+		return false
+	var hero := _snapshot_local_hero()
+	if hero.is_empty():
+		return false
+	if float(hero.get("skill_" + slot + "_cd", 0.0)) > 0.0:
+		return true
+	var data: Dictionary = HeroDefs.get_hero(str(hero.get("hero_type", local_hero_type)))
+	var skill: Dictionary = data.get(slot, {})
+	if skill.is_empty():
+		return false
+	return float(hero.get("mp", 0.0)) < float(skill.get("cost", 0.0))
 
 func _consume_skill_queue(advance_seq: bool = true) -> void:
 	_local_input.skill_q = false
@@ -956,7 +1048,14 @@ func _camera_desired(target: Vector3) -> Vector3:
 func _update_camera(delta: float, instant: bool) -> void:
 	if camera == null:
 		return
-	var target := _local_world_position()
+	var hero := _local_world_position()
+	# 注视点唯一真身：常态刚性跟英雄，小地图观察态才滑行（见 camera_focus.gd）。
+	# 注意相机位置与 look_at 必须吃同一个 target，否则又是相位差 = 抖。
+	var target := hero
+	if instant:
+		_camera_focus.reset()
+	else:
+		target = _camera_focus.update(delta, hero, CAMERA_FOCUS_GLIDE_SPEED, CAMERA_FOCUS_RETURN_SPEED)
 	# 缩放单独平滑：位置跟随必须刚性（否则与 look_at 产生相位差而抖动），
 	# 但 zoom 一步变 2.0 会让相机整体瞬移，观感上同样是「跳」。
 	# 用恒定速率而非指数衰减——指数衰减「前快后慢」，首帧就会走掉一大截。
@@ -980,6 +1079,69 @@ func _update_camera(delta: float, instant: bool) -> void:
 		camera.position += Vector3(stop_shake.x, stop_shake.y * 0.4, 0.0)
 	camera.look_at(target + Vector3(0.0, 0.55, 0.0), Vector3.UP)
 
+# --- 小地图定位 -----------------------------------------------------------
+# 按住小地图 = 把镜头移到那个世界坐标；松手立刻回到英雄。
+# 玩家一旦开始操作英雄（移动/技能/普攻）也会立刻收回。
+
+func focus_world_point(world: Vector2) -> void:
+	if not build_complete:
+		return
+	_camera_focus.request(world, _local_world_position())
+
+func release_camera_focus() -> void:
+	_camera_focus.release()
+
+func is_camera_focusing_map() -> bool:
+	return _camera_focus.is_active()
+
+# 相机在地面上的可视范围。返回四角点（世界 XZ 顺序：左上、右上、右下、左下），
+# 用多边形而不是 AABB —— 透视下地面可视区是梯形，AABB 的中心会往远处偏，
+# 画在小地图上会明显偏离真实视线。
+func camera_view_rect() -> Dictionary:
+	if camera == null or not camera.is_inside_tree():
+		return {"valid": false}
+	var viewport := get_viewport()
+	if viewport == null:
+		return {"valid": false}
+	var screen := viewport.get_visible_rect().size
+	if screen.x <= 0.0 or screen.y <= 0.0:
+		return {"valid": false}
+	var ground := Plane(Vector3.UP, 0.0)
+	var points := PackedVector2Array()
+	for corner in [Vector2.ZERO, Vector2(screen.x, 0.0), screen, Vector2(0.0, screen.y)]:
+		var origin := camera.project_ray_origin(corner)
+		var direction := camera.project_ray_normal(corner)
+		var hit: Variant = ground.intersects_ray(origin, direction)
+		if hit == null:
+			return {"valid": false}
+		var point: Vector3 = hit
+		points.append(Vector2(point.x, point.z))
+	var center := Vector2.ZERO
+	for point in points:
+		center += point
+	center /= float(points.size())
+	var low := points[0]
+	var high := points[0]
+	for point in points:
+		low = Vector2(minf(low.x, point.x), minf(low.y, point.y))
+		high = Vector2(maxf(high.x, point.x), maxf(high.y, point.y))
+	return {"valid": true, "points": points, "center": center, "half": (high - low) * 0.5}
+
+# 玩家是否在操作英雄（用于观察态下自动收回镜头）。
+func _has_local_intent() -> bool:
+	if _local_input.move.length_squared() > 0.0004:
+		return true
+	return (
+		_local_input.attack
+		or _local_input.skill_q
+		or _local_input.skill_w
+		or _local_input.skill_e
+		or _local_input.skill_r
+		or _local_input.summoner
+		or _local_input.recall
+		or _local_input.teleport
+	)
+
 func _build_camera() -> void:
 	camera = Camera3D.new()
 	camera.name = "Camera"
@@ -998,6 +1160,95 @@ func _build_bush_audio() -> void:
 	_bush_audio.name = "BushAudio"
 	_bush_audio.volume_db = -6.0
 	add_child(_bush_audio)
+
+# 音频导演进场：优先复用主壳传进来的那个（菜单音乐与战斗音乐共用一个播放器，
+# 切曲时是淡入淡出而不是两个播放器叠着响）；没有就自建一个。
+func _build_audio() -> void:
+	if _shared_audio != null and is_instance_valid(_shared_audio):
+		_audio = _shared_audio
+	else:
+		_audio = AudioDirector.new()
+		_audio.name = "Audio"
+		add_child(_audio)
+	if _audio == null:
+		return
+	_audio.set_paused(false)
+	_audio.play_music(AudioDirector.MUSIC_BATTLE)
+
+func _build_channel_audio() -> void:
+	_channel_audio = AudioStreamPlayer.new()
+	_channel_audio.name = "ChannelAudio"
+	# 引导音是铺底，压得比打击音低一档，避免盖住普攻与技能的落点反馈。
+	_channel_audio.volume_db = -8.0
+	add_child(_channel_audio)
+
+# 回城 / 传送的引导表现。每帧读快照里的引导标记交给状态机判起手与结束；
+# 瞬时爆发与音效走事件 —— 只有事件知道这次是完成还是被打断。
+func _update_channel_feedback(delta: float) -> void:
+	var snapshot: Dictionary = current_snapshot if authoritative else _render_snapshot
+	if snapshot.is_empty():
+		return
+	var seen := {}
+	for entity in snapshot.get("entities", []):
+		if str(entity.get("type", "")) != "hero":
+			continue
+		var entity_id := int(entity.get("id", -1))
+		seen[entity_id] = true
+		var feedback: ChannelFeedback = _channel_feedback.get(entity_id)
+		if feedback == null:
+			feedback = ChannelFeedback.new()
+			_channel_feedback[entity_id] = feedback
+		var transition: String = feedback.update(entity)
+		if transition != "none":
+			_on_channel_transition(entity_id, transition, entity)
+		var view: UnitVisual = _views.get(entity_id)
+		var fx := _channel_fx.get(entity_id) as ChannelFx
+		if feedback.kind() != "" and view != null and view.visible:
+			# 懒创建：没引导过的英雄不该占一套法阵节点（10 个英雄 × 10 个 Mesh 就是白烧）。
+			if fx == null or not is_instance_valid(fx):
+				fx = _channel_fx_for(entity_id)
+			fx.position = Vector3(view.position.x, 0.0, view.position.z)
+			fx.set_channel(feedback.kind(), feedback.progress())
+		elif fx != null and is_instance_valid(fx):
+			fx.release()
+	# 英雄离开视野或阵亡时把法阵收掉，否则会留在原地空转。
+	for entity_id in _channel_feedback.keys():
+		if seen.has(entity_id):
+			continue
+		var feedback: ChannelFeedback = _channel_feedback[entity_id]
+		feedback.reset()
+		var fx := _channel_fx.get(entity_id) as ChannelFx
+		if fx != null:
+			fx.release()
+
+func _channel_fx_for(entity_id: int) -> ChannelFx:
+	var fx: ChannelFx = _channel_fx.get(entity_id)
+	if fx != null and is_instance_valid(fx):
+		return fx
+	fx = ChannelFx.new()
+	fx.name = "ChannelFx%d" % entity_id
+	_effects_root.add_child(fx)
+	_channel_fx[entity_id] = fx
+	return fx
+
+func _on_channel_transition(entity_id: int, transition: String, entity: Dictionary) -> void:
+	var is_local := entity_id == _local_entity_id
+	var fx := _channel_fx_for(entity_id)
+	if transition == "recall_start":
+		fx.position = Vector3(float(entity.get("x", 0.0)), 0.0, float(entity.get("y", 0.0)))
+		if is_local:
+			_play_channel_cue(AudioCues.recall_channel())
+	elif transition == "teleport_start":
+		fx.position = Vector3(float(entity.get("x", 0.0)), 0.0, float(entity.get("y", 0.0)))
+		if is_local:
+			_play_channel_cue(AudioCues.teleport_channel())
+	# *_stop 只收尾，不发声：完成与打断的瞬时反馈由事件负责，这里再响一次会重音。
+
+func _play_channel_cue(stream: AudioStreamWAV) -> void:
+	if stream == null or _channel_audio == null:
+		return
+	_channel_audio.stream = stream
+	_channel_audio.play()
 
 func _update_bush_feedback() -> void:
 	var local := _find_entity_by_owner(local_owner)
@@ -1262,11 +1513,13 @@ func _build_environment() -> void:
 	environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	environment.tonemap_exposure = 1.05
 	environment.fog_enabled = true
-	environment.fog_light_color = Color(0.5, 0.6, 0.62)
-	environment.fog_light_energy = 0.7
-	environment.fog_density = 0.0038
-	environment.fog_sky_affect = 0.25
-	environment.fog_aerial_perspective = 0.35
+	# 雾调浓一点：外围丘陵和山需要「被空气隔开」的层次，
+	# 太清透会让远山像贴在地图边上的一排道具。
+	environment.fog_light_color = Color(0.46, 0.56, 0.66)
+	environment.fog_light_energy = 0.72
+	environment.fog_density = 0.0052
+	environment.fog_sky_affect = 0.22
+	environment.fog_aerial_perspective = 0.45
 	environment.adjustment_enabled = true
 	environment.adjustment_contrast = 1.06
 	environment.adjustment_saturation = 1.1
@@ -1287,37 +1540,14 @@ func _build_environment() -> void:
 	add_child(sun)
 
 func _build_ground() -> void:
+	# 地形由 TerrainBuilder 生成：可玩区（±58）严格平坦，往外抬成丘陵，
+	# 河道真正下陷成河床。高度纯粹是视觉的，不参与碰撞/寻路。
+	var terrain := TerrainBuilder.new()
+	_terrain = terrain
 	var ground := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(160.0, 160.0)
-	ground.mesh = plane
-	var shader := Shader.new()
-	shader.code = """
-shader_type spatial;
-render_mode diffuse_burley, specular_schlick_ggx;
-uniform sampler2D grass_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
-uniform sampler2D dirt_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
-varying vec3 world_pos;
-void vertex() {
-	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-}
-void fragment() {
-	vec2 uv = world_pos.xz * 0.12;
-	vec3 broad = texture(grass_tex, world_pos.xz * 0.014).rgb;
-	vec3 grass = texture(grass_tex, uv).rgb * vec3(0.5, 0.66, 0.4);
-	vec3 dirt = texture(dirt_tex, uv * 0.72).rgb * vec3(0.95, 0.84, 0.66);
-	vec3 color = mix(grass, dirt, smoothstep(0.32, 0.68, broad.r) * 0.3);
-	color *= 0.9 + broad.g * 0.16;
-	ALBEDO = color;
-	ROUGHNESS = 0.94;
-	SPECULAR = 0.16;
-}
-"""
-	var material := ShaderMaterial.new()
-	material.shader = shader
-	material.set_shader_parameter("grass_tex", load("res://assets/textures/leafy_grass_Diffuse.jpg"))
-	material.set_shader_parameter("dirt_tex", load("res://assets/textures/grass_path_2_Diffuse.jpg"))
-	ground.material_override = material
+	ground.name = "Terrain"
+	ground.mesh = terrain.build_mesh()
+	ground.material_override = TerrainBuilder.build_material()
 	ground.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(ground)
 
@@ -1400,61 +1630,136 @@ func _add_vertex(st: SurfaceTool, vertex: Vector3, uv: Vector2) -> void:
 	st.add_vertex(vertex)
 
 func _build_river() -> void:
+	# 河床由地形承担（TerrainBuilder 把河道下陷到 -1.45），这里只放水面。
+	# 以前在河道两侧贴了一条 22m 宽的 cliff 贴图当「岸」，
+	# 结果是一块棕色地毯压在草地上、把地形坡完全盖住 —— 直接去掉。
 	var river := MeshInstance3D.new()
+	river.name = "River"
 	var plane := PlaneMesh.new()
-	plane.size = Vector2(176.0, 18.0)
+	# 长度远超地图，两端沉进雾里，看不到水面尽头
+	plane.size = Vector2(320.0, 17.4)
 	river.mesh = plane
 	river.rotation.y = PI * 0.25
-	river.position.y = 0.012
+	river.position.y = -0.42
 	var shader := Shader.new()
 	shader.code = """
 shader_type spatial;
-render_mode blend_mix, cull_disabled, specular_schlick_ggx;
-uniform vec4 deep_color : source_color = vec4(0.025, 0.12, 0.15, 0.92);
-uniform vec4 shallow_color : source_color = vec4(0.09, 0.32, 0.34, 0.86);
+render_mode blend_mix, cull_disabled, depth_draw_opaque, specular_schlick_ggx;
+
+uniform vec4 deep_color : source_color = vec4(0.06, 0.22, 0.26, 1.0);
+uniform vec4 shallow_color : source_color = vec4(0.20, 0.44, 0.42, 1.0);
+uniform float river_half = 9.0;
+
+varying vec3 wpos;
+
+void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
 void fragment() {
-	vec2 uv = UV;
-	float ripple = sin(uv.x * 92.0 + uv.y * 38.0 + TIME * 1.25) * 0.5 + 0.5;
-	ALBEDO = mix(deep_color.rgb, shallow_color.rgb, ripple * 0.42);
-	ALPHA = mix(0.8, 0.92, ripple);
-	ROUGHNESS = 0.08;
-	SPECULAR = 0.8;
-	EMISSION = shallow_color.rgb * 0.04;
+	// 到河道中心线的距离决定深浅：河心深蓝、岸边浅青
+	float d = abs(wpos.x + wpos.z) * 0.70710678;
+	float t = clamp(d / river_half, 0.0, 1.0);
+
+	// 两层不同频率、不同方向的水波，避免规则条纹
+	float w1 = sin(wpos.x * 1.15 + TIME * 0.85) * cos(wpos.z * 0.95 - TIME * 0.62);
+	float w2 = sin((wpos.x + wpos.z) * 2.1 - TIME * 1.35);
+	float w3 = sin(wpos.x * 3.6 - wpos.z * 2.9 + TIME * 1.8);
+	float ripple = w1 * 0.55 + w2 * 0.33 + w3 * 0.12;
+
+	vec3 col = mix(deep_color.rgb, shallow_color.rgb, t * 0.72 + ripple * 0.04);
+
+	// 岸边浅滩泡沫：只在水陆交界一条窄带
+	float foam = smoothstep(0.93, 1.0, t + ripple * 0.03);
+	col = mix(col, vec3(0.74, 0.82, 0.80), foam * 0.4);
+
+	ALBEDO = col;
+	ALPHA = mix(0.93, 0.80, t);
+	ROUGHNESS = 0.13;
+	SPECULAR = 0.42;
+	METALLIC = 0.0;
+	// 用波纹扰动法线做假高光，GL Compatibility 下没有 SSR，这是最划算的一招
+	NORMAL = normalize(vec3(ripple * 0.06, 1.0, ripple * 0.045));
 }
 """
 	var material := ShaderMaterial.new()
 	material.shader = shader
+	material.set_shader_parameter("river_half", MapData.RIVER_HALF_WIDTH)
+	# 必须从 GDScript 传 Color：直接写 shader 里的 uniform 默认值会被当成线性色，
+	# 输出时再转 sRGB 就整体提亮 —— 深蓝河水会渲染成亮青绿。
+	material.set_shader_parameter("deep_color", Color(0.018, 0.095, 0.135))
+	material.set_shader_parameter("shallow_color", Color(0.075, 0.21, 0.20))
 	river.material_override = material
 	river.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(river)
 
-	var bank := MeshInstance3D.new()
-	var bank_plane := PlaneMesh.new()
-	bank_plane.size = Vector2(178.0, 22.0)
-	bank.mesh = bank_plane
-	bank.rotation.y = PI * 0.25
-	bank.position.y = 0.006
-	var bank_material := StandardMaterial3D.new()
-	bank_material.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
-	bank_material.albedo_color = Color(0.5, 0.48, 0.42)
-	bank_material.roughness = 1.0
-	bank_material.uv1_scale = Vector3(18, 3, 1)
-	bank.material_override = bank_material
-	bank.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_props_root.add_child(bank)
+	_build_bridge()
 
+func _build_bridge() -> void:
+	# 桥体向下延伸进河床，顶面在 0.02（单位走在 y=0 上，不会陷进去）。
 	var bridge := MeshInstance3D.new()
-	var bridge_box := BoxMesh.new()
-	bridge_box.size = Vector3(9.0, 0.05, 24.0)
-	bridge.mesh = bridge_box
+	bridge.name = "Bridge"
+	var box := BoxMesh.new()
+	box.size = Vector3(9.0, 1.7, 26.0)
+	bridge.mesh = box
 	bridge.rotation.y = PI * 0.25
-	bridge.position = Vector3(0, 0.055, 0)
-	var bridge_material := StandardMaterial3D.new()
-	bridge_material.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
-	bridge_material.albedo_color = Color(0.72, 0.68, 0.6)
-	bridge_material.roughness = 0.9
-	bridge.material_override = bridge_material
+	bridge.position = Vector3(0.0, -0.83, 0.0)
+	# cliff_side_Diffuse 平均色是 (123,82,49) 的棕色岩 —— 直接用它当桥面，
+	# 桥看起来就是一块木板。改用同套的 AO 图（灰度）做 albedo，再上灰石色。
+	var deck := StandardMaterial3D.new()
+	deck.albedo_texture = load("res://assets/textures/cliff_side_AO.jpg")
+	deck.albedo_color = Color(0.58, 0.60, 0.62)
+	deck.normal_enabled = true
+	deck.normal_texture = load("res://assets/textures/cliff_side_nor_gl.jpg")
+	deck.normal_scale = 1.4
+	deck.roughness = 0.95
+	deck.uv1_scale = Vector3(5, 2, 12)
+	bridge.material_override = deck
+	ModelUtils.enable_shadows(bridge, true)
 	_props_root.add_child(bridge)
+
+	# 沿河道方向 / 垂直河道方向的单位向量（桥旋转了 45°）
+	var along := Vector3(0.70710678, 0.0, 0.70710678)
+	var across := Vector3(0.70710678, 0.0, -0.70710678)
+
+	var stone := StandardMaterial3D.new()
+	stone.albedo_texture = load("res://assets/textures/cliff_side_AO.jpg")
+	stone.albedo_color = Color(0.54, 0.56, 0.58)
+	stone.normal_enabled = true
+	stone.normal_texture = load("res://assets/textures/cliff_side_nor_gl.jpg")
+	stone.normal_scale = 1.2
+	stone.roughness = 1.0
+	stone.uv1_scale = Vector3(2, 2, 2)
+
+	# 桥墩：从河床顶到桥底
+	for i in 2:
+		for side in 2:
+			var pier := MeshInstance3D.new()
+			var cylinder := CylinderMesh.new()
+			cylinder.top_radius = 0.52
+			cylinder.bottom_radius = 0.66
+			cylinder.height = 1.9
+			cylinder.radial_segments = 12
+			pier.mesh = cylinder
+			pier.material_override = stone
+			var t := -1.0 if i == 0 else 1.0
+			var s := -1.0 if side == 0 else 1.0
+			pier.position = along * (t * 6.0) + across * (s * 3.8) + Vector3(0.0, -0.55, 0.0)
+			ModelUtils.enable_shadows(pier, true)
+			_props_root.add_child(pier)
+
+	# 低矮石栏：高 0.42，只做两侧边缘，不挡镜头看桥面
+	for side in 2:
+		var rail := MeshInstance3D.new()
+		var rail_box := BoxMesh.new()
+		rail_box.size = Vector3(0.34, 0.42, 26.0)
+		rail.mesh = rail_box
+		rail.rotation.y = PI * 0.25
+		var s := -1.0 if side == 0 else 1.0
+		rail.position = across * (s * 4.25) + Vector3(0.0, 0.23, 0.0)
+		rail.material_override = stone
+		ModelUtils.enable_shadows(rail, true)
+		_props_root.add_child(rail)
 
 # 地图机制的可视化：墙体、草丛、野区营地与首领坑都从 MapLayout 取坐标，
 # 与碰撞/视野/野怪刷新点严格同源，避免「看得见走不过去」或「打到空气墙」。
@@ -1604,6 +1909,45 @@ func _add_map_totem(pos: Vector2, height: float, color: Color) -> void:
 	gem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(gem)
 
+# 布景取地形高度。地形是可玩区外才抬升的，所以可玩区里恒为 0，
+# 布景摆放不会因为地形改动而漂移。
+func _terrain_height(x: float, z: float) -> float:
+	if _terrain == null:
+		return 0.0
+	return float(_terrain.height_at(x, z))
+
+# --- 草簇散布 ---
+# 只长在草地上：路面、河道、基地广场和草丛（玩法区域）都要排除，
+# 否则会出现「草长在路中间」「草盖住草丛」这种一眼假的情况。
+var _grass_bushes: Array = []
+# 用噪声控制草甸密度：均匀撒满会像一层绿色毛刺，
+# 有疏有密才像自然长出来的草地。
+var _grass_noise := FastNoiseLite.new()
+
+func _can_grow_grass(point: Vector2) -> bool:
+	if _grass_noise.get_noise_2d(point.x, point.y) < -0.18:
+		return false
+	if _lane_distance(point) < 4.2:
+		return false
+	if _river_distance(point) < 12.5:
+		return false
+	if _base_distance(point) < 11.5:
+		return false
+	for bush in _grass_bushes:
+		if point.distance_to(bush.pos) < float(bush.radius) + 0.7:
+			return false
+	return true
+
+func _build_grass_tufts() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5150
+	_grass_noise.seed = 991
+	_grass_noise.frequency = 0.045
+	_grass_noise.fractal_octaves = 2
+	_grass_bushes = MapView.map_marks().bushes
+	var tufts := GrassField.scatter(12000, _can_grow_grass, _terrain_height, rng)
+	_props_root.add_child(tufts)
+
 func _build_scenery() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20261022
@@ -1628,8 +1972,9 @@ func _build_scenery() -> void:
 		var scene: PackedScene = pine if i % 3 != 1 else broadleaf
 		var height := rng.randf_range(7.0, 12.5)
 		var tree := ModelUtils.fit_scene(scene, height, height * 1.1)
-		tree.position = Vector3(pos.x, 0.0, pos.y)
+		tree.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 0.15, pos.y)
 		tree.rotation.y = rng.randf_range(0.0, TAU)
+		ModelUtils.tint(tree, Color(0.16, 0.28, 0.14), 0.45)
 		ModelUtils.enable_shadows(tree, false)
 		_props_root.add_child(tree)
 		if i % 8 == 7:
@@ -1645,8 +1990,9 @@ func _build_scenery() -> void:
 			continue
 		var height := rng.randf_range(5.0, 8.0)
 		var tree := ModelUtils.fit_scene(single_tree, height, height * 0.8)
-		tree.position = Vector3(pos.x, 0.0, pos.y)
+		tree.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 0.15, pos.y)
 		tree.rotation.y = rng.randf_range(0.0, TAU)
+		ModelUtils.tint(tree, Color(0.18, 0.30, 0.15), 0.45)
 		ModelUtils.enable_shadows(tree, false)
 		_props_root.add_child(tree)
 		if i % 6 == 5:
@@ -1664,7 +2010,7 @@ func _build_scenery() -> void:
 			continue
 		var height := rng.randf_range(1.2, 2.8)
 		var rock := ModelUtils.fit_scene(rock_group if i % 3 == 0 else rock_single, height, height * 2.2)
-		rock.position = Vector3(pos.x, 0.0, pos.y)
+		rock.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 0.25, pos.y)
 		rock.rotation.y = rng.randf_range(0.0, TAU)
 		ModelUtils.enable_shadows(rock, false)
 		_props_root.add_child(rock)
@@ -1678,8 +2024,12 @@ func _build_scenery() -> void:
 		if _base_distance(pos) < 44.0:
 			continue
 		var mountain := ModelUtils.fit_scene(mountains[i % 2], rng.randf_range(22.0, 34.0), rng.randf_range(40.0, 58.0))
-		mountain.position = Vector3(pos.x, 0.0, pos.y)
+		# 山脚埋进地形 2m：模型底边是平的，不埋就会在坡上悬空
+		mountain.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 2.0, pos.y)
 		mountain.rotation.y = rng.randf_range(0.0, TAU)
+		# 原始山体是纯白的低模，和草地拼在一起像贴纸。往岩石青灰拉，
+		# 再用远景雾把它压向天空色，才有「远处的山」的层次。
+		ModelUtils.tint(mountain, Color(0.20, 0.25, 0.31), 0.80)
 		ModelUtils.enable_shadows(mountain, false)
 		_props_root.add_child(mountain)
 		if i % 4 == 3:
@@ -1860,11 +2210,11 @@ func _create_unit_view(entity: Dictionary) -> UnitVisual:
 	var entity_id := int(entity.get("id", -1))
 	var is_local := entity_type == "hero" and str(entity.get("owner_id", "")) == local_owner
 	if entity_type == "hero":
-		view.setup("hero", team, str(entity.get("hero_type", "blade")), str(entity.get("name", "英雄")), is_local)
+		view.setup("hero", team, str(entity.get("hero_type", "blade")), str(entity.get("name", "英雄")), is_local, local_team)
 	elif entity_type == "monster":
-		view.setup("monster", "neutral", str(entity.get("monster_type", "wolf")), str(entity.get("name", "野怪")), false)
+		view.setup("monster", "neutral", str(entity.get("monster_type", "wolf")), str(entity.get("name", "野怪")), false, local_team)
 	else:
-		view.setup("minion", team, "minion", "", false)
+		view.setup("minion", team, "minion", "", false, local_team)
 	_units_root.add_child(view)
 	view.position = Vector3(float(entity.get("x", 0.0)), 0.0, float(entity.get("y", 0.0)))
 	view.set_snapshot(entity, 1.0)
@@ -2137,6 +2487,9 @@ func _add_structure_bar(root: Node3D, height: float, width: float, color: Color)
 	return [bar, mat]
 
 func _process_events(events: Array) -> void:
+	# 音效与表现共用同一批事件：模拟侧算一次，主机/客机听到的是同一场战斗。
+	if _audio != null:
+		_audio.handle_events(events, TICK)
 	for event in events:
 		if not (event is Dictionary):
 			continue
@@ -2176,10 +2529,17 @@ func _process_events(events: Array) -> void:
 			"teleport":
 				var from_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
 				var to_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
-				_spawn_ring(from_pos, Color(0.42, 0.82, 0.95), 0.8, 3.2, 0.7)
-				_spawn_particles(from_pos + Vector3(0, 1.0, 0), Color(0.5, 0.88, 1.0), 24, 5.0)
-				_spawn_ring(to_pos, Color(0.42, 0.82, 0.95), 0.8, 3.2, 0.7)
-				_spawn_particles(to_pos + Vector3(0, 1.0, 0), Color(0.5, 0.88, 1.0), 24, 5.0)
+				_handle_channel_departure(int(event.get("hero", -1)), "teleport", from_pos, to_pos)
+			"teleport_interrupt":
+				var break_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
+				_handle_channel_break(int(event.get("hero", -1)), "teleport", break_pos)
+			"recall":
+				var leave_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
+				var home_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
+				_handle_channel_departure(int(event.get("hero", -1)), "recall", leave_pos, home_pos)
+			"recall_interrupt":
+				var cancel_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
+				_handle_channel_break(int(event.get("hero", -1)), "recall", cancel_pos)
 			"river_spirit_killed":
 				var spirit_pos := Vector3(float(event.get("x", 0.0)), 0.5, float(event.get("y", 0.0)))
 				_spawn_ring(spirit_pos, Color(0.46, 0.86, 0.94), 0.6, 4.0, 0.8)
@@ -2215,6 +2575,52 @@ func _process_events(events: Array) -> void:
 			"match_end":
 				hud.announce("主堡陷落", GameTheme.GOLD_LIGHT, 2.0)
 				_hit_stop.trigger_hit_stop(0.16, 0.45)
+				# 结算曲按本地队伍判：赢了上行号角，输了下行钟声。
+				# 这两个是一次性音（不循环），所以不走 play_cue 的声道池。
+				if _audio != null:
+					var winner := str(event.get("winner", ""))
+					if winner == local_team:
+						_audio.play_music(AudioDirector.MUSIC_VICTORY)
+					else:
+						_audio.play_music(AudioDirector.MUSIC_DEFEAT)
+
+# 引导完成（回城落地 / 传送抵达）：起点法阵炸开、终点成形、模型直接落位。
+# 必须显式 snap_to：位置跳变不足 14 米时（从自家野区回城就是这种）插值会让人滑过整片野区。
+func _handle_channel_departure(entity_id: int, kind: String, from_pos: Vector3, to_pos: Vector3) -> void:
+	var color := ChannelFx.color_for(kind)
+	var fx := _channel_fx.get(entity_id) as ChannelFx
+	if fx != null and is_instance_valid(fx):
+		fx.burst(color)
+		fx.release()
+	# 起点余波：人已经走了，只留一圈正在消散的光。
+	_spawn_ring(from_pos, color, 1.7, 5.4, 0.55)
+	_spawn_particles(from_pos + Vector3(0, 0.9, 0), color, 18, 4.0)
+	# 落点成形：英雄凭空出现，必须有「到了」的实感。两层错开的冲击环比单环更像落地。
+	_spawn_ring(to_pos, color, 0.6, 4.6, 0.62, 0.9)
+	_spawn_ring(to_pos, Color(1.0, 1.0, 1.0).lerp(color, 0.35), 0.35, 2.4, 0.34, 0.95)
+	_spawn_particles(to_pos + Vector3(0, 1.0, 0), color, 26, 5.5)
+	var view: UnitVisual = _views.get(entity_id)
+	if view != null:
+		view.snap_to(Vector3(to_pos.x, 0.0, to_pos.z))
+	# 客机的插值区间由 jitter buffer 的上一格位置驱动，不清掉会从旧位置滑过来。
+	_render_prev_positions.erase(entity_id)
+	if entity_id == _local_entity_id:
+		_play_channel_cue(AudioCues.recall_done() if kind == "recall" else AudioCues.teleport_done())
+		# 回城落地后旧的点击目标已经失效，不清会让英雄立刻往回走。
+		_move_target_valid = false
+		_prediction.reset(Vector2(to_pos.x, to_pos.z))
+
+# 引导被打断：法阵内爆，不给「成」的音色。
+func _handle_channel_break(entity_id: int, kind: String, pos: Vector3) -> void:
+	var color := ChannelFx.color_for(kind)
+	var fx := _channel_fx.get(entity_id) as ChannelFx
+	if fx != null and is_instance_valid(fx):
+		fx.shatter(color)
+	var dimmed := color.lerp(RED, 0.35)
+	_spawn_ring(pos, dimmed, 0.6, 3.4, 0.34, 0.85)
+	_spawn_particles(pos + Vector3(0, 0.8, 0), dimmed, 14, 3.2, 0.1, 0.45)
+	if entity_id == _local_entity_id:
+		_play_channel_cue(AudioCues.recall_break() if kind == "recall" else AudioCues.teleport_break())
 
 func _handle_skill_event(event: Dictionary) -> void:
 	var entity_id := int(event.get("hero", -1))
@@ -2243,6 +2649,11 @@ func _handle_skill_event(event: Dictionary) -> void:
 			_spawn_projectile(from, aim + Vector3(0, 0.8, 0), color, 0.18)
 		"archer":
 			_spawn_projectile(from, aim + Vector3(0, 1.0, 0), color, 0.12)
+		"assassin":
+			# 刺客是贴脸斩击：短促的紫色刀环 + 少量高速碎屑，不做抛射物。
+			_spawn_ring(aim, color, 0.38, 2.2, 0.2)
+			_spawn_particles(aim + Vector3(0, 0.9, 0), color, 16, 6.0, 0.16, 0.5)
+			_camera_shake = maxf(_camera_shake, 0.1)
 
 func _handle_hit_event(event: Dictionary) -> void:
 	var pos := Vector3(float(event.get("x", 0.0)), 0.0, float(event.get("y", 0.0)))
@@ -2395,7 +2806,7 @@ func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 			_damage_labels_pool.append(label)
 	)
 
-func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float) -> void:
+func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float, alpha := 0.65) -> void:
 	var ring := MeshInstance3D.new()
 	var torus := TorusMesh.new()
 	torus.inner_radius = 0.62
@@ -2409,7 +2820,7 @@ func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float,
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	material.albedo_color = Color(color.r, color.g, color.b, 0.65)
+	material.albedo_color = Color(color.r, color.g, color.b, alpha)
 	material.emission_enabled = true
 	material.emission = color
 	material.emission_energy_multiplier = 1.6
@@ -2511,6 +2922,8 @@ func _hero_vfx_color(hero_type: String) -> Color:
 			return Color(0.4, 0.85, 0.8)
 		"archer":
 			return Color(0.55, 0.95, 0.5)
+		"assassin":
+			return Color(0.88, 0.42, 0.72)
 	return GOLD
 
 func _build_ambient_particles() -> void:

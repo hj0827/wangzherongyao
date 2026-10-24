@@ -3,6 +3,14 @@ extends SceneTree
 # 离线渲染英雄展示视频：复用对局里的 UnitVisual（同一套模型、动作库、武器挂点），
 # 在离屏 SubViewport 里逐帧推进动画并导出 30fps 帧序列，再交给 ffmpeg 编码 Theora。
 # 窗口保持 1x1、无边框、移出屏幕，不打断用户操作。
+#
+# ⚠️ 2026-10-23 起这套引擎内渲染的产物已被淘汰，不要再跑它覆盖线上素材：
+#   - 它出的画面是低多边形 3D 素模，跟卡面立绘完全不像，视觉上直接被否掉；
+#   - 现役四条 hero_*.ogv 都是 AI 生成的写实国风镜头（带人声台词），
+#     其中星璃/铁壁两条见 hero_showcase.miora 与 git 历史；
+#   - 下面写死的 FFMPEG 路径（D:/Tools/ffmpeg/bin/ffmpeg.exe）在本机根本不存在，
+#     脚本跑到编码阶段必然失败。
+# 保留本文件只为留档：镜头运动、灯光分层、粒子编排这些参数对重做 AI 版有参考价值。
 
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
 

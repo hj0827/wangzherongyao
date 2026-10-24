@@ -64,10 +64,15 @@ static func tick(hero: Dictionary, input: Dictionary, delta: float) -> bool:
 	hero["pos"] = partner.pos
 	return true
 
-static func interrupt(hero: Dictionary) -> void:
+# 返回「这次调用是否真的打断了一段正在进行的引导」，语义与 RecallRules.interrupt 一致：
+# 幂等，只有真正中断的那一次返回 true，调用方据此发打断事件。
+static func interrupt(hero: Dictionary) -> bool:
+	if not bool(hero.get("teleporting", false)):
+		return false
 	hero["teleporting"] = false
 	hero["teleport_timer"] = 0.0
 	hero["teleport_total"] = 0.0
+	return true
 
 static func _input_breaks_channel(input: Dictionary) -> bool:
 	var move: Variant = input.get("move", Vector2.ZERO)

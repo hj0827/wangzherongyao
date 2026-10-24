@@ -12,11 +12,13 @@ signal resume_requested
 signal move_changed(value: Vector2)
 signal attack_changed(held: bool)
 signal pause_requested
+# 按住小地图 → 请求把镜头移到该世界坐标；松手 → 立刻回到英雄。
+signal map_focus_requested(world: Vector2)
+signal map_focus_released
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const SkillSystem = preload("res://sim/skill_system.gd")
-const MapIntel = preload("res://sim/map_intel.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
 const SkillButton = preload("res://scripts/ui/skill_button.gd")
@@ -24,9 +26,11 @@ const SkillIndicator = preload("res://scripts/ui/skill_indicator.gd")
 const CancelCastZone = preload("res://scripts/ui/cancel_cast_zone.gd")
 const AttackCluster = preload("res://scripts/ui/attack_cluster.gd")
 const ShopPanel = preload("res://scripts/ui/shop_panel.gd")
+const Scoreboard = preload("res://scripts/ui/scoreboard.gd")
 const TouchJoystick = preload("res://scripts/ui/touch_joystick.gd")
 const TouchActionButton = preload("res://scripts/ui/touch_action_button.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
+const HudLayout = preload("res://scripts/ui/hud_layout.gd")
 
 var arena: Node = null
 var local_owner := ""
@@ -49,6 +53,16 @@ var _score_red: Label
 var _timer_label: Label
 var _wave_label: Label
 var _objective_label: Label
+var _score_panel: PanelContainer
+var _econ_panel: PanelContainer
+var _econ_label: Label
+var _econ_sub: Label
+var _scoreboard: Control
+var _minimap_panel: PanelContainer
+var _hero_panel: PanelContainer
+var _hint_box: Label
+# 分区表：视口一变就重算，所有常驻面板都从这里取矩形，不再各写锚点。
+var _layout: Dictionary = {}
 var _hp_bar: ProgressBar
 var _hp_text: Label
 var _hp_style: StyleBoxFlat
@@ -71,20 +85,13 @@ var _aim_touch := Vector2.ZERO
 var _cancel_state: Dictionary = CancelCastZone.create_state()
 var _cancel_center := Vector2.ZERO
 const CANCEL_ZONE_RADIUS := 66.0
+# 键位提示只当新手引导：进场显示 HINT_SECONDS 秒后淡出，之后在 Esc 菜单里可查。
+const KEY_HINTS := "左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师   ·   B 回城   ·   T 传送   ·   滚轮 缩放"
+const HINT_SECONDS := 14.0
 var _shop_panel: ShopPanel
 var _shop_button: Button
 var _gold_label: Label
 var _minimap: Minimap
-var _intel_panel: PanelContainer
-var _intel_title: Label
-var _intel_meta: Label
-var _intel_detail: Label
-var _intel_summary: Label
-var _intel_units: VBoxContainer
-var _intel_rows: Array[Label] = []
-var _intel_close: Button
-var _intel_point := Vector2.ZERO
-var _intel_valid := false
 var _portrait: TextureRect
 var _feed_box: VBoxContainer
 var _announce_panel: PanelContainer
@@ -116,9 +123,9 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_build_top_bar()
+	_build_econ_strip()
 	_build_bush_indicator()
 	_build_minimap()
-	_build_map_intel()
 	_build_feed()
 	_build_announcement()
 	_build_bottom_panel()
@@ -132,23 +139,60 @@ func _ready() -> void:
 	_build_result_overlay()
 	_build_loading_overlay()
 	_build_shop()
+	_build_scoreboard()
+	_apply_layout()
+	resized.connect(_apply_layout)
 	set_process_unhandled_key_input(true)
 
+# 按当前视口重算所有常驻面板的位置。窗口拉伸、旋转屏、改分辨率都走这里。
+func _apply_layout() -> void:
+	var viewport := size
+	if viewport.x < 1.0 or viewport.y < 1.0:
+		# 还没进场景树（无头测试）时按设计基准算，保证取值确定、不依赖节点尺寸。
+		viewport = Vector2(1600.0, 900.0)
+	_layout = HudLayout.zones(viewport, touch_mode)
+	_place_zone(_score_panel, _layout["score"])
+	# 经济条贴在比分板右侧；窗口太窄时分区宽度会被压到 0，这时整条隐藏，
+	# 而不是让它压在商店按钮上。
+	var econ_rect: Rect2 = _layout.get("econ", Rect2())
+	_econ_panel.visible = econ_rect.size.x >= 100.0
+	_place_zone(_econ_panel, econ_rect)
+	_place_zone(_minimap_panel, _layout["minimap"])
+	_place_zone(_feed_box, _layout["feed"])
+	_place_zone(_bush_label, _layout["bush"])
+	_place_zone(_hero_panel, _layout["hero"])
+	_place_zone(_shop_button, _layout["shop"])
+	_place_zone(_hint_box, _layout["hints"])
+	if touch_mode:
+		_place_zone(_joystick, _layout["joystick"])
+	else:
+		# 键鼠：技能条贴右下，攻击模式条压在它上面（低频率控件不进战场正中）。
+		_place_zone(_attack_cluster, _layout["mode"])
+		var slots := ["q", "w", "e", "r", "summoner"]
+		for i in slots.size():
+			_place_zone(_skill_button_for(slots[i]), HudLayout.skill_rect(_layout["skills"], i))
+
+func _place_zone(node: Control, rect: Rect2) -> void:
+	if node == null:
+		return
+	node.anchor_left = 0.0
+	node.anchor_top = 0.0
+	node.anchor_right = 0.0
+	node.anchor_bottom = 0.0
+	node.offset_left = rect.position.x
+	node.offset_top = rect.position.y
+	node.offset_right = rect.end.x
+	node.offset_bottom = rect.end.y
+
 func _build_top_bar() -> void:
-	var panel := PanelContainer.new()
-	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.anchor_left = 0.5
-	panel.anchor_right = 0.5
-	panel.offset_left = -246.0
-	panel.offset_right = 246.0
-	panel.offset_top = 14.0
-	panel.offset_bottom = 82.0
-	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.9), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
-	add_child(panel)
+	_score_panel = PanelContainer.new()
+	_score_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_score_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.9), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
+	add_child(_score_panel)
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 28)
-	panel.add_child(row)
+	_score_panel.add_child(row)
 	_score_blue = _make_label("蓝方  0", 22, GameTheme.BLUE)
 	_score_blue.custom_minimum_size.x = 132
 	_score_blue.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -168,17 +212,64 @@ func _build_top_bar() -> void:
 	_score_red.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	row.add_child(_score_red)
 
+# 顶栏常驻的经济差：只回答「现在哪边钱多、多多少」。
+# 明细（每人的等级 / KDA / 装备）在 Tab 计分板里，不占常驻视野。
+func _build_econ_strip() -> void:
+	_econ_panel = PanelContainer.new()
+	_econ_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_econ_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.9), Color(0.55, 0.44, 0.24, 0.5), 1, 9))
+	add_child(_econ_panel)
+	var box := VBoxContainer.new()
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override("separation", 1)
+	_econ_panel.add_child(box)
+	# 主行说「谁领先多少」，副行给两队总额。
+	# 只写差值时，落后方为 0 会和差值撞成同一个数字（1.5k · 1.5k），读起来像重复。
+	_econ_label = _make_label("经济 ——", 15, GameTheme.MUTED)
+	_econ_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_econ_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	box.add_child(_econ_label)
+	_econ_sub = _make_label("蓝 —— · 红 ——", 12, GameTheme.MUTED)
+	_econ_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_econ_sub.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	box.add_child(_econ_sub)
+
+func _build_scoreboard() -> void:
+	_scoreboard = Scoreboard.new()
+	_scoreboard.setup(touch_mode)
+	add_child(_scoreboard)
+
+# 只在计分板打开时刷新它：关着的时候没人看，没必要每帧重排文字。
+func _refresh_economy(board: Dictionary, local_owner: String) -> void:
+	var totals: Dictionary = board.get("net_worth", {})
+	var blue := int(totals.get("blue", 0))
+	var red := int(totals.get("red", 0))
+	var diff := blue - red
+	if _econ_label != null:
+		if absi(diff) < 50:
+			_econ_label.text = "经济持平"
+			_econ_label.add_theme_color_override("font_color", GameTheme.MUTED)
+		elif diff > 0:
+			_econ_label.text = "蓝方领先 %s" % _short_gold(diff)
+			_econ_label.add_theme_color_override("font_color", GameTheme.BLUE)
+		else:
+			_econ_label.text = "红方领先 %s" % _short_gold(-diff)
+			_econ_label.add_theme_color_override("font_color", GameTheme.RED)
+	if _econ_sub != null:
+		_econ_sub.text = "蓝 %s · 红 %s" % [_short_gold(blue), _short_gold(red)]
+	if _scoreboard != null and _scoreboard.is_open():
+		_scoreboard.set_state(board, local_owner)
+
+func _short_gold(value: int) -> String:
+	if value >= 1000:
+		return "%.1fk" % (float(value) / 1000.0)
+	return str(value)
+
 func _build_bush_indicator() -> void:
 	_bush_label = _make_label("草丛隐匿 · 敌方无法直接看到你", 15, Color(0.62, 0.92, 0.66))
 	_bush_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_bush_label.add_theme_color_override("font_outline_color", Color(0.0, 0.08, 0.03, 0.85))
 	_bush_label.add_theme_constant_override("outline_size", 4)
-	_bush_label.anchor_left = 0.5
-	_bush_label.anchor_right = 0.5
-	_bush_label.offset_left = -150.0
-	_bush_label.offset_right = 150.0
-	_bush_label.offset_top = 88.0
-	_bush_label.offset_bottom = 114.0
 	_bush_label.visible = false
 	add_child(_bush_label)
 
@@ -188,156 +279,44 @@ func set_bush_hidden(value: bool) -> void:
 	_bush_label.visible = value
 
 func _build_minimap() -> void:
-	var panel := PanelContainer.new()
-	panel.anchor_left = 0.0
-	panel.anchor_right = 0.0
-	panel.offset_left = 18.0
-	panel.offset_right = 252.0
-	panel.offset_top = 18.0
-	panel.offset_bottom = 286.0
-	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.82), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
-	add_child(panel)
+	_minimap_panel = PanelContainer.new()
+	_minimap_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.82), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
+	add_child(_minimap_panel)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 4)
-	panel.add_child(box)
+	_minimap_panel.add_child(box)
 	_minimap = Minimap.new()
 	_minimap.custom_minimum_size = Minimap.DISPLAY_SIZE
 	_minimap.location_clicked.connect(_on_minimap_location_clicked)
+	_minimap.location_dragged.connect(_on_minimap_location_dragged)
+	_minimap.drag_finished.connect(_on_minimap_drag_finished)
 	box.add_child(_minimap)
 	_objective_label = _make_label("防御塔 蓝 0 : 0 红", 12, GameTheme.MUTED)
 	_objective_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# 操作说明不再常驻两行（长期压着左侧视野），改成悬停提示。
+	_minimap.tooltip_text = "按住地图拖动查看其他区域，松手回到自己"
 	box.add_child(_objective_label)
-	var hint := _make_label("点击地图查看区域情报", 11, Color(0.6, 0.68, 0.72, 0.8))
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(hint)
-
-func _build_map_intel() -> void:
-	_intel_panel = PanelContainer.new()
-	_intel_panel.anchor_left = 0.0
-	_intel_panel.anchor_top = 0.0
-	_intel_panel.anchor_right = 0.0
-	_intel_panel.anchor_bottom = 0.0
-	_intel_panel.offset_left = 18.0
-	_intel_panel.offset_right = 390.0
-	_intel_panel.offset_top = 294.0
-	_intel_panel.offset_bottom = 502.0
-	_intel_panel.mouse_filter = Control.MOUSE_FILTER_STOP
-	_intel_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.04, 0.055, 0.94), Color(0.55, 0.44, 0.24, 0.85), 1, 9, 10, 0.5))
-	_intel_panel.visible = false
-	add_child(_intel_panel)
-
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 3)
-	_intel_panel.add_child(box)
-	var header := HBoxContainer.new()
-	header.add_theme_constant_override("separation", 8)
-	box.add_child(header)
-	_intel_title = _make_label("地图情报", 18, GameTheme.GOLD_LIGHT)
-	_intel_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(_intel_title)
-	_intel_close = Button.new()
-	_intel_close.text = "×"
-	_intel_close.flat = true
-	_intel_close.focus_mode = Control.FOCUS_NONE
-	_intel_close.custom_minimum_size = Vector2(48, 48)
-	_intel_close.add_theme_font_size_override("font_size", 20)
-	_intel_close.add_theme_color_override("font_color", GameTheme.MUTED)
-	_intel_close.add_theme_color_override("font_hover_color", GameTheme.GOLD_LIGHT)
-	for state in ["normal", "hover", "pressed"]:
-		_intel_close.add_theme_stylebox_override(state, StyleBoxEmpty.new())
-	_intel_close.pressed.connect(_close_intel)
-	header.add_child(_intel_close)
-	_intel_meta = _make_label("", 12, GameTheme.MUTED)
-	box.add_child(_intel_meta)
-	_intel_detail = _make_label("", 11, Color(0.66, 0.72, 0.76))
-	box.add_child(_intel_detail)
-	_intel_summary = _make_label("", 12, GameTheme.TEXT)
-	box.add_child(_intel_summary)
-	_intel_units = VBoxContainer.new()
-	_intel_units.add_theme_constant_override("separation", 1)
-	box.add_child(_intel_units)
-	_intel_rows.clear()
-	for i in MapIntel.MAX_UNITS:
-		var row := _make_label("", 12, GameTheme.TEXT)
-		row.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
-		row.add_theme_constant_override("outline_size", 2)
-		row.visible = false
-		_intel_units.add_child(row)
-		_intel_rows.append(row)
 
 func _on_minimap_location_clicked(world: Vector2) -> void:
-	_intel_point = world
-	_intel_valid = true
-	_intel_panel.visible = true
-	_refresh_intel()
+	map_focus_requested.emit(world)
 
-func _close_intel() -> void:
-	_intel_valid = false
-	if _intel_panel != null:
-		_intel_panel.visible = false
-	if _minimap != null:
-		_minimap.clear_inspect_point()
+# 按住拖动时持续改目标，相机就跟着手指走。
+func _on_minimap_location_dragged(world: Vector2) -> void:
+	map_focus_requested.emit(world)
 
-func _refresh_intel() -> void:
-	if not _intel_valid or _intel_panel == null:
+# 松手立刻回位，不再停留。
+func _on_minimap_drag_finished(_world: Vector2) -> void:
+	map_focus_released.emit()
+
+# 相机视野框同步给小地图；valid=false 时清掉。
+func set_camera_view(view: Dictionary) -> void:
+	if _minimap == null:
 		return
-	var report := MapIntel.inspect(snapshot, _intel_point, local_owner, local_team)
-	var region: Dictionary = report.region
-	_intel_title.text = "地图情报 · %s" % str(region.get("name", "未知"))
-	var distance_text := "距你 --"
-	if bool(report.get("hero_found", false)):
-		distance_text = "距你 %.1f m" % float(report.get("hero_distance", 0.0))
-	_intel_meta.text = "坐标 (%.1f, %.1f)   ·   %s" % [_intel_point.x, _intel_point.y, distance_text]
-	_intel_detail.text = str(region.get("note", ""))
-	var counts: Dictionary = report.get("counts", {})
-	var blue_count := int(counts.get("blue", 0))
-	var red_count := int(counts.get("red", 0))
-	var total := int(report.get("total", 0))
-	if total == 0:
-		_intel_summary.text = "附近 %d 米内没有可观察单位" % int(round(float(report.get("radius", MapIntel.INSPECT_RADIUS))))
-		_intel_summary.add_theme_color_override("font_color", GameTheme.MUTED)
-	else:
-		_intel_summary.text = "附近单位   蓝方 %d   ·   红方 %d" % [blue_count, red_count]
-		_intel_summary.add_theme_color_override("font_color", GameTheme.TEXT)
-	var units: Array = report.get("units", [])
-	for index in _intel_rows.size():
-		var row := _intel_rows[index]
-		if index < units.size():
-			_apply_intel_row(row, units[index])
-		else:
-			row.visible = false
-
-func _apply_intel_row(label: Label, unit: Dictionary) -> void:
-	var kind := str(unit.get("kind", ""))
-	var mark := "●"
-	if kind == "tower":
-		mark = "■"
-	elif kind == "base":
-		mark = "◆"
-	elif kind == "minion":
-		mark = "·"
-	var team := str(unit.get("team", "blue"))
-	var text := "%s %s（%s" % [mark, str(unit.get("label", "单位")), "蓝方" if team == "blue" else "红方"]
-	if int(unit.get("level", 0)) > 0:
-		text += " Lv.%d" % int(unit.get("level", 0))
-	text += "）  %d/%d   ·   %.1f m" % [
-		int(ceil(float(unit.get("hp", 0.0)))),
-		int(unit.get("max_hp", 1.0)),
-		float(unit.get("distance", 0.0)),
-	]
-	label.text = text
-	label.add_theme_color_override("font_color", GameTheme.BLUE if team == "blue" else GameTheme.RED)
-	label.visible = true
+	_minimap.set_camera_view(view)
 
 func _build_feed() -> void:
 	_feed_box = VBoxContainer.new()
 	_feed_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_feed_box.anchor_left = 1.0
-	_feed_box.anchor_right = 1.0
-	_feed_box.offset_left = -430.0
-	_feed_box.offset_top = 20.0
-	_feed_box.offset_right = -22.0
-	_feed_box.offset_bottom = 250.0
 	_feed_box.add_theme_constant_override("separation", 4)
 	add_child(_feed_box)
 
@@ -363,23 +342,13 @@ func _build_announcement() -> void:
 	_announce_panel.visible = false
 
 func _build_bottom_panel() -> void:
-	var bottom_inset := 40.0 if touch_mode else 16.0
-	var panel_height := TouchLayout.BOTTOM_PANEL_HEIGHT if touch_mode else 160.0
-	var half_width := 560.0 if not touch_mode else 420.0
-	var panel := PanelContainer.new()
-	panel.anchor_left = 0.5
-	panel.anchor_right = 0.5
-	panel.anchor_top = 1.0
-	panel.anchor_bottom = 1.0
-	panel.offset_left = -half_width
-	panel.offset_right = half_width
-	panel.offset_top = -(bottom_inset + panel_height)
-	panel.offset_bottom = -bottom_inset
-	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.04, 0.055, 0.92), Color(0.55, 0.44, 0.24, 0.7), 1, 12))
-	add_child(panel)
+	_hero_panel = PanelContainer.new()
+	_hero_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hero_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.04, 0.055, 0.92), Color(0.55, 0.44, 0.24, 0.7), 1, 12))
+	add_child(_hero_panel)
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 16)
-	panel.add_child(row)
+	_hero_panel.add_child(row)
 
 	var portrait_frame := PanelContainer.new()
 	portrait_frame.custom_minimum_size = Vector2(104, 104)
@@ -417,26 +386,29 @@ func _build_bottom_panel() -> void:
 	_mp_bar = mp_root.get_meta("bar")
 	_mp_text = mp_root.get_meta("label")
 	info.add_child(mp_root)
+	# 击杀/阵亡和金币并成一行：状态卡少一行就矮 18px，压住战场的面积直接少一截。
+	var meta_row := HBoxContainer.new()
+	meta_row.add_theme_constant_override("separation", 8)
+	info.add_child(meta_row)
 	_kd_label = _make_label("击杀 0 / 阵亡 0", 13, GameTheme.MUTED)
-	info.add_child(_kd_label)
+	_kd_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	meta_row.add_child(_kd_label)
 	_gold_label = _make_label("金币 0", 13, GameTheme.GOLD)
-	info.add_child(_gold_label)
+	meta_row.add_child(_gold_label)
 
 	if not touch_mode:
-		var skills := HBoxContainer.new()
-		skills.add_theme_constant_override("separation", 8)
-		row.add_child(skills)
+		# 技能从状态卡里搬出来，单独贴右下角：状态卡只回答「我是谁 / 我还剩多少血」。
 		_skill_q = _create_skill("q", "Q", GameTheme.GOLD)
-		skills.add_child(_skill_q)
+		add_child(_skill_q)
 		# 键盘 W 已用于走位，第二技能改绑数字键 1，HUD 直接标注实际键位。
 		_skill_w = _create_skill("w", "1", Color(0.68, 0.86, 0.58))
-		skills.add_child(_skill_w)
+		add_child(_skill_w)
 		_skill_e = _create_skill("e", "E", Color(0.55, 0.75, 1.0))
-		skills.add_child(_skill_e)
+		add_child(_skill_e)
 		_skill_r = _create_skill("r", "R", Color(0.95, 0.62, 0.45))
-		skills.add_child(_skill_r)
+		add_child(_skill_r)
 		_summoner_button = _create_skill("summoner", "F", Color(0.5, 0.86, 0.76), _summoner_name())
-		skills.add_child(_summoner_button)
+		add_child(_summoner_button)
 	var hero_def: Dictionary = HeroDefs.get_hero(hero_type)
 	_role_label.text = "%s · %s" % [hero_def.role, hero_def.title]
 
@@ -582,24 +554,7 @@ func _build_attack_cluster() -> void:
 	_attack_cluster.setup(touch_mode)
 	_attack_cluster.mode_changed.connect(func(mode: String): attack_mode_changed.emit(mode))
 	_attack_cluster.lock_changed.connect(func(target_id: int): lock_changed.emit(target_id))
-	if touch_mode:
-		_attack_cluster.anchor_left = 1.0
-		_attack_cluster.anchor_top = 0.0
-		_attack_cluster.anchor_right = 1.0
-		_attack_cluster.anchor_bottom = 0.0
-		_attack_cluster.offset_left = -500.0
-		_attack_cluster.offset_top = 92.0
-		_attack_cluster.offset_right = -20.0
-		_attack_cluster.offset_bottom = 232.0
-	else:
-		_attack_cluster.anchor_left = 1.0
-		_attack_cluster.anchor_top = 1.0
-		_attack_cluster.anchor_right = 1.0
-		_attack_cluster.anchor_bottom = 1.0
-		_attack_cluster.offset_left = -520.0
-		_attack_cluster.offset_top = -372.0
-		_attack_cluster.offset_right = -20.0
-		_attack_cluster.offset_bottom = -196.0
+	# 位置统一由 _apply_layout 从分区表取；这里只建节点。
 	add_child(_attack_cluster)
 
 func set_targeting_state(mode: String, target_id: int) -> void:
@@ -607,36 +562,32 @@ func set_targeting_state(mode: String, target_id: int) -> void:
 		_attack_cluster.set_targeting_state(mode, target_id)
 
 func _build_hints() -> void:
-	# 操作提示拆两行：左键改成「移动到点」之后键位变多，单行会顶到英雄信息面板底下。
-	var lines: Array[String] = [
-		"左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师",
-		"WASD 走位   ·   B 回城   ·   T 传送阵   ·   滚轮 缩放   ·   Esc 菜单",
-	]
-	var top := -50.0
-	var bottom := -12.0
+	# 手机端不铺常驻键位提示（触屏控件自己会说话）。
+	# 键鼠端也只当新手引导：进场显示十几秒后淡出，之后按 Esc 还能在菜单里查到。
 	if touch_mode:
-		lines = ["左侧摇杆移动   ·   按住攻击   ·   战场拖动瞄准   ·   双指缩放   ·   四技能 / 召唤师 / 回城 / 传送"]
-		top = -332.0
-		bottom = -304.0
-	var box := VBoxContainer.new()
-	box.anchor_left = 0.0
-	box.anchor_top = 1.0
-	box.anchor_right = 0.0
-	box.anchor_bottom = 1.0
-	box.offset_left = 22.0
-	box.offset_top = top
-	box.offset_right = 640.0
-	box.offset_bottom = bottom
-	box.alignment = BoxContainer.ALIGNMENT_END
-	box.add_theme_constant_override("separation", 3)
-	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	for line in lines:
-		var hint := _make_label(line, 15 if touch_mode else 13, Color(0.66, 0.72, 0.77, 0.9))
-		hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
-		hint.add_theme_constant_override("outline_size", 3)
-		hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		box.add_child(hint)
-	add_child(box)
+		return
+	_hint_box = _make_label(KEY_HINTS, 15, Color(0.86, 0.9, 0.94, 0.95))
+	_hint_box.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	# 这行会压在草地、水面、桥面上，背景亮度差得远，描边必须够重才读得清。
+	_hint_box.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_hint_box.add_theme_constant_override("outline_size", 5)
+	# 窄窗口下区域会变窄：宁可省略号收尾，也不要溢出到右下角操作簇底下。
+	_hint_box.clip_text = true
+	_hint_box.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	add_child(_hint_box)
+	if is_inside_tree():
+		_fade_hints_after(HINT_SECONDS)
+
+func _fade_hints_after(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+	if _hint_box == null or not is_instance_valid(_hint_box):
+		return
+	var tween := create_tween()
+	tween.tween_property(_hint_box, "modulate:a", 0.0, 1.2)
+	tween.tween_callback(func():
+		if _hint_box != null and is_instance_valid(_hint_box):
+			_hint_box.visible = false
+	)
 
 func _build_touch_controls() -> void:
 	_joystick = TouchJoystick.new()
@@ -851,14 +802,6 @@ func _build_shop() -> void:
 	_shop_button = Button.new()
 	_shop_button.text = "商店 (P)"
 	_shop_button.focus_mode = Control.FOCUS_NONE
-	_shop_button.anchor_left = 1.0
-	_shop_button.anchor_top = 0.0
-	_shop_button.anchor_right = 1.0
-	_shop_button.anchor_bottom = 0.0
-	_shop_button.offset_left = -170.0
-	_shop_button.offset_top = 18.0
-	_shop_button.offset_right = -20.0
-	_shop_button.offset_bottom = 58.0
 	_shop_button.pressed.connect(toggle_shop)
 	add_child(_shop_button)
 
@@ -889,6 +832,12 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
 	var key := event as InputEventKey
+	if key.pressed and not key.echo and key.keycode == KEY_TAB:
+		# Tab 是「看一眼就关」的临时面板，和商店一样属于 UI 层，不进 sim 输入。
+		if _scoreboard != null:
+			_scoreboard.toggle()
+		accept_event()
+		return
 	if key.pressed and not key.echo and key.keycode == KEY_P:
 		toggle_shop()
 		accept_event()
@@ -935,6 +884,8 @@ func update_snapshot(data: Dictionary) -> void:
 	var red_kills := int(red_score.get("kills", 0))
 	_score_blue.text = "蓝方  %d" % blue_kills
 	_score_red.text = "%d  红方" % red_kills
+	var board: Dictionary = data.get("board", {})
+	_refresh_economy(board, str(local.get("owner_id", "")))
 	_timer_label.text = _format_time(float(data.get("time", 0.0)))
 	_wave_label.text = "第 %d 波" % int(data.get("wave", 1))
 	var objectives: Dictionary = data.get("objectives", {})
@@ -1011,8 +962,6 @@ func update_snapshot(data: Dictionary) -> void:
 	if _attack_cluster != null:
 		_attack_cluster.refresh_enemies(data.get("entities", []), local_team)
 	_minimap.set_snapshot(data, local_owner, local_team)
-	if _intel_valid:
-		_refresh_intel()
 	if ended and not result_shown:
 		show_result(str(data.get("winner", "")), local)
 
@@ -1058,7 +1007,7 @@ func add_feed(text: String, color := GameTheme.TEXT) -> void:
 	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	label.add_theme_constant_override("outline_size", 4)
 	_feed_box.add_child(label)
-	while _feed_box.get_child_count() > 6:
+	while _feed_box.get_child_count() > 5:
 		var first := _feed_box.get_child(0)
 		_feed_box.remove_child(first)
 		first.queue_free()
@@ -1073,7 +1022,11 @@ func show_pause(value: bool, online := false) -> void:
 	if _pause_title != null:
 		_pause_title.text = MatchMenu.title(online_mode)
 	if _pause_hint != null:
-		_pause_hint.text = MatchMenu.hint(online_mode)
+		# 键位表从战场常驻位置上撤走了，这里补一份，随时按键可查。
+		var hint := MatchMenu.hint(online_mode)
+		if not touch_mode:
+			hint += "\n" + KEY_HINTS
+		_pause_hint.text = hint
 	if _pause_button != null:
 		_pause_button.label = MatchMenu.pause_label(online_mode)
 	if value:

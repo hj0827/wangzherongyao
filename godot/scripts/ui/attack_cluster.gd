@@ -13,6 +13,9 @@ const MODES := [
 	{"id": "tower", "label": "推塔"},
 ]
 const MAX_LOCK_TARGETS := 5
+# 键鼠端是低频率控件，占 460x176 去挡兵线不值当；压成两行 30px 的小条。
+const COMPACT_SIZE := Vector2(420.0, 84.0)
+const TOUCH_SIZE := Vector2(460.0, 176.0)
 
 var attack_mode := "default"
 var locked_target := -1
@@ -34,7 +37,10 @@ func _build() -> void:
 	if _built:
 		return
 	_built = true
-	custom_minimum_size = Vector2(460.0, 176.0)
+	custom_minimum_size = TOUCH_SIZE if touch_mode else COMPACT_SIZE
+	var row_height := 42.0 if touch_mode else 30.0
+	var gap := 6.0 if touch_mode else 4.0
+	var lock_width := 64.0 if touch_mode else 46.0
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -42,12 +48,12 @@ func _build() -> void:
 	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.82), Color(0.55, 0.44, 0.24, 0.55), 1, 9))
 	add_child(panel)
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 6)
+	box.add_theme_constant_override("separation", gap)
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(box)
 
 	var mode_row := HBoxContainer.new()
-	mode_row.add_theme_constant_override("separation", 8)
+	mode_row.add_theme_constant_override("separation", gap)
 	box.add_child(mode_row)
 	mode_row.add_child(_make_label("攻击"))
 	for entry in MODES:
@@ -55,14 +61,16 @@ func _build() -> void:
 		button.text = str(entry.label)
 		button.toggle_mode = true
 		button.focus_mode = Control.FOCUS_NONE
-		button.custom_minimum_size = Vector2(0.0, 42.0 if touch_mode else 36.0)
+		button.custom_minimum_size = Vector2(0.0, row_height)
 		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		button.pressed.connect(_on_mode_pressed.bind(str(entry.id)))
+		if not touch_mode:
+			_compact_button(button)
 		mode_row.add_child(button)
 		_mode_buttons[str(entry.id)] = button
 
 	var lock_row := HBoxContainer.new()
-	lock_row.add_theme_constant_override("separation", 6)
+	lock_row.add_theme_constant_override("separation", gap)
 	box.add_child(lock_row)
 	lock_row.add_child(_make_label("锁定"))
 	for i in MAX_LOCK_TARGETS:
@@ -71,12 +79,33 @@ func _build() -> void:
 		button.toggle_mode = true
 		button.disabled = true
 		button.focus_mode = Control.FOCUS_NONE
-		button.custom_minimum_size = Vector2(64.0, 42.0 if touch_mode else 36.0)
+		button.custom_minimum_size = Vector2(lock_width, row_height)
 		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		button.pressed.connect(_on_lock_pressed.bind(i))
+		if not touch_mode:
+			_compact_button(button)
 		lock_row.add_child(button)
 		_lock_buttons.append(button)
 	_sync_visuals()
+
+# 键鼠端的小号按钮：字体和内边距都收一档。
+# 否则主题里 24/12 的内边距会把 30px 的行撑到 50px，整个面板又长回 176 高。
+func _compact_button(button: Button) -> void:
+	var base := GameTheme.style(Color(0.06, 0.095, 0.125, 0.9), Color(0.5, 0.4, 0.22, 0.55), 1, 8, 3, 0.4)
+	base.content_margin_left = 6.0
+	base.content_margin_right = 6.0
+	base.content_margin_top = 2.0
+	base.content_margin_bottom = 2.0
+	button.add_theme_stylebox_override("normal", base)
+	var hover := base.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.11, 0.16, 0.2, 0.95)
+	hover.border_color = GameTheme.GOLD
+	button.add_theme_stylebox_override("hover", hover)
+	var held := base.duplicate() as StyleBoxFlat
+	held.bg_color = Color(0.15, 0.12, 0.06, 0.96)
+	held.border_color = GameTheme.GOLD_LIGHT
+	button.add_theme_stylebox_override("pressed", held)
+	button.add_theme_font_size_override("font_size", 14)
 
 func refresh_enemies(entities: Array, local_team: String) -> void:
 	var enemies: Array = []

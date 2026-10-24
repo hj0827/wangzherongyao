@@ -85,7 +85,7 @@ func test_global_main_menu_flow_and_navigation() -> void:
 	main._pending_online = false
 	main._show_hero_select()
 	eq(main.screen, "hero_select", "Screen must switch to hero_select")
-	check(main._hero_cards.size() == 4, "Must generate 4 hero cards in hero_select")
+	eq(main._hero_cards.size(), HeroDefs.HEROES.size(), "Must generate one hero card per hero in hero_select")
 
 	# 切换选定英雄
 	main.local_hero = "mage"

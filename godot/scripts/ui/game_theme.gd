@@ -130,3 +130,34 @@ static func style(
 
 static func portrait_path(hero_type: String) -> String:
 	return "res://assets/ui/portraits/%s.png" % hero_type
+
+# 装备图标：一件一张，缺图时调用方回落到占位色块，不要在这里造默认图。
+static func item_icon_path(item_id: String) -> String:
+	return "res://assets/ui/items/%s.png" % item_id
+
+# 已按边长降采样过的图标缓存。原图是 256×256，直接塞进 26px 的格子里既浪费
+# 显存又会被逐帧缩放；这里一次性缩到目标尺寸再复用。
+static var _icon_cache: Dictionary = {}
+
+static func item_icon(item_id: String, size: int) -> Texture2D:
+	var key := "%s@%d" % [item_id, size]
+	if _icon_cache.has(key):
+		return _icon_cache[key]
+	var tex: Texture2D = null
+	var path := item_icon_path(item_id)
+	if ResourceLoader.exists(path):
+		var loaded := load(path)
+		if loaded is Texture2D:
+			tex = loaded as Texture2D
+			var img := tex.get_image()
+			if img != null and not img.is_empty():
+				if img.is_compressed():
+					img.decompress()
+				img.resize(size, size, Image.INTERPOLATE_LANCZOS)
+				tex = ImageTexture.create_from_image(img)
+	# 缺图也缓存 null，避免每帧重复走 ResourceLoader.exists。
+	_icon_cache[key] = tex
+	return tex
+
+static func has_item_icon(item_id: String) -> bool:
+	return ResourceLoader.exists(item_icon_path(item_id))

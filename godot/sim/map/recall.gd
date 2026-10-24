@@ -13,6 +13,9 @@ static func start(hero: Dictionary) -> bool:
 	hero["recalling"] = true
 	hero["recall_timer"] = CHANNEL_TIME
 	hero["recall_total"] = CHANNEL_TIME
+	# 起手坐标要留档：完成事件和打断事件都要让客户端知道「从哪儿开始」，
+	# 否则客机在视野外收到事件时没有落点可放特效。
+	hero["recall_from"] = hero.get("pos", Vector2.ZERO)
 	return true
 
 static func tick(hero: Dictionary, input: Dictionary, delta: float) -> bool:
@@ -34,10 +37,16 @@ static func tick(hero: Dictionary, input: Dictionary, delta: float) -> bool:
 	hero["pos"] = spawn_point(hero)
 	return true
 
-static func interrupt(hero: Dictionary) -> void:
+# 返回「这次调用是否真的打断了一段正在进行的引导」。必须幂等：
+# 受击、施法、死亡等路径都可能在同一帧重复调用，返回 true 的只有真正中断的那一次，
+# 调用方据此发事件，否则客户端会收到一串重复的打断音效。
+static func interrupt(hero: Dictionary) -> bool:
+	if not bool(hero.get("recalling", false)):
+		return false
 	hero["recalling"] = false
 	hero["recall_timer"] = 0.0
 	hero["recall_total"] = 0.0
+	return true
 
 static func spawn_point(hero: Dictionary) -> Vector2:
 	var stored: Variant = hero.get("spawn_pos", null)

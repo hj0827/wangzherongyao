@@ -215,8 +215,67 @@ static func sanitize_snapshot(raw: Variant) -> Dictionary:
 			"wave": clampi(int(_number(data.get("wave", 1))), 0, 9999),
 			"objectives": _sanitize_objectives(data.get("objectives", {})),
 			"river": _sanitize_river(data.get("river", {})),
+			"board": _sanitize_board(data.get("board", {})),
 		},
 	}
+
+# 计分板账本：只放公开统计，不放坐标。
+# 总量在这里按行重算，不采信对端上报的 net_worth 合计。
+static func _sanitize_board(raw: Variant) -> Dictionary:
+	var board := {"blue": [], "red": [], "net_worth": {"blue": 0, "red": 0}}
+	if not (raw is Dictionary):
+		return board
+	var source: Dictionary = raw
+	for side in ["blue", "red"]:
+		var rows: Array = []
+		var raw_rows: Variant = source.get(side, [])
+		if raw_rows is Array:
+			for item in raw_rows:
+				if rows.size() >= 5:
+					break
+				if not (item is Dictionary):
+					continue
+				var row: Dictionary = item
+				var hero_type := str(row.get("hero_type", "blade"))
+				if not HeroDefs.is_valid(hero_type):
+					hero_type = "blade"
+				var inventory: Array = []
+				var raw_inventory: Variant = row.get("inventory", [])
+				if raw_inventory is Array:
+					for item_id in raw_inventory:
+						if inventory.size() >= 6:
+							break
+						if item_id is String and ItemShop.CATALOGUE.has(item_id):
+							inventory.append(item_id)
+				var gold := clampi(int(_number(row.get("gold", 0))), 0, 1000000)
+				var item_value := 0
+				for item_id in inventory:
+					item_value += int(ItemShop.get_item(str(item_id)).get("cost", 0))
+				rows.append({
+					"id": clampi(int(_number(row.get("id", 0))), 0, 100000000),
+					"owner_id": _short_string(str(row.get("owner_id", "")), 32),
+					"name": sanitize_name(row.get("name", "")),
+					"team": side,
+					"hero_type": hero_type,
+					"role": _short_string(str(row.get("role", "")), 12),
+					"lane": _short_string(str(row.get("lane", "mid")), 12),
+					"controller": _short_string(str(row.get("controller", "")), 12),
+					"level": clampi(int(_number(row.get("level", 1))), 1, 30),
+					"kills": clampi(int(_number(row.get("kills", 0))), 0, 9999),
+					"deaths": clampi(int(_number(row.get("deaths", 0))), 0, 9999),
+					"cs": clampi(int(_number(row.get("cs", 0))), 0, 100000),
+					"gold": gold,
+					"net_worth": clampi(gold + item_value, 0, 2000000),
+					"alive": _flag(row.get("alive", true)),
+					"respawn_timer": clampf(_number(row.get("respawn_timer", 0.0)), 0.0, 600.0),
+					"inventory": inventory,
+				})
+		var total := 0
+		for row in rows:
+			total += int(row.net_worth)
+		board[side] = rows
+		board.net_worth[side] = total
+	return board
 
 static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 	if not (raw is Dictionary):
@@ -271,6 +330,7 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["summoner_spell"] = summoner_spell
 		entity["summoner_cd"] = clampf(_number(source.get("summoner_cd", 0.0)), 0.0, 600.0)
 		entity["gold"] = clampi(int(_number(source.get("gold", 0))), 0, 1000000)
+		entity["cs"] = clampi(int(_number(source.get("cs", 0))), 0, 100000)
 		var inventory: Array = []
 		var raw_inventory: Variant = source.get("inventory", [])
 		if raw_inventory is Array:

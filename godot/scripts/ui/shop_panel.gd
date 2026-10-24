@@ -19,6 +19,8 @@ var _gold_label: Label
 var _quick_button: Button
 var _item_buttons: Dictionary = {}
 var _slot_buttons: Array[Button] = []
+var _slot_icons: Array[TextureRect] = []
+var _slot_labels: Array[Label] = []
 var _root: Control
 var _state_signature := ""
 
@@ -93,14 +95,32 @@ func _build() -> void:
 	box.add_child(inv_row)
 	for i in 6:
 		var slot := Button.new()
-		slot.text = "空"
+		slot.text = ""
 		slot.disabled = true
 		slot.focus_mode = Control.FOCUS_NONE
-		slot.custom_minimum_size = Vector2(0.0, 42.0)
+		slot.custom_minimum_size = Vector2(0.0, 70.0)
 		slot.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		slot.pressed.connect(_on_slot_pressed.bind(i))
+		# 用图标 + 小字代替原来的一行文本：格子窄，纯文字塞不下“名字+返还额”。
+		var col := VBoxContainer.new()
+		col.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		col.alignment = BoxContainer.ALIGNMENT_CENTER
+		col.add_theme_constant_override("separation", 0)
+		col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(col)
+		var icon := TextureRect.new()
+		icon.custom_minimum_size = Vector2(0.0, 36.0)
+		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(icon)
+		var caption := _label("空", 11, GameTheme.MUTED)
+		caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(caption)
 		inv_row.add_child(slot)
 		_slot_buttons.append(slot)
+		_slot_icons.append(icon)
+		_slot_labels.append(caption)
 	_refresh()
 
 func _make_item_cell(item_id: String) -> Control:
@@ -110,6 +130,7 @@ func _make_item_cell(item_id: String) -> Control:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	cell.add_child(row)
+	row.add_child(_make_thumb(item_id, item, 52))
 	var info := VBoxContainer.new()
 	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	info.add_theme_constant_override("separation", 1)
@@ -127,6 +148,51 @@ func _make_item_cell(item_id: String) -> Control:
 	row.add_child(buy)
 	_item_buttons[item_id] = buy
 	return cell
+
+# 缩略图。图缺了就用「品类色块 + 名字首字」占位，绝不出现一个空白的格子。
+# 统一套一个槽位框：图标本身是暗底，直接贴在暗面板上会看不出边界。
+func _make_thumb(item_id: String, item: Dictionary, size: int) -> Control:
+	var tex := GameTheme.item_icon(item_id, size)
+	var holder := PanelContainer.new()
+	holder.custom_minimum_size = Vector2(float(size), float(size))
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if tex != null:
+		holder.add_theme_stylebox_override("panel", _slot_frame(Color(0.02, 0.03, 0.04, 0.95)))
+		var icon := TextureRect.new()
+		icon.texture = tex
+		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		holder.add_child(icon)
+		return holder
+	holder.add_theme_stylebox_override("panel", _slot_frame(_category_color(str(item.get("category", "")))))
+	var initial := _label(str(item.get("name", item_id)).substr(0, 1), 20, GameTheme.TEXT)
+	initial.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	initial.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	holder.add_child(initial)
+	return holder
+
+# 槽位框。GameTheme.style() 自带 14/10 的内容边距，套在图上是会把图挤小的，
+# 所以这里显式清零 —— 图标要正好铺满格子。
+func _slot_frame(bg: Color) -> StyleBoxFlat:
+	var frame := GameTheme.style(bg, Color(0.42, 0.36, 0.22, 0.85), 1, 6, 0, 0.0)
+	frame.content_margin_left = 0.0
+	frame.content_margin_right = 0.0
+	frame.content_margin_top = 0.0
+	frame.content_margin_bottom = 0.0
+	return frame
+
+func _category_color(category: String) -> Color:
+	match category:
+		"attack":
+			return Color(0.32, 0.18, 0.14, 0.95)
+		"magic":
+			return Color(0.22, 0.18, 0.36, 0.95)
+		"defense":
+			return Color(0.16, 0.24, 0.26, 0.95)
+		"movement":
+			return Color(0.18, 0.26, 0.18, 0.95)
+	return Color(0.12, 0.14, 0.17, 0.95)
 
 func _describe(item: Dictionary) -> String:
 	var parts: Array[String] = []
@@ -169,13 +235,23 @@ func _refresh() -> void:
 		button.tooltip_text = "金币不足" if gold < int(item.get("cost", 0)) else ""
 	for i in _slot_buttons.size():
 		var button := _slot_buttons[i]
+		var icon: TextureRect = _slot_icons[i]
+		var caption: Label = _slot_labels[i]
 		if i < inventory.size():
-			var sold_item: Dictionary = ItemShop.get_item(str(inventory[i]))
-			button.text = "%s\n+%dg" % [str(sold_item.get("name", "装备")), int(float(sold_item.get("cost", 0)) * 0.6)]
+			var item_id := str(inventory[i])
+			var sold_item: Dictionary = ItemShop.get_item(item_id)
+			var item_name := str(sold_item.get("name", "装备"))
+			icon.texture = GameTheme.item_icon(item_id, 34)
+			caption.text = "%s\n+%dg" % [item_name, int(float(sold_item.get("cost", 0)) * 0.6)]
+			caption.add_theme_color_override("font_color", GameTheme.GOLD)
 			button.disabled = false
+			button.tooltip_text = "点击出售 %s，返还 60%%" % item_name
 		else:
-			button.text = "空"
+			icon.texture = null
+			caption.text = "空"
+			caption.add_theme_color_override("font_color", GameTheme.MUTED)
 			button.disabled = true
+			button.tooltip_text = ""
 	if _quick_button != null:
 		var recommendation := ItemShop.get_quick_buy_recommendation(
 			{"gold": gold, "inventory": inventory},

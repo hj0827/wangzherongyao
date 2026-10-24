@@ -9,12 +9,18 @@ const GameSession = preload("res://net/game_session.gd")
 const LanDiscovery = preload("res://net/lan_discovery.gd")
 const MAIN := preload("res://scripts/app/main.gd")
 
-# 1. 验证所有英雄都具备专属台词与视频资源（声音由视频原声提供）
+# 1. 验证所有英雄都具备专属台词；立绘必须有，选人视频是可选增强。
 func test_all_heroes_have_quotes_and_videos() -> void:
-	for hero_type in ["blade", "mage", "tank", "archer"]:
+	for hero_type in HeroDefs.HEROES:
 		var def: Dictionary = HeroDefs.get_hero(hero_type)
 		check(def.has("quote") and str(def.quote).length() > 0, hero_type + " must have non-empty quote")
-		check(def.has("video_path") and ResourceLoader.exists(def.video_path), hero_type + " video must exist at " + str(def.get("video_path", "")))
+		check(
+			FileAccess.file_exists("res://assets/ui/portraits/%s.png" % hero_type),
+			hero_type + " must have a portrait file"
+		)
+		var video_path: String = str(def.get("video_path", ""))
+		if video_path != "":
+			check(ResourceLoader.exists(video_path), hero_type + " video must exist at " + video_path)
 
 # 2. 验证选英雄界面中各英雄卡片视频组件与台词展示
 func test_hero_select_video_and_quote_presentation() -> void:
@@ -26,9 +32,14 @@ func test_hero_select_video_and_quote_presentation() -> void:
 	main._show_hero_select()
 	eq(main.screen, "hero_select", "Screen should be hero_select")
 	
-	# 检查4位英雄的视频组件与卡片生成
-	check(main._hero_cards.size() == 4, "Must have 4 hero cards")
-	check(main._hero_videos.size() == 4, "Must have 4 hero video players")
+	# 每个职业一张卡；视频只有具备 ogv 资产的英雄才有播放器
+	eq(main._hero_cards.size(), MAIN.HERO_ORDER.size(), "one card per hero in HERO_ORDER")
+	var videos_expected := 0
+	for hero_type in MAIN.HERO_ORDER:
+		var video_path: String = str(HeroDefs.get_hero(str(hero_type)).get("video_path", ""))
+		if video_path != "" and ResourceLoader.exists(video_path):
+			videos_expected += 1
+	eq(main._hero_videos.size(), videos_expected, "one video player per hero that ships an ogv")
 	
 	# 默认选中 blade
 	eq(main.local_hero, "blade", "Default selected hero is blade")

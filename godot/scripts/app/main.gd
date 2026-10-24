@@ -7,11 +7,15 @@ const HeroDefs = preload("res://sim/hero_defs.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const InputAssist = preload("res://scripts/game/input_assist.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
+const HudLayout = preload("res://scripts/ui/hud_layout.gd")
 const CinematicBackground = preload("res://scripts/ui/cinematic_background.gd")
+const AudioDirector = preload("res://scripts/game/audio_director.gd")
+const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const DepthCard = preload("res://scripts/ui/depth_card.gd")
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
 
-const HERO_ORDER := ["blade", "mage", "tank", "archer"]
+# 选人界面按五大职业排列：坦克 / 战士 / 刺客 / 法师 / 射手
+const HERO_ORDER := ["tank", "blade", "assassin", "mage", "archer"]
 const GAME_PORT := 24680
 
 const MODE_NAMES := {
@@ -53,6 +57,9 @@ var _arena: Node3D = null
 var _ui: CanvasLayer
 var _screen_root: Control
 var _background: Control
+# 音频导演挂在应用壳上（菜单 / 选人 / 大厅 / 战斗共用一套声道）：
+# 进战斗时是把同一台混音台换曲，不会出现菜单音乐和战斗音乐叠着响。
+var _audio: Node = null
 
 var _hero_cards := {}
 var _hero_marks := {}
@@ -78,9 +85,16 @@ var _next_refresh := 0
 
 func _ready() -> void:
 	touch_mode = InputAssist.wants_touch_controls({}, OS.has_feature("mobile"), DisplayServer.is_touchscreen_available())
+	# HUD 是按 1600x900 排的，窗口再小就会整体缩到 0.7 以下、字先糊掉。
+	# 桌面端直接给窗口一个下限，别让玩家把界面拉成看不清的形状。
+	if not OS.has_feature("mobile"):
+		get_window().min_size = Vector2i(HudLayout.MIN_VIEWPORT)
 	session = GameSession.new()
 	discovery = LanDiscovery.new()
 	_connect_session()
+	_audio = AudioDirector.new()
+	_audio.name = "Audio"
+	add_child(_audio)
 	_build_shell()
 	_show_menu()
 	UnitVisual.warmup()
@@ -146,6 +160,9 @@ func _show_menu() -> void:
 	_ui.visible = true
 	if _background != null:
 		_background.set_audio_enabled(true)
+	if _audio != null:
+		# 从战斗回来时这里会把曲目切回菜单主题（淡入淡出），不用手动停战斗曲。
+		_audio.play_music(AudioDirector.MUSIC_MENU)
 	_clear_screen()
 	discovery.stop()
 	_discovery_hosting = false
@@ -1049,6 +1066,9 @@ func _leave_game() -> void:
 	if is_instance_valid(_arena):
 		_arena.queue_free()
 	_arena = null
+	if _audio != null:
+		# 可能是在暂停菜单里直接退出的：不复位的话菜单音乐会一直是被压低的状态。
+		_audio.set_paused(false)
 	_ui.visible = true
 	_show_menu()
 
@@ -1096,6 +1116,7 @@ func _on_match_started(config: Dictionary) -> void:
 	_enter_match(config, session, session.is_server, owner)
 
 func _on_session_error(code: String) -> void:
+	_play_ui_error()
 	if screen == "game":
 		if is_instance_valid(_arena) and _arena.hud != null:
 			_arena.hud.add_feed(_error_text(code), GameTheme.RED)
@@ -1191,6 +1212,20 @@ func _polish_button(button: Button, lift: float) -> void:
 	button.resized.connect(func() -> void: button.pivot_offset = button.size * 0.5)
 	button.mouse_entered.connect(_animate_lift.bind(button, lift))
 	button.mouse_exited.connect(_animate_lift.bind(button, 1.0))
+	# 点击音统一挂在这里：菜单、选人、大厅所有按钮一次覆盖，不用逐个接线。
+	button.pressed.connect(_play_ui_click)
+
+func _play_ui_click() -> void:
+	if _audio != null:
+		_audio.play_cue(AudioCues.CUE_UI_CLICK)
+
+func _play_ui_confirm() -> void:
+	if _audio != null:
+		_audio.play_cue(AudioCues.CUE_UI_CONFIRM)
+
+func _play_ui_error() -> void:
+	if _audio != null:
+		_audio.play_cue(AudioCues.CUE_UI_ERROR)
 
 func _animate_lift(button: Button, target_scale: float) -> void:
 	if not is_instance_valid(button) or not button.is_inside_tree():

@@ -7,11 +7,25 @@ const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 const BLUE := Color(0.22, 0.6, 1.0)
 const RED := Color(1.0, 0.32, 0.26)
 const GOLD := Color(1.0, 0.78, 0.32)
-const MANA := Color(0.28, 0.56, 1.0)
-# 英雄血条固定红色。原先按阵营着色，蓝方英雄血条是蓝的，
-# 和下面的蓝条撞色，玩家分不清哪条是血、哪条是蓝。
-# 阵营区分交给脚下的队伍色圈和名字颜色。
-const HP_COLOR := Color(0.86, 0.16, 0.18)
+# 蓝条比友军血条更暗：同一个友军英雄头顶两条蓝叠着，
+# 靠亮度 + 血条两倍厚度区分。别把 MANA 调亮到和 HP_ALLY 一样。
+const MANA := Color(0.18, 0.30, 0.78)
+# 血条按「与本地玩家的关系」着色，而不是绝对阵营：
+#   自己 = 绿、友军 = 蓝、敌军 = 红（含中立野怪）。
+#
+# 这三个值不是「眼睛挑的色」，是按 arena 的渲染管线反解出来的：
+# 场景用 TONE_MAPPER_FILMIC + exposure 1.05，FILMIC 的肩部会把中间调整体提亮，
+# 绿色和蓝色的 G 通道被抬得最狠。直接写纯色的话，友军蓝渲染到屏幕上会变成
+# 青白（实测 (0.34,0.74,1.0) 出来是 (0.45,0.87,1.00)，G 和 B 一起顶到 1.0），
+# 自己绿则发白发黄。所以这里刻意压低 G，让**最终像素**落回纯绿 / 纯蓝 / 纯红。
+# 实测渲染色（tools/bar_color_shot.gd 采样中心像素）：
+#   自己 (0.24,0.72,0.30) -> (0.31,0.85,0.39) 绿
+#   友军 (0.20,0.40,0.98) -> (0.25,0.53,1.00) 蓝
+#   敌军 (0.82,0.13,0.15) -> (0.92,0.15,0.18) 红
+# 改这三个值前先跑那个截图工具，别只看常量。
+const HP_SELF := Color(0.24, 0.72, 0.30)
+const HP_ALLY := Color(0.20, 0.40, 0.98)
+const HP_ENEMY := Color(0.82, 0.13, 0.15)
 const FONT_PATH := "res://assets/fonts/NotoSansSC.ttf"
 # --- 英雄 / 小兵 的体型 ---
 # 王者荣耀官方「王者世界」身高表：男英雄 176–197cm（李白 184、韩信 185、廉颇 190），
@@ -84,6 +98,19 @@ const HERO_SETUPS := {
 		"outfit_tint": Color(0.16, 0.5, 0.5),
 		"tint_amount": 0.45,
 	},
+	"assassin": {
+		"body": preload("res://assets/characters/hero_mage.glb"),
+		"outfit": preload("res://assets/characters/outfit_peasant_f.glb"),
+		"hair": preload("res://assets/characters/hair_buns.glb"),
+		"weapon": preload("res://assets/weapons/Dagger.glb"),
+		"weapon_scale": 0.20,
+		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
+		"weapon_offset": Vector3(0.0, 0.0, 0.0),
+		"weapon_bone": "hand_r",
+		"idle": "Sword_Idle",
+		"outfit_tint": Color(0.32, 0.15, 0.44),
+		"tint_amount": 0.6,
+	},
 }
 
 const LOOPING_CLIPS := ["Idle", "Jog_Fwd", "Sprint", "Sword_Idle", "Spell_Simple_Idle", "Idle_Shield"]
@@ -100,18 +127,21 @@ const ANIM_ATTACK := {
 	"mage": "Spell_Simple_Shoot",
 	"tank": "Sword_Regular_B",
 	"archer": "Spell_Simple_Shoot",
+	"assassin": "Sword_Regular_A",
 }
 const ANIM_Q := {
 	"blade": "Sword_Regular_C",
 	"mage": "Spell_Simple_Shoot",
 	"tank": "Shield_Dash_RM",
 	"archer": "Spell_Simple_Shoot",
+	"assassin": "Slide",
 }
 const ANIM_E := {
 	"blade": "Slide",
 	"mage": "Spell_Simple_Shoot",
 	"tank": "Shield_Dash_RM",
 	"archer": "Roll",
+	"assassin": "Roll",
 }
 
 static var _source_animations: Dictionary = {}
@@ -123,6 +153,9 @@ var team := "blue"
 var hero_type := "blade"
 var display_name := ""
 var is_local := false
+# 本地玩家所在阵营。血条靠它判断「友军 / 敌军」，
+# 留空（预览工具、离线截图）时一律按敌军处理。
+var viewer_team := ""
 var monster_type := ""
 
 var model_root: Node3D
@@ -171,7 +204,7 @@ var team_ring: MeshInstance3D
 var local_ring: MeshInstance3D
 var cast_light: OmniLight3D
 
-func setup(unit_kind: String, unit_team: String, type_id: String, label: String, local: bool) -> void:
+func setup(unit_kind: String, unit_team: String, type_id: String, label: String, local: bool, viewer: String = "") -> void:
 	kind = unit_kind
 	team = unit_team
 	hero_type = type_id
@@ -179,12 +212,23 @@ func setup(unit_kind: String, unit_team: String, type_id: String, label: String,
 		monster_type = type_id
 	display_name = label
 	is_local = local
+	viewer_team = viewer
 	if kind == "hero":
 		_build_hero()
 	elif kind == "monster":
 		_build_monster()
 	else:
 		_build_minion()
+
+# 血条配色唯一真身：自己绿、友军蓝、敌军红。
+# 传的是「本地玩家阵营」而不是单位阵营 —— 同一支蓝方英雄，
+# 从红方玩家眼里看必须是红条。
+static func bar_color(local: bool, unit_team: String, viewer_side: String) -> Color:
+	if local:
+		return HP_SELF
+	if viewer_side != "" and unit_team == viewer_side:
+		return HP_ALLY
+	return HP_ENEMY
 
 static func scale_for_height(measured_height: float, target_height: float) -> float:
 	if measured_height <= 0.001 or target_height <= 0.0:
@@ -435,8 +479,8 @@ func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 
 	# 单 quad 血条：底板 + 填充 + 护盾段都由着色器按 UV 绘制，
 	# 避免 BILLBOARD_ENABLED 丢弃节点缩放导致血条无法收缩的问题。
-	# 英雄血条固定红，小兵仍按阵营着色（小兵没有蓝条，不会撞色）。
-	var hp_color := HP_COLOR if kind == "hero" else (BLUE if team == "blue" else RED)
+	# 配色按「与本地玩家的关系」走 bar_color()，英雄/小兵/野怪同一套规则。
+	var hp_color := bar_color(is_local, team, viewer_team)
 	var hp_bar := _make_bar(Vector2(1.24 * width_scale, 0.14 * width_scale), hp_color)
 	bar_mesh = hp_bar[0]
 	bar_material = hp_bar[1]
@@ -635,6 +679,18 @@ func set_snapshot(data: Dictionary, delta: float = 0.016, alpha: float = 1.0, pr
 		level_label.text = "Lv.%d" % level
 	haste = float(data.get("haste_timer", 0.0)) > 0.0
 	_update_dead_state(bool(data.get("alive", true)))
+
+# 回城落地 / 传送抵达：直接落位，把插值区间收拢到落点。
+# set_snapshot 里「距离 > 14 米直接落位」兜不住近距离瞬移（从自家野区回城可能只跳十来米），
+# 那种情况会退化成滑行 —— 人会横穿整片野区。这里由事件明确告知「这是一次瞬移」。
+func snap_to(world_pos: Vector3) -> void:
+	_prev_pos = world_pos
+	_cur_pos = world_pos
+	_last_target = world_pos
+	_has_pos = true
+	_initialized = true
+	position = world_pos
+	moving = false
 
 func _update_health_bar() -> void:
 	if bar_material == null:

@@ -29,10 +29,15 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   │   ├── unit_visual.gd      单位装配 + 骨骼动画 + 血条
 │   │   ├── map_view.gd         ✅ 地图表现，**唯一真正接线的新模块**
 │   │   ├── input_assist.gd     键鼠/触控 → 战局方向向量
-│   │   └── match_menu.gd       暂停菜单文案与状态判断
+│   │   ├── match_menu.gd       暂停菜单文案与状态判断
+│   │   ├── audio_plan.gd       ✅ 事件→音效 cue 的纯逻辑（距离/节流/热度）
+│   │   ├── audio_cues.gd       ✅ 38 条合成音效（无资源文件，现场生成 PCM）
+│   │   ├── bgm_synth.gd        ✅ 程序化 BGM：菜单/战斗/强度层/胜利/失败
+│   │   └── audio_director.gd   ✅ Node：10 声道池 + 音乐淡入淡出 + 暂停压低
 │   ├── ui/                     ★ 实际的 ui 层：hud / minimap / skill_button
 │   │   │                       / touch_joystick / touch_layout / game_theme
 │   │   │                       / depth_card / cinematic_background
+│   │   ├── hud_layout.gd           ✅ 常驻 HUD 分区的唯一坐标源（桌面/触屏），纯数据可测
 │   │   ├── targeting_system.gd     仅转发 sim/targeting_rules.gd（生产直接走 sim 侧）
 │   │   ├── skill_indicator.gd      ✅ 已接线（HUD 技能指示器/触摸拖拽）
 │   │   └── cancel_cast_zone.gd     ✅ 已接线（HUD 取消施法区）
@@ -62,7 +67,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 | `view/camera/`、`view/units/`、`view/combat/`、`view/indicators/`、`view/effects/` | **全部**在 `godot/scripts/game/arena.gd` 与 `unit_visual.gd` 里，没有拆目录 |
 | `ui/hud/`、`ui/screens/`、`ui/popups/` | `godot/scripts/ui/*`（平铺，没有 hud/screens 子目录） |
 | `infra/pool/` | **没有独立池类**。池内联在 `arena.gd`：`_minion_pool_blue/_red`、`_damage_labels_pool`、`_hit_particles_pool` |
-| `infra/audio/` | **不存在**。全项目零音频（见 `05-ui-and-feel.md`） |
+| `infra/audio/` | **不存在**。音频在 `scripts/game/`：`audio_plan.gd`（纯逻辑映射）/ `audio_cues.gd`（音效合成）/ `bgm_synth.gd`（BGM 合成）/ `audio_director.gd`（Node 声道池），见 `05-ui-and-feel.md` §9 |
 | `infra/input/` | `godot/scripts/game/input_assist.gd` |
 | `app/bootstrap.gd` | **不存在**。预热在 `arena._build_staged()` 与 `UnitVisual.warmup()` |
 
@@ -88,6 +93,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 | `scripts/ui/targeting_system.gd` | 仅测试 | 生产直接走 sim 侧规则；此文件只是转发层 |
 | `scripts/ui/skill_indicator.gd`（技能指示器） | ✅ | `scripts/ui/game_hud.gd` 触摸拖拽瞄准 |
 | `scripts/ui/cancel_cast_zone.gd`（取消施法区） | ✅ | `scripts/ui/game_hud.gd` 拖拽取消 |
+| `scripts/ui/hud_layout.gd`（HUD 分区表） | ✅ | `game_hud._apply_layout()` / `main.gd` 窗口下限 |
 | `scripts/view/hit_stop_manager.gd`（顿帧） | ✅ | `scripts/game/arena.gd` |
 | `sim/combat_announcer.gd`（多杀/团灭播报） | ✅ | `match_sim._kill_entity()` → `arena._process_events()` |
 | `net/client_prediction.gd`（客户端预测） | ✅ | `arena._update_local_prediction()` / `_reconcile_local_prediction()` |
@@ -95,6 +101,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 | `sim/item_shop.gd`（装备） | ✅ | `match_sim` + `scripts/ui/shop_panel.gd` |
 | `scripts/ui/attack_cluster.gd`（攻击键簇） | ✅ | `scripts/ui/game_hud.gd` |
 | `scripts/game/map_view.gd`（地图表现） | ✅ | `arena` + `minimap` |
+| `scripts/game/audio_plan.gd` + `audio_cues.gd` + `bgm_synth.gd` + `audio_director.gd`（音频） | ✅ | `main.gd` 建导演并传 `configure({"audio": ...})`；`arena._build_audio()` / `_process_events()` / `_open_pause()` |
 
 ### 怎么自己验证（写任何"已完成"结论之前必须跑）
 

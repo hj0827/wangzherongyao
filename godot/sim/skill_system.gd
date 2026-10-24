@@ -75,6 +75,31 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 	match kind:
 		"spin":
 			_apply_aoe_damage(hero, hero_pos, range_val, damage, sim)
+		"dash":
+			# 纯位移型（苍刃 E「疾风步」）：向前冲一段，不造成伤害。
+			var dash_dir: Vector2 = (aim - hero_pos).normalized()
+			if dash_dir == Vector2.ZERO:
+				dash_dir = facing
+			hero["facing"] = dash_dir
+			var dash_dist: float = range_val if (aim - hero_pos).length() < 0.1 else minf((aim - hero_pos).length(), range_val)
+			var dash_dest: Vector2 = Collision.move(hero_pos, hero_pos + dash_dir * dash_dist, float(hero.get("radius", 0.55)))
+			hero["pos"] = dash_dest
+			if damage > 0.0:
+				_apply_aoe_damage(hero, dash_dest, 1.8, damage, sim)
+		"shield":
+			# 自身护盾型（铁壁 E「守护壁垒」）：护盾值随技能等级/法强线性走。
+			var shield_gain: float = 320.0 + float(skill.get("damage", 0.0)) + float(hero.get("ability_power", 0.0)) * 0.5
+			hero["shield"] = float(hero.get("shield", 0.0)) + shield_gain
+			hero["shield_timer"] = float(skill.get("duration", 4.0))
+		"haste":
+			# 自身加速型（翎羽 E「鹰眼」）：短时移速。
+			hero["haste_timer"] = float(skill.get("duration", 3.0))
+		"evade":
+			# 刺客 E「匿踪」：加速 + 免控 + 清减速，短窗口内脱离缠斗。
+			hero["haste_timer"] = float(skill.get("duration", 2.5))
+			hero["cc_immune_timer"] = float(skill.get("immune", 1.2))
+			hero["slow_timer"] = 0.0
+			hero["revealed_timer"] = 0.0
 		"line":
 			var dir: Vector2 = (aim - hero_pos).normalized()
 			if dir == Vector2.ZERO:
@@ -205,6 +230,14 @@ static func on_hero_attack_hit(attacker: Dictionary, target: Dictionary, sim: Ob
 				attacker["shield_timer"] = 3.0
 		"mage":
 			attacker["mp"] = minf(float(attacker.get("max_mp", 1.0)), float(attacker.get("mp", 0.0)) + 20.0)
+		"assassin":
+			# 背刺：attacker 相对 target 的方位与 target 朝向相反时额外加伤。
+			# 判定用点积而不是角度，避免每一击都算 atan2。
+			var to_attacker: Vector2 = attacker.get("pos", Vector2.ZERO) - target.get("pos", Vector2.ZERO)
+			var target_facing: Vector2 = target.get("facing", Vector2.UP)
+			if to_attacker.length() > 0.01 and target_facing.length() > 0.01:
+				if to_attacker.normalized().dot(target_facing.normalized()) < -0.15:
+					_deal_damage(attacker, target, float(attacker.get("attack_damage", 0.0)) * 0.25, sim)
 
 static func _find_target_near(hero: Dictionary, center: Vector2, max_dist: float, sim: Object) -> Dictionary:
 	var best: Dictionary = {}

@@ -2,11 +2,14 @@ extends Control
 class_name Minimap
 
 signal location_clicked(world_position: Vector2)
+# 拖拽中持续发出（每帧最多一次），相机据此连续跟随。
+signal location_dragged(world_position: Vector2)
+# 松手结算。情报面板只在这里刷新，拖拽途中不刷屏。
+signal drag_finished(world_position: Vector2)
 
 const MapData = preload("res://sim/map_data.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const MapView = preload("res://scripts/game/map_view.gd")
-const MapIntel = preload("res://sim/map_intel.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 
 const MARGIN := 13.0
@@ -96,13 +99,26 @@ var snapshot: Dictionary = {}
 var local_owner := ""
 var local_team := "blue"
 var _panel_style: StyleBoxFlat
-var _inspect_point := Vector2.ZERO
-var _inspect_valid := false
+# --- 拖拽定位 ---
+# 按住地图拖动 = 连续改变相机注视点。鼠标拖出控件后 _gui_input 收不到事件，
+# 所以鼠标侧靠 _process 轮询真实指针位置，触摸侧靠 InputEventScreenDrag（触摸事件
+# 会持续派发给按下的那个控件，不受出界影响）。
+var _dragging := false
+var _drag_touch := false
+var _drag_local := Vector2.ZERO
+# --- 相机视野框 ---
+# 不画这个框，玩家「点过去」之后无法判断镜头落在地图哪一块。
+# 存的是四个世界角点：透视下地面可视区是梯形，用 AABB 会明显偏离真实视线。
+var _camera_view_valid := false
+var _camera_view_points := PackedVector2Array()
+var _camera_center := Vector2.ZERO
+var _camera_half := Vector2.ZERO
 
 func _ready() -> void:
 	custom_minimum_size = DISPLAY_SIZE
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	_panel_style = GameTheme.style(Color(0.015, 0.03, 0.042, 0.9), Color(0.55, 0.44, 0.24, 0.8), 1, 8)
+	set_process(false)
 
 func set_snapshot(data: Dictionary, owner: String, team: String) -> void:
 	snapshot = data
@@ -206,47 +222,116 @@ func _draw() -> void:
 
 	draw_line(top_left, Vector2(bottom_right.x, top_left.y), Color(0.54, 0.44, 0.25, 0.25), 1.0)
 	draw_line(Vector2(top_left.x, bottom_right.y), bottom_right, Color(0.54, 0.44, 0.25, 0.25), 1.0)
-	if _inspect_valid:
-		_draw_inspect_marker(scale)
+	if _camera_view_valid:
+		_draw_camera_view()
 	var font := GameTheme.FONT_REGULAR
 	draw_string(font, Vector2(size.x * 0.5 - 8.0, 12.0), "北", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.7, 0.76, 0.8, 0.7))
 
-func _draw_inspect_marker(scale: float) -> void:
-	var pos := world_to_screen(_inspect_point)
-	var radius := maxf(7.0, MapIntel.INSPECT_RADIUS * scale)
-	draw_circle(pos, radius, Color(GameTheme.GOLD.r, GameTheme.GOLD.g, GameTheme.GOLD.b, 0.1))
-	draw_arc(pos, radius, 0.0, TAU, 40, Color(GameTheme.GOLD.r, GameTheme.GOLD.g, GameTheme.GOLD.b, 0.62), 1.2, true)
-	draw_line(pos - Vector2(7.0, 0.0), pos + Vector2(7.0, 0.0), GameTheme.GOLD_LIGHT, 1.6, true)
-	draw_line(pos - Vector2(0.0, 7.0), pos + Vector2(0.0, 7.0), GameTheme.GOLD_LIGHT, 1.6, true)
-	draw_circle(pos, 2.4, GameTheme.GOLD_LIGHT)
+func _draw_camera_view() -> void:
+	var polygon := camera_view_polygon()
+	if polygon.size() < 3:
+		return
+	draw_colored_polygon(polygon, Color(GameTheme.GOLD.r, GameTheme.GOLD.g, GameTheme.GOLD.b, 0.12))
+	var outline := polygon.duplicate()
+	outline.append(polygon[0])
+	draw_polyline(outline, Color(GameTheme.GOLD_LIGHT.r, GameTheme.GOLD_LIGHT.g, GameTheme.GOLD_LIGHT.b, 0.85), 1.3, true)
+	# 四角短刻线：叠在地图要素上时纯细边框容易看不清。
+	var middle := polygon[0]
+	for point in polygon:
+		middle += point
+	middle /= float(polygon.size())
+	for point in polygon:
+		var inward := (middle - point).normalized()
+		draw_line(point, point + inward * 5.0, GameTheme.GOLD_LIGHT, 1.8, true)
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mouse := event as InputEventMouseButton
-		if mouse.pressed and mouse.button_index == MOUSE_BUTTON_LEFT:
-			_emit_location(mouse.position)
+		if mouse.button_index != MOUSE_BUTTON_LEFT:
+			return
+		if mouse.pressed:
+			_begin_drag(mouse.position, false)
+		else:
+			_end_drag()
+	elif event is InputEventMouseMotion:
+		# 鼠标侧的真实跟手由 _process 轮询保证（移出控件后这里就收不到事件了）。
+		if _dragging and not _drag_touch:
+			_drag_to((event as InputEventMouseMotion).position)
 	elif event is InputEventScreenTouch:
 		var touch := event as InputEventScreenTouch
 		if touch.pressed:
-			_emit_location(touch.position)
+			_begin_drag(touch.position, true)
+		else:
+			_end_drag()
+	elif event is InputEventScreenDrag:
+		if _dragging and _drag_touch:
+			_drag_to((event as InputEventScreenDrag).position)
 
-func _emit_location(local: Vector2) -> void:
-	var world: Variant = screen_to_world(local)
-	if world == null:
+func _process(_delta: float) -> void:
+	if not _dragging or _drag_touch:
 		return
-	set_inspect_point(world)
-	location_clicked.emit(world)
+	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_end_drag()
+		return
+	_drag_to(get_local_mouse_position())
+
+func _begin_drag(local: Vector2, touch_drag: bool) -> void:
+	_dragging = true
+	_drag_touch = touch_drag
+	_drag_local = local
+	set_process(not touch_drag)
+	_emit_location(local, false)
 	if is_inside_tree():
 		accept_event()
 
-func set_inspect_point(point: Vector2) -> void:
-	_inspect_point = point
-	_inspect_valid = true
+func _drag_to(local: Vector2) -> void:
+	if not _dragging:
+		return
+	_drag_local = local
+	# 拖拽允许出界：夹到地图边缘继续跟随，比中途断开更像 MOBA 的操作手感。
+	_emit_location(local, true)
+
+func _end_drag() -> void:
+	if not _dragging:
+		return
+	_dragging = false
+	_drag_touch = false
+	set_process(false)
+	var world := screen_to_world_clamped(_drag_local)
+	drag_finished.emit(world)
+	if is_inside_tree():
+		accept_event()
+
+func _emit_location(local: Vector2, dragging: bool) -> void:
+	var world: Variant = screen_to_world_clamped(local) if dragging else screen_to_world(local)
+	if world == null:
+		return
+	if dragging:
+		location_dragged.emit(world)
+	else:
+		location_clicked.emit(world)
+	if is_inside_tree():
+		accept_event()
+
+func set_camera_view(view: Dictionary) -> void:
+	_camera_view_valid = bool(view.get("valid", false))
+	_camera_view_points = view.get("points", PackedVector2Array())
+	_camera_center = view.get("center", Vector2.ZERO)
+	_camera_half = view.get("half", Vector2.ZERO)
 	queue_redraw()
 
-func clear_inspect_point() -> void:
-	_inspect_valid = false
-	queue_redraw()
+func has_camera_view() -> bool:
+	return _camera_view_valid and _camera_view_points.size() >= 3
+
+# 相机视野在地图上的四边形（屏幕坐标，已夹进地图内框）。
+func camera_view_polygon() -> PackedVector2Array:
+	var out := PackedVector2Array()
+	if not has_camera_view():
+		return out
+	var inner := Rect2(_inner_origin(), Vector2(_inner_size(), _inner_size()))
+	for point in _camera_view_points:
+		out.append(world_to_screen(point).clamp(inner.position, inner.end))
+	return out
 
 func _inner_size() -> float:
 	return maxf(0.0, minf(size.x, size.y) - MARGIN * 2.0)
@@ -276,3 +361,13 @@ func screen_to_world(local: Vector2) -> Variant:
 	if local.x > origin.x + inner or local.y > origin.y + inner:
 		return null
 	return (local - origin) / scale - Vector2(MapData.BOUNDS, MapData.BOUNDS)
+
+# 拖拽专用：越界不返回 null，而是夹到地图边缘。
+func screen_to_world_clamped(local: Vector2) -> Vector2:
+	var inner := _inner_size()
+	var scale := _world_scale()
+	if inner <= 0.0 or scale <= 0.0:
+		return Vector2.ZERO
+	var origin := _inner_origin()
+	var relative := (local - origin).clamp(Vector2.ZERO, Vector2(inner, inner))
+	return relative / scale - Vector2(MapData.BOUNDS, MapData.BOUNDS)

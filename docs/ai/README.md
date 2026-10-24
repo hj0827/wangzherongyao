@@ -30,7 +30,7 @@
 | --- | --- |
 | 改英雄 / 技能 / 伤害 / 经济 / 野怪 / 防御塔数值 | `04-combat-chain.md` + `03-tdd.md` |
 | 加技能键、改操作方式、加召唤师技能 | `05-ui-and-feel.md` + `04-combat-chain.md` |
-| 改 HUD、触控布局、特效、震屏、飘字、播报 | `05-ui-and-feel.md` |
+| 改 HUD、触控布局、特效、震屏、飘字、播报、音频 | `05-ui-and-feel.md` |
 | 改联机 / 同步 / 房间 / 协议 | `06-net-sync.md` |
 | 新建任何文件（代码、资源、文档） | `07-files-and-git.md` |
 | 写测试 / 修 bug / TDD | `03-tdd.md` |

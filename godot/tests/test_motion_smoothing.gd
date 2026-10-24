@@ -280,3 +280,21 @@ func test_render_snapshot_falls_back_when_buffer_is_stale() -> void:
 	arena.free()
 
 
+# 回城 / 传送落地：位置跳变可能只有十几米（从自家野区回城就是这种），
+# 单靠 set_snapshot 里「距离 > 14 米才直接落位」的阈值兜不住 ——
+# 那种情况会退化成横穿整片野区的滑行。snap_to 必须把插值区间收拢到落点。
+func test_snap_to_lands_immediately_after_short_teleport() -> void:
+	var landing := Vector3(-28.0, 0.0, -28.0)
+	var view = UnitVisual.new()
+	view.set_snapshot(_snap(Vector2(-20.0, -20.0)), FRAME, 1.0)
+	view.snap_to(landing)
+	view.set_snapshot(_snap(Vector2(-28.0, -28.0)), FRAME, 0.5)
+	lt(view.position.distance_to(landing), 0.01, "落地当帧就在落点，不插值滑行")
+	view.free()
+
+	# 对照组：同样的跳变不调 snap_to 会停在半路 —— 证明上面那条不是恒真。
+	var sliding = UnitVisual.new()
+	sliding.set_snapshot(_snap(Vector2(-20.0, -20.0)), FRAME, 1.0)
+	sliding.set_snapshot(_snap(Vector2(-28.0, -28.0)), FRAME, 0.5)
+	gt(sliding.position.distance_to(landing), 1.0, "未落位时仍在插值中")
+	sliding.free()

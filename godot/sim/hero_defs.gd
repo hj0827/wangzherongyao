@@ -1,6 +1,7 @@
 extends RefCounted
 
-const BOT_TYPES := ["blade", "mage", "tank", "archer", "mage"]
+# 一队五人的默认职业配置：五大职业各一人。
+const BOT_TYPES := ["blade", "tank", "assassin", "mage", "archer"]
 
 const HEROES := {
 	"blade": {
@@ -9,7 +10,7 @@ const HEROES := {
 		"title": "裂空之刃",
 		"quote": "剑气破长空，唯我立苍穹！",
 		"video_path": "res://assets/ui/hero_videos/hero_blade.ogv",
-		"max_hp": 1080.0,
+		"max_hp": 1320.0,
 		"max_mp": 420.0,
 		"hp_growth": 95.0,
 		"mp_growth": 24.0,
@@ -31,7 +32,7 @@ const HEROES := {
 		"title": "星辰织者",
 		"quote": "星辰流转，万象皆入我织网！",
 		"video_path": "res://assets/ui/hero_videos/hero_mage.ogv",
-		"max_hp": 840.0,
+		"max_hp": 1060.0,
 		"max_mp": 560.0,
 		"hp_growth": 74.0,
 		"mp_growth": 38.0,
@@ -53,7 +54,7 @@ const HEROES := {
 		"title": "不破之盾",
 		"quote": "山岳不动，吾身即是不破之城！",
 		"video_path": "res://assets/ui/hero_videos/hero_tank.ogv",
-		"max_hp": 1450.0,
+		"max_hp": 1780.0,
 		"max_mp": 380.0,
 		"hp_growth": 130.0,
 		"mp_growth": 20.0,
@@ -75,7 +76,7 @@ const HEROES := {
 		"title": "逐风之矢",
 		"quote": "箭出无回，疾风所至破千军！",
 		"video_path": "res://assets/ui/hero_videos/hero_archer.ogv",
-		"max_hp": 880.0,
+		"max_hp": 1100.0,
 		"max_mp": 440.0,
 		"hp_growth": 78.0,
 		"mp_growth": 28.0,
@@ -88,8 +89,31 @@ const HEROES := {
 		"passive": {"name": "灵动之风", "desc": "普攻命中敌方英雄提升移速与攻速。"},
 		"q": {"name": "穿云箭", "cost": 55.0, "cooldown": 4.8, "range": 9.0, "damage": 185.0, "kind": "arrow"},
 		"w": {"name": "爆裂疾射", "cost": 60.0, "cooldown": 7.0, "range": 7.5, "damage": 150.0, "kind": "aoe_shot"},
-		"e": {"name": "鹰眼", "cost": 50.0, "cooldown": 10.0, "range": 0.0, "damage": 0.0, "kind": "haste"},
+		"e": {"name": "鹰眼", "cost": 50.0, "cooldown": 10.0, "range": 0.0, "damage": 0.0, "kind": "haste", "duration": 3.0},
 		"r": {"name": "万箭归宗", "cost": 110.0, "cooldown": 26.0, "range": 9.5, "damage": 390.0, "kind": "arrow_barrage"},
+	},
+	"assassin": {
+		"name": "墨鸦",
+		"role": "刺客",
+		"title": "暗影之刺",
+		"quote": "三息之内，取你首级！",
+		# 选人视频是可选的增强资产：刺客暂无 ogv，留空让选人界面回落到立绘。
+		"video_path": "",
+		"max_hp": 940.0,
+		"max_mp": 400.0,
+		"hp_growth": 66.0,
+		"mp_growth": 22.0,
+		"damage_growth": 9.5,
+		"speed": 6.9,
+		"radius": 0.48,
+		"attack_damage": 84.0,
+		"attack_range": 2.0,
+		"attack_interval": 0.74,
+		"passive": {"name": "暗影背刺", "desc": "从目标背后命中时，额外造成 25% 普攻伤害。"},
+		"q": {"name": "影袭", "cost": 55.0, "cooldown": 4.2, "range": 4.5, "damage": 170.0, "kind": "charge"},
+		"w": {"name": "毒牙", "cost": 50.0, "cooldown": 6.0, "range": 3.4, "damage": 150.0, "kind": "burst"},
+		"e": {"name": "匿踪", "cost": 45.0, "cooldown": 9.0, "range": 0.0, "damage": 0.0, "kind": "evade", "duration": 2.5, "immune": 1.2},
+		"r": {"name": "绝影处决", "cost": 100.0, "cooldown": 26.0, "range": 6.0, "damage": 400.0, "kind": "leap_slam"},
 	},
 }
 
@@ -98,6 +122,15 @@ static func get_hero(hero_type: String) -> Dictionary:
 
 static func is_valid(hero_type: String) -> bool:
 	return HEROES.has(hero_type)
+
+# 五大职业的顺序（选人界面、名册文档都按它排）。
+static func roles() -> Array:
+	var out: Array = []
+	for hero_type in HEROES:
+		var role := str(HEROES[hero_type].get("role", ""))
+		if not out.has(role):
+			out.append(role)
+	return out
 
 # 普攻射程（地面范围指示器用）。
 static func attack_range(hero_type: String) -> float:

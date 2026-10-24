@@ -21,6 +21,9 @@ static func tick_natural_gold(hero: Dictionary, dt: float) -> void:
 static func award_minion_kill(hero: Dictionary, last_hit: bool) -> void:
 	var award := MINION_KILL_GOLD if last_hit else MINION_ASSIST_GOLD
 	hero["gold"] = int(hero.get("gold", 0)) + award
+	# 只有补刀计入 cs；助攻拿钱但不记。经济面板靠它解释「钱从哪来」。
+	if last_hit:
+		hero["cs"] = int(hero.get("cs", 0)) + 1
 
 static func award_hero_kill(killer: Dictionary, is_first_blood: bool) -> void:
 	var total := HERO_KILL_GOLD + (FIRST_BLOOD_BONUS if is_first_blood else 0)
