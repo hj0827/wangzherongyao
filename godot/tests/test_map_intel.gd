@@ -55,15 +55,15 @@ func test_map_regions_are_classified_by_geometry() -> void:
 	eq(str(MapIntel.region_at(MapData.BLUE_BASE).name), "蓝方泉水", "基地中心是蓝方泉水")
 	eq(str(MapIntel.region_at(MapData.RED_BASE).name), "红方泉水", "红方基地中心是红方泉水")
 	eq(str(MapIntel.region_at(Vector2(0.0, 0.0)).name), "河道", "地图中心的桥面属于河道")
-	eq(str(MapIntel.region_at(Vector2(24.0, 24.0)).name), "中路", "中路兵线应识别为中路")
-	eq(str(MapIntel.region_at(Vector2(-40.0, 8.0)).name), "上路", "上路航点应识别为上路")
-	eq(str(MapIntel.region_at(Vector2(-20.0, -46.0)).name), "下路", "下路航点应识别为下路")
+	eq(str(MapIntel.region_at(Vector2(24.0, -24.0)).name), "中路", "中路兵线应识别为中路")
+	eq(str(MapIntel.region_at(Vector2(-14.0, -50.0)).name), "上路", "上路航点应识别为上路")
+	eq(str(MapIntel.region_at(Vector2(50.0, -18.0)).name), "下路", "下路航点应识别为下路")
 	eq(str(MapIntel.region_at(Vector2(-5.0, 25.0)).name), "野区", "远离兵线与河道的区域是野区")
 
 func test_region_names_are_stable_for_team_fountains() -> void:
 	eq(str(MapIntel.region_at(MapData.BLUE_BASE).kind), "fountain", "泉水必须有独立的 kind")
 	eq(str(MapIntel.region_at(Vector2(-5.0, 25.0)).kind), "jungle", "野区必须有独立的 kind")
-	check(str(MapIntel.region_at(Vector2(24.0, 24.0)).note).length() > 0, "区域应带一句可展示的说明")
+	check(str(MapIntel.region_at(Vector2(24.0, -24.0)).note).length() > 0, "区域应带一句可展示的说明")
 
 # ---------------------------------------------------------------- 附近单位情报
 
@@ -161,5 +161,7 @@ func test_minimap_touch_tap_also_inspects() -> void:
 	tap.position = Vector2(140.0, 103.0)
 	minimap._gui_input(tap)
 	eq(hits.size(), 1, "移动端点按小地图同样应发出定位")
-	gt(hits[0].x, 0.0, "点击右侧应对应世界 x 正方向")
+	# 小地图按本队朝向翻转，点按位置要按同一套变换反算并显示回原处。
+	near(minimap.world_to_screen(hits[0]).distance_to(Vector2(140.0, 103.0)), 0.0, 0.01,
+		"点按的位置必须和该世界点在图上显示的位置一致")
 	minimap.free()

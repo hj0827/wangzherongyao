@@ -11,10 +11,12 @@ extends "res://tests/test_base.gd"
 
 const HudLayout = preload("res://scripts/ui/hud_layout.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
+const GameTheme = preload("res://scripts/ui/game_theme.gd")
 
 const PC_ZONES := ["minimap", "score", "shop", "feed", "bush", "hero", "skills", "mode", "hints"]
 # 触屏的技能弧由 TouchLayout 单独负责（已有 test_mobile_ui 覆盖），这里只测它周围的固定分区。
-const TOUCH_ZONES := ["minimap", "score", "shop", "feed", "joystick", "hero", "hints"]
+# pause 必须在这张表里：它原来是写死的 offset，结果被锁定头像条压住而没人测得出来。
+const TOUCH_ZONES := ["minimap", "score", "shop", "feed", "joystick", "hero", "hints", "pause"]
 
 const DESKTOP_SIZES := [
 	Vector2(1280.0, 720.0),
@@ -106,6 +108,24 @@ func test_narrow_window_keeps_the_hero_card_off_the_skill_row() -> void:
 		check(hero.end.x < skills.position.x, "hero card collides with the skill row at %.0f px" % width)
 		check(skills.position.x - hero.end.x >= 24.0, "the gap between them stays readable at %.0f px" % width)
 
+func test_key_legend_fits_inside_its_zone() -> void:
+	# 键位提示原来是「一行 76 个字塞进 840px」，实机被裁成一串碎片。
+	# 这里量的是真实字体宽度，而不是猜：每一行都必须放得下。
+	var font: Font = GameTheme.FONT_REGULAR
+	var lines: Array = GameHUD.KEY_HINT_LINES
+	check(lines.size() >= 2, "the legend must be split into two readable lines")
+	for i in lines.size():
+		var available := HudLayout.HINT_W - 28.0
+		var width := font.get_string_size(str(lines[i]), HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		check(width <= available, "legend line %d needs %.0f px but only %.0f are available" % [i, width, available])
+	check(HudLayout.HINT_H >= float(lines.size()) * 20.0, "the hint zone must be tall enough for every line")
+
+func test_key_legend_leaves_a_real_gap_above_the_hero_card() -> void:
+	var zones := HudLayout.zones(Vector2(1600.0, 900.0), false)
+	var hints: Rect2 = zones["hints"]
+	var hero: Rect2 = zones["hero"]
+	check(hints.end.y <= hero.position.y - 8.0, "the legend must not sit on the status card's top edge")
+
 func test_score_stays_centered_at_every_size() -> void:	for viewport in DESKTOP_SIZES:
 		var zones := HudLayout.zones(viewport, false)
 		var score: Rect2 = zones["score"]
@@ -141,10 +161,32 @@ func test_pc_and_touch_use_different_bottom_layouts() -> void:
 	var pc := HudLayout.zones(viewport, false)
 	var touch := HudLayout.zones(viewport, true)
 	near((pc["hero"] as Rect2).position.x, HudLayout.MARGIN, 0.01, "desktop parks the status card in the lower-left corner")
-	near((touch["hero"] as Rect2).get_center().x, viewport.x * 0.5, 0.01, "touch keeps the status card centered above the thumbs")
+	near((pc["hero"] as Rect2).end.y, viewport.y - HudLayout.MARGIN, 0.01, "desktop card sits on the bottom margin")
 	check(touch.has("joystick"), "touch reserves a joystick zone")
 	check(not pc.has("joystick"), "desktop does not reserve a joystick")
-	check((pc["hero"] as Rect2).size.x < (touch["hero"] as Rect2).size.x, "desktop card is narrower than the touch card")
+	check((touch["hero"] as Rect2).size.x < (pc["hero"] as Rect2).size.x, "the phone card is a narrow column, not a wide strip")
+
+func test_touch_status_card_tucks_under_the_minimap() -> void:
+	# 参考手游的做法：底部没有横着的大卡 —— 血量看头顶血条，金币和等级挂在小地图下面。
+	for viewport in TOUCH_SIZES:
+		var zones := HudLayout.zones(viewport, true)
+		var hero: Rect2 = zones["hero"]
+		var minimap: Rect2 = zones["minimap"]
+		near(hero.position.x, minimap.position.x, 0.01, "the card shares the minimap's left edge at %s" % viewport)
+		near(hero.position.y, minimap.end.y + HudLayout.TOUCH_CARD_GAP, 0.01, "the card hangs right under the minimap at %s" % viewport)
+		near(hero.size.x, minimap.size.x, 0.01, "the card is exactly as wide as the minimap column at %s" % viewport)
+		lt(hero.end.y, viewport.y * 0.5, "the card stays in the upper half at %s" % viewport)
+		lt(hero.end.y, (zones["joystick"] as Rect2).position.y, "the card never reaches the thumb zone at %s" % viewport)
+		# 卡变窄了，面积必须跟着掉：否则只是把大卡挪了个地方。
+		var old_area := 840.0 * 180.0
+		lt(hero.get_area(), old_area * 0.25, "the phone card covers less than a quarter of the old 840x180 strip at %s" % viewport)
+
+func test_touch_card_fits_every_readout_it_keeps() -> void:
+	# 收窄不等于丢信息：头像 + 血条 + 蓝条 + 金币 + KDA 都还得在这根柱子里放得下。
+	var card := HudLayout.zones(Vector2(2000.0, 900.0), true)["hero"] as Rect2
+	var inner := card.size.x - 28.0
+	check(inner >= 190.0, "the inner width still fits a portrait and two bars (%.0f px)" % inner)
+	check(card.size.y >= 108.0, "the column keeps room for a portrait, two bars and a footer (%.0f px)" % card.size.y)
 
 # ---------------------------------------------------------------- 接线
 

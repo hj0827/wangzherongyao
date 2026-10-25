@@ -4,6 +4,7 @@ signal state_changed(state: String)
 signal room_updated(room_state: Dictionary)
 signal match_started(config: Dictionary)
 signal snapshot_received(snapshot: Dictionary)
+signal events_received(events: Array)
 signal input_received(peer_id: int, input: Dictionary)
 signal peer_left(peer_id: int)
 signal error_received(code: String)
@@ -29,6 +30,9 @@ var match_config: Dictionary = {}
 var listen_port := 0
 var last_error := ""
 var peer: ENetMultiplayerPeer = null
+# 诊断字段：最近一个包的通道类型。状态快照走可靠通道会拖住后面所有快照，
+# 这类回归在环回网络上看不出来，只能靠它把「用了哪条通道」变成可断言的事实。
+var last_send_mode := ""
 
 var _clients := {}
 var _mode := "duel"
@@ -134,34 +138,57 @@ func submit_input(input: Dictionary) -> void:
 	var reliable := str(clean.get("buy_item", "")) != "" or int(clean.get("sell_slot", -1)) >= 0
 	_send_bytes(1, bytes, reliable)
 
-func broadcast_snapshot(snapshot: Dictionary) -> void:
-	if not is_server or peer == null:
-		return
-	var bytes := NetProtocol.encode("snapshot", snapshot)
-	_send_bytes(0, bytes, true)
-
-# 按队伍分别构建并下发快照（视野过滤）。同一队伍的多个客户端共用一份编码结果。
+# 按队伍分别构建并下发状态快照（视野过滤）。同一队伍的多个客户端共用一份编码结果。
+# 走不可靠通道：快照是「最新覆盖旧」，丢一格下一格就补上；而可靠通道里丢一个分片会把
+# 后面排队的快照全部卡住，表现就是网络一抖人物往回流。
 func broadcast_team_snapshots(build: Callable) -> void:
 	if not is_server or peer == null or not build.is_valid():
 		return
+	var packets := {}
+	for entry in _remote_peer_teams():
+		var team := str(entry.team)
+		if not packets.has(team):
+			var snapshot: Variant = build.call(team)
+			if not (snapshot is Dictionary) or (snapshot as Dictionary).is_empty():
+				continue
+			packets[team] = NetProtocol.encode("snapshot", snapshot)
+		_send_bytes(int(entry.peer_id), packets[team], false)
+
+# 离散事件单独走可靠通道：击杀播报、结算曲、技能特效都只在这一路。
+# 跟着快照走不可靠通道的话，丢一次就永远不会补发（客机不会播胜利曲）。
+func broadcast_team_events(build: Callable, time: float = 0.0) -> void:
+	if not is_server or peer == null or not build.is_valid():
+		return
+	var packets := {}
+	for entry in _remote_peer_teams():
+		var team := str(entry.team)
+		if not packets.has(team):
+			var events: Variant = build.call(team)
+			# 空数组也要在 packets 里留位，否则同一队伍的每个客户端都要重算一次过滤。
+			if events is Array and not (events as Array).is_empty():
+				packets[team] = NetProtocol.encode("events", {"time": time, "events": events})
+			else:
+				packets[team] = PackedByteArray()
+		var packet: PackedByteArray = packets[team]
+		if packet.is_empty():
+			continue
+		_send_bytes(int(entry.peer_id), packet, true)
+
+# 每个远程玩家的 peer_id → 队伍。快照与事件两条路共用，避免各写一遍筛人逻辑。
+func _remote_peer_teams() -> Array:
 	var players: Array = []
 	if room_manager != null and room_code != "":
 		var info: Dictionary = room_manager.get_room_info(room_code)
 		players = info.get("players", [])
 	if players.is_empty():
 		players = match_config.get("humans", [])
-	var packets := {}
+	var out: Array = []
 	for player in players:
 		var peer_id := int(player.get("id", player.get("peer_id", 0)))
 		if peer_id <= 1:
 			continue
-		var team := str(player.get("team", "blue"))
-		if not packets.has(team):
-			var snapshot: Variant = build.call(team)
-			if not (snapshot is Dictionary) or (snapshot as Dictionary).is_empty():
-				continue
-			packets[team] = NetProtocol.encode("snapshot", snapshot)
-		_send_bytes(peer_id, packets[team], true)
+		out.append({"peer_id": peer_id, "team": str(player.get("team", "blue"))})
+	return out
 
 func is_online() -> bool:
 	return peer != null and state in ["lobby", "match"]
@@ -289,6 +316,10 @@ func _handle_packet(sender: int, packet: PackedByteArray, now: int) -> void:
 				var result := NetProtocol.sanitize_snapshot(payload)
 				if bool(result.get("ok", false)):
 					snapshot_received.emit(result.snapshot)
+			"events":
+				var clean := NetProtocol.sanitize_events(payload)
+				if not (clean.events as Array).is_empty():
+					events_received.emit(clean.events)
 			"peer_left":
 				peer_left.emit(int(payload.get("peer_id", 0)))
 			"error":
@@ -351,6 +382,7 @@ func _send_bytes(target: int, bytes: PackedByteArray, reliable: bool) -> void:
 	peer.set_transfer_mode(
 		MultiplayerPeer.TRANSFER_MODE_RELIABLE if reliable else MultiplayerPeer.TRANSFER_MODE_UNRELIABLE_ORDERED
 	)
+	last_send_mode = "reliable" if reliable else "unreliable"
 	peer.put_packet(bytes)
 
 func _shutdown_peer() -> void:

@@ -26,6 +26,7 @@ const CUE_SKILL_MAGE := "skill_mage"
 const CUE_SKILL_ARCHER := "skill_archer"
 const CUE_SKILL_ASSASSIN := "skill_assassin"
 const CUE_SKILL_ULT := "skill_ult"
+const CUE_SUMMONER := "summoner_spell"
 const CUE_DEATH_HERO := "death_hero"
 const CUE_DEATH_MINION := "death_minion"
 const CUE_TOWER_DOWN := "tower_down"
@@ -47,7 +48,8 @@ const CUE_TOWER_SHOT := "tower_shot"
 # 少一条就是静默失效（事件来了，没声音，不报错）。
 const CUES := [
 	CUE_ATTACK_SWING, CUE_HIT_HERO, CUE_HIT_MINION, CUE_HIT_STRUCTURE, CUE_CRIT,
-	CUE_SKILL_BLADE, CUE_SKILL_TANK, CUE_SKILL_MAGE, CUE_SKILL_ARCHER, CUE_SKILL_ULT,
+	CUE_SKILL_BLADE, CUE_SKILL_TANK, CUE_SKILL_MAGE, CUE_SKILL_ARCHER, CUE_SKILL_ASSASSIN, CUE_SKILL_ULT,
+	CUE_SUMMONER,
 	CUE_DEATH_HERO, CUE_DEATH_MINION, CUE_TOWER_DOWN, CUE_GUARD_DOWN, CUE_SHIELD_BREAK,
 	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
@@ -82,6 +84,8 @@ const COOLDOWN := {
 	"death_hero": 0.20,
 	"death_minion": 0.18,
 	"tower_shot": 0.30,
+	"skill_ult": 0.25,
+	"summoner_spell": 0.20,
 	"low_hp": LOW_HP_COOLDOWN,
 	"wave_horn": 2.0,
 	"purchase": 0.12,
@@ -130,7 +134,9 @@ func cues_for(event: Dictionary, ctx: Dictionary) -> Array:
 			elif target_type == "minion" or target_type == "monster":
 				cue = CUE_HIT_MINION
 			_push(out, cue, gain)
-		"skill":
+		# Q/E 走 match_sim._cast_q/_cast_e，事件名 skill；W/R 走 SkillSystem.cast_skill，
+		# 事件名 skill_cast。同一个入口 —— 事件名不是契约，玩家听到的是同一套音色。
+		"skill", "skill_cast":
 			var slot := str(event.get("slot", "q"))
 			var cue := CUE_SKILL_MAGE
 			var hero_type := str(event.get("hero_type", "blade"))
@@ -145,7 +151,9 @@ func cues_for(event: Dictionary, ctx: Dictionary) -> Array:
 			elif hero_type == "blade":
 				cue = CUE_SKILL_BLADE
 			# 未知英雄类型回落到法师音：宁可音色不准，也不能静默无声。
-			_push(out, cue, 0.0 if int(event.get("hero", -1)) == local_id else _distance_gain(event, ctx))
+			_push(out, cue, 0.0 if _caster_id(event) == local_id else _distance_gain(event, ctx))
+		"summoner_cast":
+			_push(out, CUE_SUMMONER, 0.0 if _caster_id(event) == local_id else _distance_gain(event, ctx))
 		"death":
 			var entity_type := str(event.get("entity_type", "minion"))
 			if entity_type == "hero":
@@ -205,6 +213,12 @@ static func gain_for_distance(distance: float) -> float:
 		return FAR_ATTENUATION - 20.0
 	var ratio := (distance - EARSHOT) / (FAR_LIMIT - EARSHOT)
 	return FAR_ATTENUATION * clampf(ratio, 0.0, 1.0)
+
+# 施法者 id：Q/E 用 hero，W/R 与召唤师技能用 caster_id。
+static func _caster_id(event: Dictionary) -> int:
+	if event.has("hero"):
+		return int(event.get("hero", -1))
+	return int(event.get("caster_id", -1))
 
 func _distance_gain(event: Dictionary, ctx: Dictionary) -> float:
 	var dx := float(event.get("x", 0.0)) - float(ctx.get("x", 0.0))

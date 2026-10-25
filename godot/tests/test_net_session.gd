@@ -109,27 +109,27 @@ func test_snapshot_reaches_client_sanitized() -> void:
 	_pump([host, client])
 	var snapshots: Array = []
 	client.snapshot_received.connect(func(snapshot): snapshots.append(snapshot))
-	host.broadcast_snapshot({
-		"time": 4.25,
-		"mode": "duel",
-		"bounds": 58.0,
-		"ended": false,
-		"winner": "",
-		"wave": 2,
-		"scores": {"blue": {"kills": 1, "towers": 0}, "red": {"kills": 0, "towers": 0}},
-		"entities": [
-			{"id": 1, "type": "hero", "team": "blue", "x": 2.0, "y": -3.0, "hp": 800.0, "max_hp": 1000.0, "alive": true, "hero_type": "blade", "owner_id": "1", "name": "Alice"},
-			{"id": 99, "type": "dragon", "x": 0.0, "y": 0.0},
-		],
-		"events": [{"type": "wave", "wave": 2}],
-	})
+	host.broadcast_team_snapshots(func(_team: String) -> Dictionary:
+		return {
+			"time": 4.25,
+			"mode": "duel",
+			"bounds": 58.0,
+			"ended": false,
+			"winner": "",
+			"wave": 2,
+			"scores": {"blue": {"kills": 1, "towers": 0}, "red": {"kills": 0, "towers": 0}},
+			"entities": [
+				{"id": 1, "type": "hero", "team": "blue", "x": 2.0, "y": -3.0, "hp": 800.0, "max_hp": 1000.0, "alive": true, "hero_type": "blade", "owner_id": "1", "name": "Alice"},
+				{"id": 99, "type": "dragon", "x": 0.0, "y": 0.0},
+			],
+		}
+	)
 	_pump([host, client], 1.0)
 	eq(snapshots.size(), 1, "client received snapshot")
 	if snapshots.size() == 1:
 		eq(snapshots[0].time, 4.25, "snapshot time kept")
 		eq(snapshots[0].entities.size(), 1, "unknown entity dropped")
 		eq(snapshots[0].entities[0].hero_type, "blade", "hero payload kept")
-		eq(snapshots[0].events.size(), 1, "event kept")
 	host.close()
 	client.close()
 
@@ -160,6 +160,49 @@ func test_host_loss_is_reported_to_guest() -> void:
 	_pump([client], 3.0)
 	eq(client.state, "disconnected", "guest notices host loss")
 	check(errors.has("host_disconnected"), "host loss error surfaced")
+	client.close()
+
+# 状态快照丢了下一格就覆盖，走不可靠通道；击杀/结算/特效这类离散事件丢一次
+# 就是永久缺失（客机不会播胜利曲、不会弹播报），必须走可靠通道。
+func test_state_snapshot_and_events_use_separate_channels() -> void:
+	var host := _host()
+	var client := _join(host)
+	_pump([host, client])
+	host.start_match()
+	_pump([host, client])
+	var snapshots: Array = []
+	var events: Array = []
+	client.snapshot_received.connect(func(snapshot): snapshots.append(snapshot))
+	client.events_received.connect(func(list): events.append_array(list))
+
+	host.broadcast_team_snapshots(func(_team: String) -> Dictionary:
+		return {
+			"time": 6.0, "mode": "duel", "bounds": 58.0, "ended": false, "winner": "",
+			"wave": 2, "scores": {},
+			"entities": [{
+				"id": 1, "type": "hero", "team": "blue", "x": 0.0, "y": 0.0,
+				"hp": 100.0, "max_hp": 100.0, "alive": true,
+				"owner_id": "1", "hero_type": "blade", "name": "Alice",
+			}],
+		}
+	)
+	eq(host.last_send_mode, "unreliable", "状态快照必须走不可靠通道")
+	host.broadcast_team_events(func(_team: String) -> Array:
+		return [{"type": "wave", "wave": 2}, {"type": "match_end", "winner": "blue"}]
+	)
+	eq(host.last_send_mode, "reliable", "离散事件必须走可靠通道")
+
+	_pump([host, client], 1.0)
+	eq(snapshots.size(), 1, "客机收到状态快照")
+	if snapshots.size() == 1:
+		eq(snapshots[0].time, 6.0, "快照时间保留")
+		eq(snapshots[0].events.size(), 0, "状态快照不再夹带事件")
+	eq(events.size(), 2, "事件走独立包到达")
+	if events.size() == 2:
+		eq(events[0].type, "wave", "兵线事件")
+		eq(events[1].type, "match_end", "结算事件")
+		eq(events[1].winner, "blue", "结算方保留")
+	host.close()
 	client.close()
 
 func test_team_snapshot_broadcast_filters_each_team() -> void:

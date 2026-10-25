@@ -33,14 +33,23 @@ const FONT_PATH := "res://assets/fonts/NotoSansSC.ttf"
 # 「和小兵差不多高」）。也就是说**设定身高比只有 1.2 : 1**，远没有很多人以为的 2~3 倍。
 # 游戏里之所以一眼分得出，靠的不是身高：小兵体型窄（肩宽约英雄 5 成）、穿统一兵种配色、
 # 没有名字与描边；而且王者荣耀镜头很近，英雄约占屏高 1/6。
-# 我们的相机 zoom 21 下英雄只占屏高 ~6%，1.2 的身高差在屏幕上不到 10 个像素，
+# 我们的相机 zoom 21 下英雄只占屏高 ~7%，1.2 的身高差在屏幕上不到 10 个像素，
 # 再叠加小兵用的是 Q 版大头模型，两者视觉体量几乎一样 —— 这才是「分不出英雄和小兵」的根因。
-# 所以按「屏幕可辨识」取值：英雄 2.4 : 小兵 1.15 ≈ 2.1 : 1，并把小兵横向收窄到 0.9，
+# 所以按「屏幕可辨识」取值：英雄 2.7 : 小兵 1.15 ≈ 2.35 : 1，并把小兵横向收窄到 0.9，
 # 等效于王者荣耀「英雄明显大一号、小兵又瘦又整齐」的观感。
 # 想严格照设定身高比（1.2:1）时，把 MINION_HEIGHT 改成 HERO_HEIGHT / 1.2 即可。
-const HERO_HEIGHT := 2.4
+const HERO_HEIGHT := 2.7
 const MINION_HEIGHT := 1.15
 const MINION_GIRTH := 0.9
+# 头顶血条按世界单位定尺寸。英雄条比小兵/野怪更宽更厚：
+# 默认镜头下英雄只占屏高 ~7%，1.24×0.14 的细条在手机竖屏上读不出剩余血量。
+# 1.9×0.26 是玩家反馈「血条太短太细」后的加宽加粗版；蓝条同宽、厚度约一半，
+# 保持 test_hero_readout 的契约（宽 ≥1.4、厚 ≥0.18、蓝条薄于血条且在其下方不重叠）。
+# 小兵/野怪仍走 width_scale 等比缩放，见 _add_health_bar。
+const HERO_BAR_SIZE := Vector2(1.9, 0.26)
+const HERO_MANA_SIZE := Vector2(1.9, 0.13)
+const HERO_MANA_GAP := 0.03
+const OTHER_BAR_SIZE := Vector2(1.24, 0.14)
 
 const UAL1 := preload("res://assets/animations/ual1.glb")
 const UAL2 := preload("res://assets/animations/ual2.glb")
@@ -143,6 +152,23 @@ const ANIM_E := {
 	"archer": "Roll",
 	"assassin": "Roll",
 }
+# W 是「中段技能」：连斩 / 蓄力 / 冲撞 / 点射 / 反手斩。
+const ANIM_W := {
+	"blade": "Sword_Regular_Combo",
+	"mage": "Spell_Simple_Enter",
+	"tank": "Sword_Dash_RM",
+	"archer": "Spell_Simple_Shoot",
+	"assassin": "Sword_Regular_B",
+}
+# R 是大招：跳斩 / 抛掷 / 举盾。以前非 Q 一律播 E 的动作，
+# 于是翎羽和墨鸦放大会原地「滚」一下，完全读不出这是大招。
+const ANIM_R := {
+	"blade": "NinjaJump_Start",
+	"mage": "OverhandThrow",
+	"tank": "Shield_OneShot",
+	"archer": "Spell_Simple_Enter",
+	"assassin": "NinjaJump_Start",
+}
 
 static var _source_animations: Dictionary = {}
 static var _library_cache: Dictionary = {}
@@ -157,6 +183,7 @@ var is_local := false
 # 留空（预览工具、离线截图）时一律按敌军处理。
 var viewer_team := ""
 var monster_type := ""
+var minion_type := "melee"
 
 var model_root: Node3D
 var body_root: Node3D
@@ -210,6 +237,8 @@ func setup(unit_kind: String, unit_team: String, type_id: String, label: String,
 	hero_type = type_id
 	if kind == "monster":
 		monster_type = type_id
+	elif kind == "minion":
+		minion_type = "melee" if type_id == "" or type_id == "minion" else type_id
 	display_name = label
 	is_local = local
 	viewer_team = viewer
@@ -245,8 +274,9 @@ func recycle() -> void:
 		if player:
 			player.stop()
 
-func reset_minion(new_team: String, new_pos: Vector3) -> void:
+func reset_minion(new_team: String, new_pos: Vector3, new_type := "melee") -> void:
 	team = new_team
+	minion_type = new_type
 	dead = false
 	death_timer = 0.0
 	action_timer = 0.0
@@ -328,7 +358,7 @@ func _build_hero() -> void:
 		local_ring = _make_ring(1.15, GOLD, 0.55)
 		local_ring.position.y = 0.02
 		add_child(local_ring)
-	_add_health_bar(HERO_HEIGHT + 0.25)
+	_add_health_bar(HERO_HEIGHT + 0.30)
 	idle_anim = str(setup_data.get("idle", "Idle"))
 	_set_anim(idle_anim, true)
 	process_priority = 10
@@ -481,17 +511,18 @@ func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 	# 避免 BILLBOARD_ENABLED 丢弃节点缩放导致血条无法收缩的问题。
 	# 配色按「与本地玩家的关系」走 bar_color()，英雄/小兵/野怪同一套规则。
 	var hp_color := bar_color(is_local, team, viewer_team)
-	var hp_bar := _make_bar(Vector2(1.24 * width_scale, 0.14 * width_scale), hp_color)
+	var hp_size := HERO_BAR_SIZE if kind == "hero" else OTHER_BAR_SIZE * width_scale
+	var hp_bar := _make_bar(hp_size, hp_color)
 	bar_mesh = hp_bar[0]
 	bar_material = hp_bar[1]
 	bar_root.add_child(bar_mesh)
 
 	if kind == "hero":
-		# 英雄头顶蓝条，位于血条正下方
-		var mp_bar := _make_bar(Vector2(1.24 * width_scale, 0.07 * width_scale), MANA)
+		# 英雄头顶蓝条，位于血条正下方；间距按血条厚度推算，加粗后不会压住血条。
+		var mp_bar := _make_bar(HERO_MANA_SIZE, MANA)
 		mp_mesh = mp_bar[0]
 		mp_material = mp_bar[1]
-		mp_mesh.position.y = -0.12 * width_scale
+		mp_mesh.position.y = -(HERO_BAR_SIZE.y + HERO_MANA_GAP + HERO_MANA_SIZE.y) * 0.5
 		bar_root.add_child(mp_mesh)
 
 	if kind == "hero":
@@ -505,7 +536,7 @@ func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 		name_label.modulate = GOLD if is_local else Color(0.92, 0.95, 1.0)
 		name_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		name_label.no_depth_test = false
-		name_label.position.y = 0.22
+		name_label.position.y = HERO_BAR_SIZE.y * 0.5 + 0.15
 		bar_root.add_child(name_label)
 		level_label = Label3D.new()
 		level_label.text = "Lv.1"
@@ -516,7 +547,7 @@ func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 		level_label.outline_modulate = Color(0.01, 0.02, 0.03, 0.9)
 		level_label.modulate = Color(0.86, 0.9, 1.0)
 		level_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-		level_label.position = Vector3(0.82, 0.22, 0.0)
+		level_label.position = Vector3(HERO_BAR_SIZE.x * 0.5 + 0.20, name_label.position.y, 0.0)
 		bar_root.add_child(level_label)
 
 func _get_font() -> Font:
@@ -758,18 +789,39 @@ func play_action(anim_name: String) -> void:
 		action_timer = 0.35
 
 func play_attack() -> void:
-	if kind != "hero":
-		return
-	play_action(str(ANIM_ATTACK.get(hero_type, "Sword_Regular_A")))
+	if kind == "hero":
+		play_action(str(ANIM_ATTACK.get(hero_type, "Sword_Regular_A")))
+	elif kind == "minion":
+		play_action(minion_attack_anim(minion_type))
+
+# 小兵攻击动作：远程兵举杖施法，近战兵/超级兵挥武器。
+# 这些名字都直接存在于 Skeleton_Warrior / Skeleton_Rogue 里，不依赖 fallback。
+static func minion_attack_anim(unit_minion_type: String) -> String:
+	match unit_minion_type:
+		"ranged", "cannon":
+			return "Spellcast_Shoot"
+		"super":
+			return "2H_Melee_Attack_Chop"
+	return "1H_Melee_Attack_Chop"
+
+# 施法动作按槽位取：Q/W/E/R 各一套，不能互相顶替。
+static func cast_anim(slot: String, hero_type: String) -> String:
+	match slot:
+		"q":
+			return str(ANIM_Q.get(hero_type, "Sword_Regular_A"))
+		"w":
+			return str(ANIM_W.get(hero_type, "Sword_Regular_B"))
+		"r":
+			return str(ANIM_R.get(hero_type, "Sword_Regular_C"))
+	return str(ANIM_E.get(hero_type, "Roll"))
 
 func play_skill(slot: String) -> void:
 	if kind != "hero":
 		return
-	if slot == "q":
-		play_action(str(ANIM_Q.get(hero_type, "Sword_Regular_A")))
+	play_action(cast_anim(slot, hero_type))
+	# Q 和 R 是"打出去"的技能，补一下手部亮光；W/E 多为自身增益或位移，不加光。
+	if slot == "q" or slot == "r":
 		_pulse_cast_light()
-	else:
-		play_action(str(ANIM_E.get(hero_type, "Roll")))
 
 func play_hit() -> void:
 	if dead:

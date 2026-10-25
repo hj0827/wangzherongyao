@@ -148,12 +148,23 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 				if not target.is_empty():
 					_deal_damage(hero, target, damage, sim)
 
+	# 渲染层要靠这些字段出特效：hero_type / kind 决定配方，start_* 是施法瞬间的站位
+	# （冲锋类技能会改 hero.pos，不能拿结束位置当起点），aim 是落点。
 	if sim.has_method("_emit"):
 		sim._emit("skill_cast", {
 			"caster_id": hero.get("id", 0),
 			"slot": slot,
+			"hero_type": hero_type,
+			"name": str(skill.get("name", "")),
+			"kind": kind,
+			"team": str(hero.get("team", "")),
 			"pos": [hero_pos.x, hero_pos.y],
-			"aim": [aim.x, aim.y],
+			"x": float(hero_pos.x),
+			"y": float(hero_pos.y),
+			"start_x": float(hero_pos.x),
+			"start_y": float(hero_pos.y),
+			"aim_x": float(aim.x),
+			"aim_y": float(aim.y),
 		})
 	return true
 
@@ -176,8 +187,11 @@ static func cast_summoner_spell(hero: Dictionary, spell_id: String, aim: Vector2
 			var dist: float = minf((aim - hero_pos).length(), range_val)
 			if dist < 0.1:
 				dist = range_val
-			var dest: Vector2 = hero_pos + dir * dist
-			hero["pos"] = Collision.move(hero_pos, dest, float(hero.get("radius", 0.55)))
+			# 闪现是瞬移，不是冲刺：不能交给 Collision.move —— 那条路径会逐步防穿墙、
+			# 撞墙后只保留切向滑行，实测 4.4 米的穿墙闪只走出 0.8 米。
+			# nearest_free 兜住两件事：落点不许卡在墙里，以及地图可走边界
+			# （内部 clamp_bounds 让出相机安全边距），所以闪现闪不出地图。
+			hero["pos"] = Collision.nearest_free(hero_pos + dir * dist, float(hero.get("radius", 0.55)))
 		"execute":
 			var enemy: Dictionary = _find_target_near(hero, hero_pos, range_val, sim)
 			if enemy.is_empty():
@@ -208,7 +222,15 @@ static func cast_summoner_spell(hero: Dictionary, spell_id: String, aim: Vector2
 		sim._emit("summoner_cast", {
 			"caster_id": hero.get("id", 0),
 			"spell_id": spell_id,
+			"hero_type": str(hero.get("hero_type", "")),
+			"team": str(hero.get("team", "")),
 			"pos": [hero_pos.x, hero_pos.y],
+			"x": float(hero_pos.x),
+			"y": float(hero_pos.y),
+			"start_x": float(hero_pos.x),
+			"start_y": float(hero_pos.y),
+			"aim_x": float(aim.x),
+			"aim_y": float(aim.y),
 		})
 	return true
 

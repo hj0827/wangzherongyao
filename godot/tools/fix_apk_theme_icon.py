@@ -9,7 +9,6 @@ Run after exporting the APK; the APK is re-signed with the debug keystore.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -17,12 +16,10 @@ import sys
 import zipfile
 from pathlib import Path
 
+import android_env
+
 ROOT = Path(__file__).resolve().parents[1]
 APK = ROOT / "build" / "android" / "fenghuo-gorge-debug.apk"
-BUILD_TOOLS = Path(r"D:\AppCache\Android-Sdk\build-tools\36.0.0")
-ZIPALIGN = BUILD_TOOLS / "zipalign.exe"
-APKSIGNER = BUILD_TOOLS / "apksigner.bat"
-KEYTOOL = Path(r"C:\Program Files\Java\jdk-17\bin\keytool.exe")
 ICON_DIR = "res/mipmap-anydpi-v26"
 ICON = f"{ICON_DIR}/icon.xml"
 THEMED = f"{ICON_DIR}/themed_icon.xml"
@@ -82,26 +79,28 @@ def main() -> int:
     if not APK.exists():
         print(f"missing APK: {APK}", file=sys.stderr)
         return 1
-    java_home = Path(r"C:\Program Files\Java\jdk-17")
-    if (java_home / "bin" / "java.exe").exists():
-        os.environ["JAVA_HOME"] = str(java_home)
-        os.environ["PATH"] = str(java_home / "bin") + os.pathsep + os.environ.get("PATH", "")
+    zipalign = android_env.build_tool("zipalign.exe")
+    apksigner = android_env.build_tool("apksigner.bat")
+    if zipalign is None or apksigner is None:
+        print("Android build-tools not found (run: python tools/android_env.py)", file=sys.stderr)
+        return 1
+    android_env.apply_java_home()
     store, password, alias = keystore()
     unsigned = APK.with_name(APK.stem + ".unsigned.apk")
     aligned = APK.with_name(APK.stem + ".aligned.apk")
     signed = APK.with_name(APK.stem + ".signed.apk")
     try:
         rewrite(APK, unsigned)
-        run([str(ZIPALIGN), "-f", "4", str(unsigned), str(aligned)])
+        run([str(zipalign), "-f", "4", str(unsigned), str(aligned)])
         run([
-            str(APKSIGNER), "sign",
+            str(apksigner), "sign",
             "--ks", str(store),
             "--ks-pass", f"pass:{password}",
             "--ks-key-alias", alias,
             "--out", str(signed),
             str(aligned),
         ])
-        run([str(APKSIGNER), "verify", "--print-certs", str(signed)])
+        run([str(apksigner), "verify", "--print-certs", str(signed)])
         shutil.move(str(signed), str(APK))
         idsig = Path(str(signed) + ".idsig")
         target_idsig = APK.with_name(APK.name + ".idsig")

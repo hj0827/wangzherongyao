@@ -85,6 +85,21 @@ func test_hero_bars_follow_the_viewer_side() -> void:
 			check(not _is_blue(hp), "%s enemy hero must not be blue, got %s" % [team, str(hp)])
 		view.free()
 
+func test_hero_bars_are_large_enough_to_read_on_a_phone() -> void:
+	# 默认镜头下英雄只占屏高 ~7%，血条太细时手机竖屏读不出剩余血量。
+	var view = UnitVisual.new()
+	view.setup("hero", "blue", "blade", "测试", false, "blue")
+	var hp: QuadMesh = view.bar_mesh.mesh
+	check(hp.size.x >= 1.4, "hero health bar must be wider than 1.4 m (got %.2f)" % hp.size.x)
+	check(hp.size.y >= 0.18, "hero health bar must be thick enough to read (got %.2f)" % hp.size.y)
+	var mp: QuadMesh = view.mp_mesh.mesh
+	check(mp.size.y < hp.size.y, "mana bar must stay thinner than the health bar")
+	check(
+		view.mp_mesh.position.y + mp.size.y * 0.5 <= -hp.size.y * 0.5,
+		"mana bar must not overlap the thicker health bar"
+	)
+	view.free()
+
 func test_hero_mana_bar_stays_blue_below_health() -> void:
 	for team in ["blue", "red"]:
 		var view = UnitVisual.new()

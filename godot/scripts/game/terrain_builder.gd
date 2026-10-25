@@ -1,6 +1,9 @@
 extends RefCounted
 class_name TerrainBuilder
 
+const ArenaLook = preload("res://scripts/game/arena_look.gd")
+const MapData = preload("res://sim/map_data.gd")
+
 ## 视觉地形。**只影响画面，不参与模拟。**
 ##
 ## 模拟层的碰撞 / 寻路 / 视野全部跑在 MapData 的 2D 平面上（BOUNDS = ±58），
@@ -33,9 +36,9 @@ func _init() -> void:
 	_ridge.frequency = 0.028
 	_ridge.fractal_octaves = 2
 
-## 到河道中心线（x + z = 0）的垂直距离，与 collision.gd 的判定同源。
+## 到河道中心线（x - z = 0，即 y = x）的垂直距离，与 collision.gd 的判定同源。
 func river_distance(x: float, z: float) -> float:
-	return absf(x + z) * 0.70710678
+	return absf(x - z) * 0.70710678
 
 func height_at(x: float, z: float) -> float:
 	var river_d := river_distance(x, z)
@@ -102,6 +105,14 @@ uniform sampler2D grass_nor : hint_normal, filter_linear_mipmap_anisotropic, rep
 uniform sampler2D dirt_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D dirt_nor : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform float river_half = 9.0;
+// 观感参数全部由 arena_look.gd 注入，shader 里不写死颜色：
+// 一处调色，地形 / 阵营色偏 / 去饱和不会各跑各的。
+uniform vec3 grass_gain = vec3(0.34, 0.46, 0.31);
+uniform vec3 faction_warm = vec3(1.05, 0.99, 0.94);
+uniform vec3 faction_cool = vec3(0.94, 0.98, 1.06);
+uniform float faction_span = 26.0;
+uniform float faction_sat = 0.94;
+__OUTSIDE_UNIFORMS__
 
 varying vec3 wpos;
 varying vec3 wnorm;
@@ -114,7 +125,7 @@ void vertex() {
 void fragment() {
 	vec2 p = wpos.xz;
 	float slope = 1.0 - clamp(wnorm.y, 0.0, 1.0);
-	float river_d = abs(wpos.x + wpos.z) * 0.70710678;
+	float river_d = abs(wpos.x - wpos.z) * 0.70710678;
 
 	// 采样预算很紧：集显（Intel UHD 730）跑 1600x900 时，
 	// 每多一次纹理采样就掉几帧。三层草贴图 + 1 泥土 + 1 岩石 + 1 法线 = 6 次，
@@ -125,7 +136,7 @@ void fragment() {
 
 	// 两层草贴图（周期 2.2m / 16m）已经足够破掉重复感；
 	// 加第三层在集显上换不来肉眼可辨的提升，只换来 7 帧。
-	vec3 grass = mix(g1, g3, 0.34) * vec3(0.28, 0.60, 0.25);
+	vec3 grass = mix(g1, g3, 0.34) * grass_gain;
 	vec3 dirt  = d1 * vec3(0.70, 0.66, 0.54);
 	vec3 sand  = d1 * vec3(1.04, 0.96, 0.80);
 	vec3 rock  = d1 * vec3(0.62, 0.63, 0.66);
@@ -138,6 +149,18 @@ void fragment() {
 	col = mix(col, rock, rocky);
 	col *= 0.90 + g3.r * 0.16;
 
+	// 去饱和在前、阵营染色在后：反过来的话染色会被去饱和拉回中性，色偏就白做了。
+	float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+	col = mix(vec3(luma), col, faction_sat);
+	float side = (wpos.x - wpos.z) * 0.70710678;
+	float faction = smoothstep(-faction_span, faction_span, side);
+	col *= mix(faction_warm, faction_cool, faction);
+
+	// 墙外退成远景。切比雪夫距离 = 方形城墙的口径（与 clamp_bounds 同源），
+	// 用欧氏距离会在四角留下一块比四边晚暗的亮斑。
+	// 放在阵营染色之后：远景不该还带着半场的暖/冷色偏。
+__OUTSIDE_APPLY__
+
 	ALBEDO = col;
 	NORMAL_MAP = texture(grass_nor, p * 0.46).rgb;
 	NORMAL_MAP_DEPTH = 1.5;
@@ -146,10 +169,19 @@ void fragment() {
 }
 """
 	var material := ShaderMaterial.new()
+	shader.code = ArenaLook.apply_outside_fade(shader.code)
 	material.shader = shader
 	material.set_shader_parameter("grass_tex", load("res://assets/textures/leafy_grass_Diffuse.jpg"))
 	material.set_shader_parameter("grass_nor", load("res://assets/textures/leafy_grass_nor_gl.jpg"))
 	material.set_shader_parameter("dirt_tex", load("res://assets/textures/grass_path_2_Diffuse.jpg"))
 	material.set_shader_parameter("dirt_nor", load("res://assets/textures/grass_path_2_nor_gl.jpg"))
 	material.set_shader_parameter("river_half", RIVER_HALF)
+	material.set_shader_parameter("grass_gain", ArenaLook.GRASS_GAIN)
+	material.set_shader_parameter("faction_warm", ArenaLook.WARM_TINT)
+	material.set_shader_parameter("faction_cool", ArenaLook.COOL_TINT)
+	material.set_shader_parameter("faction_span", ArenaLook.FACTION_SPAN)
+	material.set_shader_parameter("faction_sat", ArenaLook.SATURATION)
+	# 墙外远景。边界取 MapData.BOUNDS（= 城墙内表面），不另写一个数：
+	# 城墙挪了、可走边界挪了，渐隐起点自动跟着走。
+	ArenaLook.bind_outside_fade(material, MapData.BOUNDS)
 	return material

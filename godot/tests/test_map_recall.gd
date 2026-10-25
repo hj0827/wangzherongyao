@@ -12,7 +12,7 @@ func _hero() -> Dictionary:
 		"team": "blue",
 		"alive": true,
 		"pos": Vector2(10.0, 10.0),
-		"spawn_pos": Vector2(-46.0, -46.0),
+		"spawn_pos": Vector2(46.0, -46.0),
 		"recalling": false,
 		"recall_timer": 0.0,
 		"recall_total": 0.0,

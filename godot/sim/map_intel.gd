@@ -71,7 +71,7 @@ static func region_at(point: Vector2) -> Dictionary:
 			"lane": "",
 			"note": "红方基地核心 · 每秒回复 18% 生命与法力",
 		}
-	if MapData.RIVER_HALF_WIDTH > 0.0 and absf(point.x + point.y) * 0.70710678 <= MapData.RIVER_HALF_WIDTH:
+	if MapData.RIVER_HALF_WIDTH > 0.0 and absf(point.x - point.y) * 0.70710678 <= MapData.RIVER_HALF_WIDTH:
 		return {
 			"name": "河道",
 			"kind": "river",

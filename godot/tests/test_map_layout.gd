@@ -37,11 +37,33 @@ func test_lane_smoothing_keeps_endpoints_and_stays_in_bounds() -> void:
 		near(smooth[smooth.size() - 1].distance_to(path[path.size() - 1]), 0.0, 0.001, "%s 平滑线终点必须与航点一致" % lane)
 		for point in smooth:
 			check(absf(point.x) <= MapData.BOUNDS + 0.001 and absf(point.y) <= MapData.BOUNDS + 0.001, "%s 平滑线不能越出地图" % lane)
-		# 切角平滑后不应再保留原折线的尖角点（起点/终点除外）。
+		# 切角平滑只该吃掉**尖角**。
+		# 边路贴边之后，航点里多了两类「不该被切」的点：直段加密点（转角 0°）
+		# 和三点圆角的采样点（转角 22.5°）。一刀切地要求「每个航点都被切圆」
+		# 会把直段也判成违规 —— 而直段一旦被切，96 米的长边就会缩成弧，
+		# 贴边就白贴了。
+		# 切掉多少本身与转角、段长成正比（Chaikin 的极限是二次 B 样条），
+		# 所以按转角分档，判的是「有没有被磨」，而不是「必须磨掉多少」：
+		#   > 30°   → 明显磨圆（≥ 0.8 米，约等于最短段长 6.4 米的 1/8）
+		#   15~30°  → 有磨（≥ 0.3 米）
+		#   ≤ 15°   → 保持原处（< 4 米，约等于最长段长的 1/4）
 		for index in range(1, path.size() - 1):
 			var corner: Vector2 = path[index]
+			var turn := absf(
+				(corner - (path[index - 1] as Vector2)).normalized().angle_to(
+					((path[index + 1] as Vector2) - corner).normalized()
+				)
+			)
+			var nearest := INF
 			for point in smooth:
-				gt(point.distance_to(corner), 0.5, "%s 的折线尖角应被切圆" % lane)
+				nearest = minf(nearest, (point as Vector2).distance_to(corner))
+			var degrees := rad_to_deg(turn)
+			if degrees > 30.0:
+				gt(nearest, 0.8, "%s 的尖角应被磨圆（第 %d 点，转角 %.1f°）" % [lane, index, degrees])
+			elif degrees > 15.0:
+				gt(nearest, 0.3, "%s 的浅转角也该有磨（第 %d 点，转角 %.1f°）" % [lane, index, degrees])
+			else:
+				lt(nearest, 4.0, "%s 的直段航点不该被平滑拉走（第 %d 点，转角 %.1f°）" % [lane, index, degrees])
 
 func test_walls_bushes_camps_and_pits_are_mirrored() -> void:
 	for wall in MapLayout.WALLS:
@@ -54,14 +76,21 @@ func test_walls_bushes_camps_and_pits_are_mirrored() -> void:
 		check(found, "墙体必须沿河道镜像：" + str(wall.id))
 	for bush in MapLayout.BUSHES:
 		check(not MapLayout.bush_at(MapLayout.mirror(bush.pos)).is_empty(), "草丛必须镜像：" + str(bush.id))
+	# 营地与首领坑用的是**另一种**对称：绕地图中心 180°（-p），不是 y=-x 镜像。
+	# 原因见 map_layout.gd CAMPS 顶部：mirror 保持 a（= 离河道多远）不变，
+	# 也就是「同一个半场」，镜像出来的营地跟原营地同队。
+	# 营地只要求**近似**对称（8 米容差）：两半场的石壁形状本来就不是同一个图形，
+	# 精确旋转会把红方那座推进石头里（实测被压 1.6 米）。
 	for camp in MapLayout.CAMPS:
-		var mirrored_pos := MapLayout.mirror(camp.pos)
-		var mirrored_camp := MapLayout.camp_at(mirrored_pos)
-		check(not mirrored_camp.is_empty(), "野区营地必须镜像：" + str(camp.id))
-		if not mirrored_camp.is_empty():
-			eq(str(mirrored_camp.buff), str(camp.buff), "镜像营地提供同类型增益")
+		var turned: Vector2 = -(camp.pos as Vector2)
+		var nearest := INF
+		for other in MapLayout.CAMPS:
+			if str(other.id) == str(camp.id):
+				continue
+			nearest = minf(nearest, (other.pos as Vector2).distance_to(turned))
+		lt(nearest, 8.0, "营地要有 180° 附近的对家，最近的是 %.1f 米：%s" % [nearest, str(camp.id)])
 	for pit in MapLayout.OBJECTIVE_PITS:
-		check(MapLayout.objective_at(MapLayout.mirror(pit.pos)).size() > 0, "首领坑必须镜像：" + str(pit.id))
+		lt((MapLayout.objective_at(-(pit.pos as Vector2)).get("pos", Vector2(999.0, 999.0)) as Vector2).distance_to(-(pit.pos as Vector2)), 0.01, "首领坑必须精确 180° 对称：" + str(pit.id))
 
 func test_features_keep_clear_of_lane_centers_and_structures() -> void:
 	for wall in MapLayout.WALLS:
@@ -84,3 +113,27 @@ func test_bush_and_camp_lookup_by_point() -> void:
 	eq(str(camp.id), str(MapLayout.CAMPS[0].id), "营地中心必须命中该营地")
 	check(MapLayout.camp_at(Vector2.ZERO).is_empty(), "地图中心不是营地")
 	eq(str(MapLayout.objective_at(MapLayout.OBJECTIVE_PITS[0].pos).id), str(MapLayout.OBJECTIVE_PITS[0].id), "首领坑中心必须命中")
+
+func test_ground_marks_claim_their_discs() -> void:
+	# 三块贴地圆盘（营地 / 首领坑 / 传送阵）是**实心片**：树根、草根长在盘面上
+	# 就是「绿点从石盘里冒出来」。以前避让清单在渲染层手抄一遍、
+	# 草丛那边干脆没抄，于是「树避开了、草没避开」。
+	# 契约：占位判定只有一份，布景与草丛都读它。
+	for camp in MapLayout.CAMPS:
+		check(MapLayout.on_ground_mark(camp.pos as Vector2), "营地圆盘要占位：%s" % str(camp.id))
+		check(
+			not MapLayout.on_ground_mark(
+				(camp.pos as Vector2) + Vector2(0.0, MapLayout.CAMP_DISC_RADIUS + 4.0)
+			),
+			"营地圆盘外面不该占位：%s" % str(camp.id)
+		)
+	for pit in MapLayout.OBJECTIVE_PITS:
+		check(MapLayout.on_ground_mark(pit.pos as Vector2), "首领坑圆盘要占位：%s" % str(pit.id))
+	for pad in MapLayout.TELEPORT_PADS:
+		check(MapLayout.on_ground_mark(pad.pos as Vector2), "传送阵圆盘要占位：%s" % str(pad.id))
+		# 阵盘边缘 1 米仍然算占位（树冠那一圈），这是它和营地不同的一点。
+		check(
+			MapLayout.on_ground_mark((pad.pos as Vector2) + Vector2(MapLayout.PAD_DISC_RADIUS + 1.0, 0.0)),
+			"传送阵的树冠留白也算占位：%s" % str(pad.id)
+		)
+	check(not MapLayout.on_ground_mark(Vector2(0.0, 0.0)), "地图中心（桥面）不是任何圆盘")

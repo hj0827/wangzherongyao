@@ -94,7 +94,9 @@ static func nearest_free(point: Vector2, radius: float, max_search := 6.0) -> Ve
 	return resolve_circle(clamped, radius)
 
 static func clamp_bounds(point: Vector2, radius: float) -> Vector2:
-	var limit: float = maxf(MapData.BOUNDS - radius, 0.0)
+	# 除了半径，还要让出相机安全边距：贴到墙根时镜头已经越过边界墙，
+	# 墙会把英雄整条盖住（见 MapData.CAMERA_WALL_MARGIN）。
+	var limit: float = maxf(MapData.BOUNDS - radius - MapData.CAMERA_WALL_MARGIN, 0.0)
 	return Vector2(clampf(point.x, -limit, limit), clampf(point.y, -limit, limit))
 
 static func _closest_point(point: Vector2, a: Vector2, b: Vector2) -> Vector2:

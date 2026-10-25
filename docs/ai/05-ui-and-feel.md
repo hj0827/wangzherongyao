@@ -9,7 +9,7 @@
 | 文件 | 职责 | 规模 |
 | --- | --- | --- |
 | `scripts/ui/game_hud.gd` | 局内全部 2D：顶栏、小地图、底栏、技能键、商店/播报、死亡/结算/暂停遮罩 | 1131 行 |
-| `scripts/ui/minimap.gd` | 小地图绘制（206×206）+ 点击查情报 | 278 行 |
+| `scripts/ui/minimap.gd` | 小地图绘制（206×206）+ 英雄圆形头像 + 点击查情报 | 511 行 |
 | `scripts/ui/skill_button.gd` | 单个技能键（CD 扇形遮罩、法力不足、禁用态、触摸拖拽） | 134 行 |
 | `scripts/ui/shop_panel.gd` | 商店面板：购买/出售/快速购买、金币显示 | 207 行 |
 | `scripts/ui/attack_cluster.gd` | 攻击键簇：补刀/推塔模式切换、头像锁敌 | 159 行 |
@@ -66,6 +66,58 @@ godot --path godot --script res://tools/probe_hud_rects.gd
 
 ---
 
+## 2.2 小地图英雄头像
+
+`minimap.gd` 的 `hero_avatar()` 把立绘裁到头部（`HERO_FACE_CROP`，必须是正方形）→ 缩到 64² → 圆形遮罩 → 静态缓存，`_draw()` 每帧只做查表。关系色画在头像外圈（自己绿 / 友军蓝 / 敌军红），本地英雄额外加一道同色细环（`hero_facing_tab()` 画朝向）；朝向由贴在环外的小三角表示。快照里 `hero_type` 缺失/未知时返回 `null`，回落到关系色箭头——**不要画空图**。
+
+---
+
+## 2.3 小地图朝向
+
+小地图永远是「**自家基地左下、敌方基地右上**」，并且和画面同向：屏幕上方 = 镜头前方，屏幕右侧 = 镜头右方。
+
+世界坐标不直接铺到图上，要先过 `Minimap.oriented(world, local_team)`：蓝方相机朝世界 +Y 看、屏幕右是 -X，所以蓝方整张图转 180°；红方的世界轴本来就对得上，不转。`world_to_screen` / `screen_to_world` / `screen_to_world_clamped`、英雄朝向箭头、`map_frame()` 必须**全部**走这一个函数——漏掉哪一处，点击就会落到镜像位置，或者箭头指着反方向。`test_minimap_orientation.gd` 把「两家基地位置 / 轴与相机一致 / 点击往返 / 边框尺寸」都钉住了。
+
+边框用 `map_frame()` 取内框，**不要再拿「世界左上角 / 右下角」两个点算矩形**：翻转后这两个点会互换，围出来的矩形是负尺寸，整条墙带都画不出来。
+
+---
+
+## 2.4 相机与边界墙
+
+三份数据决定贴墙时看到什么，改任何一份都会改变观感：
+
+| 位置 | 作用 | 硬约束 |
+| --- | --- | --- |
+| `arena.CAMERA_PITCH_UP/BACK`（0.94 / 0.76） | 机位：注视点上方 `0.94×zoom`、身后 `0.76×zoom`，俯角 51° | 相机位置与 `look_at` 必须吃**同一个 target**，否则相位差 = 抖 |
+| `camera_focus.gd` | 注视点的唯一真身（刚性跟英雄 / 观察态滑行） | 常态分支不许叠 lerp |
+| `camera_edge.gd` | 贴到可走边界时把注视点往地图中心推 | **只动相机，不动可走边界** |
+
+`MapData.CAMERA_WALL_MARGIN = 3.8` 是**模拟层**的可走边距：英雄离墙内表面至少 4.35 米。
+它不是观感参数，是「相机在墙外时不至于被墙挡住自己」的物理下限，`test_wall_occlusion.gd`
+按 zoom 14/21/34 三个档位验视线高过墙顶。**不要为了让英雄「更贴墙」去调小它** ——
+要贴墙感就改 `camera_edge.gd` 的内推量。
+
+内推的两个关键取值（都有实测依据，别凭手感改）：
+
+- `EDGE_INSET_RATIO = 0.24`（×zoom ≈ 5 米）：左右两侧墙外草地基本收干净，英雄偏到画面 60~70% 处。
+- `EDGE_SPAN = 4.0`：边路中心在 `|pos| = 50`、可走极限 53.65，过渡带一旦宽到十几米，
+  **沿边路正常走路时画面会一直往内偏**。4 米让边路行走只偏 0.1 米。
+- `NEAR_INSET_SCALE = 0.0`：相机后方那面墙不内推。实测推 1.8 米后，墙外草地只少 30px，
+  但墙的立面反而更高（相机离墙更远、视线更平），英雄还被从墙边拽开 50px —— 三项全变差。
+
+墙外**地形与水面**一起渐隐（`ArenaLook.OUTSIDE_*`，公式只允许出现在 `arena_look.gd`）：
+
+- 起点是 `MapData.BOUNDS`（= 城墙内表面），用切比雪夫距离 `max(|x|,|z|)`，与方形城墙同口径；
+- `OUTSIDE_BASE = 0.55`：墙根处**已经**压掉一半。从 0 开始渐变是错的 —— 画面里看到的墙外
+  恰恰是墙脚下最近那一圈，从 0 起意味着最该退后的那块是全场最亮的；
+- 两个 shader 都通过 `ArenaLook.apply_outside_fade()` / `bind_outside_fade()` 拼接，
+  `test_outside_fade.gd` 会抓「占位符没替换」和「某一边偷偷抄了一份公式」。
+
+验证手段：`tools/probe_wall_sides.gd` 把英雄摆到四面墙的可走极限各拍一张
+（`shots/wall_side_*.png`，过程文件不入库）。
+
+---
+
 ## 3. 表现层的三个硬约束
 
 1. **只能读快照**：`set_snapshot()` 里不许回写 `hp`、不许触发结算。
@@ -80,6 +132,7 @@ godot --path godot --script res://tools/probe_hud_rects.gd
 | --- | --- | --- |
 | 伤害飘字 | `arena._spawn_damage_number()` | 只有数字；`amount >= 150` 金色，否则近白；上飘 0.9、0.65s 淡出 |
 | 命中粒子 | `_handle_hit_event()` | 英雄 10 颗，小兵/建筑 4 颗 |
+| 普攻特效 | `_handle_minion_attack()` / `_handle_structure_attack()` | 近战刀光、远程/炮车弹丸、塔的枪口闪光 + 淡出光束；走 `_tracer_pool` / `_lance_pool`，配方由纯函数 `attack_fx_plan()` 决定 |
 | 震屏 | `_camera_shake` + `_hit_stop` | 受击 `0.12`、坦克技能 `0.18`；顿帧触发时附加击退感 shake |
 | 顿帧 | `scripts/view/hit_stop_manager.gd` | 暴击/击杀/破塔/破盾/终局分别触发；只冻结表现层，模拟与网络照常 |
 | 范围环 | `_spawn_ring()` / `_flash_skill_range()` | 技能命中/施放时闪一次；触摸拖拽时由 `SkillIndicator` 实时绘制 |
@@ -129,7 +182,7 @@ godot --path godot --script res://tools/mobile_shot.gd
 
 ## 7. 头顶血条
 
-`shaders/billboard_bar.gdshader`，尺寸 `1.24 × 0.14`（英雄），小兵 `0.62` 宽，带法力条。
+`shaders/billboard_bar.gdshader`，英雄尺寸 `1.45 × 0.20`（蓝条 `1.45 × 0.10`），小兵/野怪按 `width_scale` 等比缩放（小兵 `0.62`、野怪 `0.9`，基准 `1.24 × 0.14`）。
 
 - 填充是**连续** `ratio`，**没有分段刻度**（王者是每 1000 血一格）。
 - 加了护盾会在血条右侧叠一段白色 `shield_ratio`。

@@ -1,6 +1,7 @@
 extends "res://tests/test_base.gd"
 
 const MatchSim = preload("res://sim/match_sim.gd")
+const MapData = preload("res://sim/map_data.gd")
 
 const EMPTY_INPUT := {
 	"move": Vector2.ZERO,
@@ -94,14 +95,17 @@ func test_movement_and_map_clamp() -> void:
 	var sim := _match({"humans": [_human("p1", "blue")]})
 	var hero := _hero(sim, "p1")
 	var start: Vector2 = hero.pos
-	sim.set_input("p1", _input({"move": Vector2(1, 0), "aim": start + Vector2(5, 0)}))
+	# 朝地图中心走：出生点离边界墙只有几米，朝外走会被可走边界提前截住。
+	sim.set_input("p1", _input({"move": Vector2(-1, 0), "aim": start + Vector2(-5, 0)}))
 	_tick_for(sim, 0.5)
-	gt(hero.pos.x - start.x, 2.0, "hero moves with input")
+	gt(start.x - hero.pos.x, 2.0, "hero moves with input")
 	var bounds: float = sim.state.bounds
-	hero.pos = Vector2(bounds - hero.radius - 0.2, 0)
+	# 可走极限 = 底盘边界 - 半径 - 相机安全边距（贴墙会看不见自己，见 MapData）。
+	var limit: float = bounds - float(hero.radius) - MapData.CAMERA_WALL_MARGIN
+	hero.pos = Vector2(limit - 0.2, 0)
 	sim.set_input("p1", _input({"move": Vector2(1, 0), "aim": hero.pos + Vector2(5, 0)}))
 	_tick_for(sim, 2.0)
-	check(hero.pos.x <= bounds - hero.radius + 0.001, "hero clamped to map bounds")
+	check(hero.pos.x <= limit + 0.001, "hero clamped to the walkable bounds")
 
 func test_diagonal_movement_is_normalized() -> void:
 	var sim := _match({"humans": [_human("p1", "blue")]})

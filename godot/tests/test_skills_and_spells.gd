@@ -3,6 +3,9 @@ extends "res://tests/test_base.gd"
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const SkillSystem = preload("res://sim/skill_system.gd")
 const MatchSim = preload("res://sim/match_sim.gd")
+const Collision = preload("res://sim/map/collision.gd")
+const MapLayout = preload("res://sim/map/map_layout.gd")
+const MapData = preload("res://sim/map_data.gd")
 
 func _create_sim() -> MatchSim:
 	return MatchSim.new({
@@ -72,13 +75,62 @@ func test_summoner_flash_teleports_unit() -> void:
 	var sim := _create_sim()
 	var blue: Dictionary = sim.get_hero_by_player("p1")
 	var start_pos: Vector2 = blue.get("pos", Vector2.ZERO)
-	var target_pos: Vector2 = start_pos + Vector2(4.0, 0.0)
+	# 朝地图中心闪：出生点离边界墙只有几米，朝外闪会被可走边界截短。
+	var target_pos: Vector2 = start_pos + (-start_pos).normalized() * 4.0
 	
 	var ok: bool = SkillSystem.cast_summoner_spell(blue, "flash", target_pos, sim)
 	check(ok, "flash cast should succeed")
 	gt(float(blue.get("summoner_cd", 0.0)), 0.0, "summoner spell enters cooldown")
 	var end_pos: Vector2 = blue.get("pos", Vector2.ZERO)
-	near(end_pos.x, start_pos.x + 4.0, 0.1, "unit teleported by flash")
+	near(end_pos.distance_to(start_pos), 4.0, 0.1, "unit teleported by flash")
+
+func test_summoner_flash_casts_through_a_wall() -> void:
+	# 闪现是「瞬移」不是「冲刺」：野区墙不该截停它。
+	# 找一段两侧都站得下人、且中间确实被墙挡住视线的墙，朝另一侧闪。
+	var sim := _create_sim()
+	var blue: Dictionary = sim.get_hero_by_player("p1")
+	var radius := float(blue.get("radius", 0.55))
+	var range_val: float = float(SkillSystem.get_summoner_spell("flash").get("range", 4.8))
+	var setup: Array = _pick_wall_for_flash(radius, range_val)
+	if setup.is_empty():
+		check(false, "必须有一段能用来验证穿墙的墙")
+		return
+	var start: Vector2 = setup[0]
+	var goal: Vector2 = setup[1]
+	var normal: Vector2 = setup[2]
+	var mid: Vector2 = setup[3]
+	blue["pos"] = start
+	blue["summoner_cd"] = 0.0
+
+	var ok: bool = SkillSystem.cast_summoner_spell(blue, "flash", goal, sim)
+	check(ok, "flash cast should succeed")
+	var end_pos: Vector2 = blue.get("pos", Vector2.ZERO)
+	check(not Collision.is_blocked(end_pos, radius), "落点不能卡在墙里")
+	# 关键断言：相对墙心线的法线符号必须翻过去 —— 这正是 Collision.move 做不到的事。
+	gt((end_pos - mid).dot(normal), 0.0, "闪现必须落到墙的另一侧（当前停在起始侧）")
+	gt(end_pos.distance_to(start), range_val * 0.6, "穿墙闪现不该被墙吃掉大半位移")
+
+func _pick_wall_for_flash(radius: float, range_val: float) -> Array:
+	# 起点/落点各离墙心 2.2 米（阻挡带半宽 = 墙厚/2 + 半径 ≈ 1.35），
+	# 两点连线必须真的被墙横穿，否则这个用例就没有在测「穿墙」。
+	for wall in MapLayout.WALLS:
+		var mid: Vector2 = (wall.a + wall.b) * 0.5
+		var segment: Vector2 = wall.b - wall.a
+		var normal := Vector2(-segment.y, segment.x).normalized()
+		var start: Vector2 = mid - normal * 2.2
+		var goal: Vector2 = mid + normal * 2.2
+		if Collision.is_blocked(start, radius) or Collision.is_blocked(goal, radius):
+			continue
+		if not Collision.segment_blocked(start, goal):
+			continue
+		if start.distance_to(goal) > range_val:
+			continue
+		if maxf(absf(start.x), absf(start.y)) > MapData.BOUNDS - 8.0:
+			continue
+		if maxf(absf(goal.x), absf(goal.y)) > MapData.BOUNDS - 8.0:
+			continue
+		return [start, goal, normal, mid]
+	return []
 
 func test_summoner_execute_deals_missing_health_true_damage() -> void:
 	var sim := _create_sim()

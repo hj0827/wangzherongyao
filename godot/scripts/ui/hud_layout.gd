@@ -14,6 +14,8 @@ extends RefCounted
 
 const MARGIN := 16.0
 
+const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
+
 # 桌面窗口的下限。再小，1600x900 的设计稿会被 canvas_items 缩到 0.7 以下，
 # 13px 的说明文字实机只剩 9px，读不出来——那是另一种形式的「挡住」。
 const MIN_VIEWPORT := Vector2(1280.0, 720.0)
@@ -44,12 +46,19 @@ const MODE_GAP := 8.0
 const HERO_W := 640.0
 const HERO_H := 152.0
 const HINT_W := 840.0
-const HINT_H := 24.0
+# 两行键位 + 底板内边距。原来 24px 只够一行，第二行会被裁掉。
+const HINT_H := 46.0
 
 # 触屏专用
-const TOUCH_HERO_W := 840.0
-const TOUCH_HERO_H := 180.0
-const TOUCH_HERO_BOTTOM := 24.0
+# 手机端的状态卡不横在底部：那里是摇杆和技能弧（拇指要够得着），中间是战场。
+# 改成小地图正下方一根窄柱，宽度直接跟小地图对齐 —— 两块合成一个「左上信息块」。
+# 高度只够放下 56 头像 + 血/蓝两条 + 一行金币：血量本来就同时在头顶血条上。
+const TOUCH_HERO_H := 132.0
+const TOUCH_CARD_GAP := 6.0
+# 回城进度条：底部正中一条细带。手机端放得下（状态卡已经搬去左上角，中间那条缝是空的）；
+# 键鼠端正中下方被状态卡和键位提示占着，所以只有触屏才有这个分区。
+const RECALL_W := 420.0
+const RECALL_H := 28.0
 const JOYSTICK_SIZE := 260.0
 const JOYSTICK_MARGIN := Vector2(12.0, 40.0)
 
@@ -104,28 +113,46 @@ static func zones(viewport: Vector2, touch: bool) -> Dictionary:
 
 	var skills_w := skills_width()
 	z["skills"] = Rect2(w - m - skills_w, h - m - SKILL_H, skills_w, SKILL_H)
-	z["mode"] = Rect2(w - m - MODE_W, h - m - SKILL_H - MODE_GAP - MODE_H, MODE_W, MODE_H)
+	# 触屏端的攻击模式不再是横条面板，而是贴在攻击键旁的三颗圆（见 TouchLayout），
+	# 所以这里只给键鼠端留 mode 分区。
+	if not touch:
+		z["mode"] = Rect2(w - m - MODE_W, h - m - SKILL_H - MODE_GAP - MODE_H, MODE_W, MODE_H)
 
 	if touch:
-		# 拇指区：左下摇杆、右下攻击键 + 技能弧（弧由 TouchLayout 负责，这里只留摇杆和状态卡）。
-		z["hero"] = Rect2((w - TOUCH_HERO_W) * 0.5, h - TOUCH_HERO_BOTTOM - TOUCH_HERO_H, TOUCH_HERO_W, TOUCH_HERO_H)
+		# 拇指区：左下摇杆、右下攻击键 + 技能弧（弧由 TouchLayout 负责，这里只留摇杆）。
+		# 状态卡挂在小地图正下方，和小地图同宽同左沿：手机屏幕上「底部」和「中央」
+		# 都要留给战斗，能放常驻信息的只有左上这条已经存在的竖列。
+		z["hero"] = Rect2(m, m + MINIMAP_H + TOUCH_CARD_GAP, MINIMAP_W, TOUCH_HERO_H)
+		# 回城条：左边是摇杆、右边是技能弧，中间这条 420 宽的带正好空着。
+		z["recall"] = Rect2((w - RECALL_W) * 0.5, h - m - RECALL_H, RECALL_W, RECALL_H)
 		z["joystick"] = Rect2(
 			JOYSTICK_MARGIN.x,
 			h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE,
 			JOYSTICK_SIZE,
 			JOYSTICK_SIZE
 		)
-		# 攻击模式放在摇杆正上方：手机上右上角已经被播报和菜单占了，塞不下第三个面板。
-		z["mode"] = Rect2(
-			JOYSTICK_MARGIN.x,
-			h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE - 8.0 - MODE_H,
-			MODE_W,
-			MODE_H
+		# 暂停键贴在状态卡右侧、与它同顶。它原来写死在右侧 (1854,276)，
+		# 被写死偏移的控件不进分区表，就永远测不出它压住了别人。
+		# 放回左上角这条竖列，是因为右侧下半屏已经全给了拇指
+		# （技能弧 + 攻击键 + 模式圆 + 功能列）。
+		z["pause"] = Rect2(
+			m + MINIMAP_W + 8.0,
+			m + MINIMAP_H + TOUCH_CARD_GAP,
+			TouchLayout.PAUSE_BUTTON_SIZE.x,
+			TouchLayout.PAUSE_BUTTON_SIZE.y
 		)
-		z["hints"] = Rect2(m + 4.0, h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE - 32.0, 560.0, HINT_H)
+		# 提示行整块落在摇杆上方。HINT_H 从 24 涨到 46 之后，旧的固定 "-32" 会压到摇杆顶上。
+		z["hints"] = Rect2(
+			m + 4.0,
+			h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE - 8.0 - HINT_H,
+			560.0,
+			HINT_H
+		)
 	else:
 		# 键鼠区：状态卡贴左下、技能条贴右下，中间那片（英雄脚下）刻意留空。
 		z["hero"] = Rect2(m, h - m - HERO_H, hero_width(w), HERO_H)
-		z["hints"] = Rect2(m, h - m - HERO_H - HINT_H - 10.0, hint_width(w), HINT_H)
+		# 提示行和状态卡之间留 16px：10px 在 1600x900 缩到 1080p 窗口后只剩 6px，
+		# 视觉上两块会粘在一起，看起来像提示压住了卡片。
+		z["hints"] = Rect2(m, h - m - HERO_H - HINT_H - 16.0, hint_width(w), HINT_H)
 
 	return z

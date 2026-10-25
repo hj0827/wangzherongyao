@@ -8,6 +8,7 @@ const MapLayout = preload("res://sim/map/map_layout.gd")
 const MapData = preload("res://sim/map_data.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
 const Arena = preload("res://scripts/game/arena.gd")
+const ModelUtils = preload("res://scripts/game/model_utils.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
 
 func test_map_view_smooths_lanes_and_exposes_features() -> void:
@@ -72,7 +73,7 @@ func test_arena_builds_map_feature_props() -> void:
 	arena._build_map_features()
 	var props = arena._props_root.get_child_count()
 	gt(float(props), 40.0, "walls/bushes/camps/pits create visual props")
-	check(props >= MapLayout.WALLS.size() * 4 + MapLayout.BUSHES.size() * 8, "every feature has visible geometry")
+	check(props >= MapLayout.WALLS.size() * 4 + MapLayout.BUSHES.size() * 2, "every feature has visible geometry")
 	arena.free()
 
 func test_arena_syncs_monster_views() -> void:
@@ -119,6 +120,32 @@ func test_arena_structure_view_marks_locked_tower() -> void:
 			"vulnerable": true, "radius": 1.0,
 		}]}, false)
 		check(not shield.visible, "unlocked tower hides shield")
+	arena.free()
+
+func test_tower_model_is_slim_and_tall() -> void:
+	# 塔身太宽会把站在塔后的英雄整条盖住（玩家反馈「塔挡视野」）。
+	# 契约：视觉宽高比至少 2.8（细而尖），且血条必须悬在模型顶之上。
+	# 当前外塔 7.3 高 / 3.8 宽只有 1.92，这条必须先红。
+	var arena: Node3D = Arena.new()
+	arena._structures_root = Node3D.new()
+	arena.add_child(arena._structures_root)
+	arena._sync_structures({"entities": [{
+		"id": 21, "type": "tower", "team": "red", "x": 12.0, "y": 8.0,
+		"hp": 100.0, "max_hp": 100.0, "alive": true, "tier": "outer",
+		"vulnerable": true, "radius": 1.0,
+	}]}, true)
+	var record: Dictionary = arena._structure_views.get(21, {})
+	check(not record.is_empty(), "outer tower view created")
+	if not record.is_empty():
+		var model: Node3D = record.get("model")
+		check(model != null, "tower view keeps a reference to its model")
+		if model:
+			var box := ModelUtils.relative_aabb(model)
+			var girth := maxf(box.size.x, box.size.z)
+			gt(box.size.y, 8.2, "tower must read taller than before (got %.2f m)" % box.size.y)
+			lt(girth, 3.0, "tower body must stay slim (got %.2f m)" % girth)
+			gt(box.size.y / maxf(girth, 0.001), 2.8, "tower must look slim and pointed (aspect %.2f)" % (box.size.y / maxf(girth, 0.001)))
+			gt(float(record.get("bar_height", 0.0)), box.size.y, "tower health bar must sit above the model top")
 	arena.free()
 
 func test_arena_recall_intent_is_wired() -> void:

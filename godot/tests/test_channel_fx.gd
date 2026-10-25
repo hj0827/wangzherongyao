@@ -193,3 +193,14 @@ func test_channel_fx_progress_drives_visual_parameters() -> void:
 		near(ChannelFx.progress_clamped(-2.0), 0.0, 0.001, "负进度夹到 0")
 		near(ChannelFx.progress_clamped(3.0), 1.0, 0.001, "超界进度夹到 1")
 		gt(ChannelFx.spin_speed(kind, 0.5), 0.0, "%s 法阵始终在转" % kind)
+
+# 光柱必须是圆柱（上下同宽），不能是上小下大的锥台。
+# 锥台在俯视角下像一只倒扣的灯罩，读起来是「光在往下灌」，与「人被一束光吸上去」相反。
+func test_beam_has_uniform_radius() -> void:
+	var fx = ChannelFx.new()
+	var beam: MeshInstance3D = fx._make_beam()
+	var mesh: CylinderMesh = beam.mesh
+	check(mesh != null, "光柱有网格")
+	near(mesh.top_radius, mesh.bottom_radius, 0.001, "光柱上下半径必须相同")
+	gt(mesh.bottom_radius, 0.0, "光柱有实际半径")
+	fx.free()

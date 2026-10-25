@@ -117,7 +117,10 @@ func test_minimap_drag_emits_continuous_positions() -> void:
 	eq(pressed.size(), 1, "按下即请求一次定位")
 	minimap._drag_to(Vector2(160.0, 160.0))
 	eq(dragged.size(), 1, "拖拽过程要持续发出位置")
-	gt(dragged[0].x, 0.0, "拖向右下应对应世界正坐标")
+	# 小地图按本队朝向翻转后，不能再假设「屏幕右下 = 世界正坐标」：
+	# 断言改成「拖到哪里，该世界点就显示在哪里」。
+	near(minimap.world_to_screen(dragged[0]).distance_to(Vector2(160.0, 160.0)), 0.0, 0.01,
+		"拖到的位置必须和该世界点在图上显示的位置一致")
 	minimap._end_drag()
 	eq(finished.size(), 1, "松手发一次结束信号")
 	check(not minimap._dragging, "松手后不再处于拖拽态")
@@ -130,8 +133,10 @@ func test_minimap_drag_clamps_outside_the_panel() -> void:
 	_press(minimap, Vector2(103.0, 103.0))
 	minimap._drag_to(Vector2(600.0, -200.0))
 	eq(dragged.size(), 1, "拖出面板边界仍要继续跟随，不能中断")
-	near(dragged[0].x, MapData.BOUNDS, 0.01, "横向越界夹到地图右边界")
-	near(dragged[0].y, -MapData.BOUNDS, 0.01, "纵向越界夹到地图上边界")
+	# 拖出右上角 = 小地图右上角对应的世界角点；默认蓝方视角下是 (-X, +Y)。
+	var corner := Minimap.oriented(Vector2(MapData.BOUNDS, -MapData.BOUNDS), "blue")
+	near(dragged[0].x, corner.x, 0.01, "横向越界夹到小地图右边界")
+	near(dragged[0].y, corner.y, 0.01, "纵向越界夹到小地图上边界")
 	minimap._end_drag()
 	minimap.free()
 
@@ -172,7 +177,8 @@ func test_minimap_touch_drag_keeps_following() -> void:
 	drag.position = Vector2(150.0, 150.0)
 	minimap._gui_input(drag)
 	eq(dragged.size(), 1, "触摸拖动要持续发出位置")
-	gt(dragged[0].x, 0.0, "拖向右下对应世界正坐标")
+	near(minimap.world_to_screen(dragged[0]).distance_to(Vector2(150.0, 150.0)), 0.0, 0.01,
+		"触摸拖到的位置必须和该世界点在图上显示的位置一致")
 
 	var release := InputEventScreenTouch.new()
 	release.pressed = false
@@ -182,11 +188,15 @@ func test_minimap_touch_drag_keeps_following() -> void:
 	check(not minimap._dragging, "触摸松手后退出拖拽态")
 	minimap.free()
 
-# ---------------------------------------------------------------- 视野框
+# ---------------------------------------------------------------- 视野圈
 
-func test_minimap_camera_view_box_matches_projection() -> void:
+func test_minimap_vision_is_a_round_circle_not_a_polygon() -> void:
+	# 视野范围在小地图上是一个**圆**，不是梯形：180px 的缩略图上，梯形的四个角只是
+	# 四个尖点，一眼读不出「这就是镜头看到的范围」。
+	# 半径取「和视野矩形等面积」的那个圆 —— 外接圆按 4:3 的长边算，屏幕上会比真正
+	# 看到的范围大一圈；内切圆又反过来少报。等面积是唯一不谎报视野大小的取法。
 	var minimap := _minimap()
-	check(not minimap.has_camera_view(), "默认没有相机视野框")
+	check(not minimap.has_camera_view(), "默认没有视野圈")
 	var corners := PackedVector2Array([
 		Vector2(-10.0, -17.0), Vector2(30.0, -17.0), Vector2(30.0, 7.0), Vector2(-10.0, 7.0),
 	])
@@ -196,19 +206,25 @@ func test_minimap_camera_view_box_matches_projection() -> void:
 		"center": Vector2(10.0, -5.0),
 		"half": Vector2(20.0, 12.0),
 	})
-	check(minimap.has_camera_view(), "设置后视野框可用")
-	var polygon := minimap.camera_view_polygon()
-	eq(polygon.size(), 4, "视野框是四个角点构成的四边形")
-	for i in corners.size():
-		near(
-			polygon[i].distance_to(minimap.world_to_screen(corners[i])),
-			0.0,
-			0.01,
-			"角点必须与投影一致：%d" % i,
-		)
+	check(minimap.has_camera_view(), "设置后视野圈可用")
+	var circle := minimap.camera_view_circle()
+	check(not circle.is_empty(), "视野圈必须给出圆心和半径")
+	var center: Vector2 = circle["center"]
+	near(center.distance_to(minimap.world_to_screen(Vector2(10.0, -5.0))), 0.0, 0.01,
+		"圆心必须落在视野中心")
+	var expected := sqrt(20.0 * 12.0) * minimap._world_scale()
+	near(float(circle["radius"]), expected, 0.01,
+		"半径必须按「与视野矩形等面积」取（当前 %.2f / 期望 %.2f）" % [float(circle["radius"]), expected])
+	var outline := minimap.camera_view_outline()
+	gt(float(outline.size()), 16.0, "圆至少要 16 段，少了会看出折线")
+	for point in outline:
+		near(point.distance_to(center), expected, 0.02,
+			"轮廓上每一点到圆心的距离必须相等 —— 不等就还是多边形")
 	minimap.free()
 
-func test_minimap_camera_view_box_clamps_to_inner_square() -> void:
+func test_minimap_vision_circle_clamps_to_inner_square() -> void:
+	# 镜头贴到地图边缘时圆会超出内框：画出去会压在边框和面板底色上，
+	# 所以轮廓点要夹进内框（夹出来的直边由墙体带盖住）。
 	var minimap := _minimap()
 	var inner := Rect2(minimap._inner_origin(), Vector2(minimap._inner_size(), minimap._inner_size()))
 	minimap.set_camera_view({
@@ -219,14 +235,27 @@ func test_minimap_camera_view_box_clamps_to_inner_square() -> void:
 		"center": Vector2.ZERO,
 		"half": Vector2(400.0, 400.0),
 	})
-	var polygon := minimap.camera_view_polygon()
-	eq(polygon.size(), 4, "越界后仍是四点")
-	for point in polygon:
+	var outline := minimap.camera_view_outline()
+	gt(float(outline.size()), 16.0, "越界后仍然是完整的一圈轮廓")
+	for point in outline:
 		check(
 			point.x >= inner.position.x - 0.01 and point.x <= inner.end.x + 0.01
 			and point.y >= inner.position.y - 0.01 and point.y <= inner.end.y + 0.01,
-			"视野框角点不能画到地图内框之外",
+			"视野圈不能画到地图内框之外",
 		)
+	minimap.free()
+
+func test_minimap_vision_circle_disappears_when_the_view_is_invalid() -> void:
+	# 镜头不在场景里（切场景/首帧）时 arena 会给 valid=false：这时必须什么都不画，
+	# 而不是留一个上一次的圆停在原地。
+	var minimap := _minimap()
+	minimap.set_camera_view({"valid": true, "points": PackedVector2Array([
+		Vector2(-10.0, -17.0), Vector2(30.0, -17.0), Vector2(30.0, 7.0), Vector2(-10.0, 7.0),
+	])})
+	check(not minimap.camera_view_circle().is_empty(), "有效视野必须有圆")
+	minimap.set_camera_view({"valid": false})
+	check(minimap.camera_view_circle().is_empty(), "视野失效后不能再画圆")
+	eq(minimap.camera_view_outline().size(), 0, "视野失效后轮廓必须是空的")
 	minimap.free()
 
 # ---------------------------------------------------------------- HUD 转发
@@ -286,8 +315,12 @@ func test_hud_drag_keeps_camera_following() -> void:
 	_press(hud._minimap, Vector2(103.0, 103.0))
 	hud._minimap._drag_to(Vector2(170.0, 40.0))
 	eq(requests.size(), 2, "拖拽要持续请求相机跟随")
-	gt(requests[1].x, requests[0].x, "拖到右边世界 x 要变大")
-	lt(requests[1].y, requests[0].y, "拖到上边世界 y 要变小")
+	# 小地图按本队朝向翻转后，屏幕右/上对应的世界方向由 Minimap.oriented 决定。
+	var delta := requests[1] - requests[0]
+	var screen_right := Minimap.oriented(Vector2(1.0, 0.0), "blue")
+	var screen_up := Minimap.oriented(Vector2(0.0, -1.0), "blue")
+	gt(delta.dot(screen_right), 0.0, "拖到右边，相机要往画面上右边对应的世界方向走")
+	gt(delta.dot(screen_up), 0.0, "拖到上边，相机要往画面上边对应的世界方向走")
 	hud.free()
 
 func test_hud_pushes_camera_view_box_to_minimap() -> void:

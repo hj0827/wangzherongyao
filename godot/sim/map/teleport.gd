@@ -7,7 +7,9 @@ const MapLayout = preload("res://sim/map/map_layout.gd")
 
 const CHANNEL_TIME := 2.5
 const COOLDOWN := 45.0
-const PAD_RADIUS := 3.0
+# 阵眼半径 = 地面阵盘半径。两处各写一个 3.0 的后果是「看着站在阵里，判定却说不在」，
+# 或者反过来「站在阵外的水边还能传」。唯一真身在 MapLayout。
+const PAD_RADIUS := MapLayout.PAD_DISC_RADIUS
 const MOVE_EPSILON := 0.05
 
 static func pad_at(point: Vector2) -> Dictionary:

@@ -238,6 +238,95 @@ func test_snapshot_hero_carries_skills_gold_and_inventory() -> void:
 	eq(hero.revealed_timer, 1.2, "reveal timer survives for bush combat")
 	eq(hero.last_input_seq, 17, "acked input sequence survives for reconciliation")
 
+func _big_snapshot_payload(count: int) -> Dictionary:
+	var entities: Array = []
+	for i in count:
+		entities.append({
+			"id": i + 1,
+			"type": "minion",
+			"team": "blue" if i % 2 == 0 else "red",
+			"x": float(i) * 0.5,
+			"y": -float(i) * 0.25,
+			"hp": 320.0,
+			"max_hp": 320.0,
+			"alive": true,
+			"lane": "mid",
+			"minion_type": "melee",
+			"moving": true,
+			"speed": 4.2,
+			"radius": 0.5,
+		})
+	return {
+		"time": 512.5,
+		"mode": "team",
+		"bounds": 58.0,
+		"ended": false,
+		"winner": "",
+		"wave": 7,
+		"scores": {"blue": {"kills": 3}, "red": {"kills": 2}},
+		"entities": entities,
+	}
+
+# 33KB 的整快照如果原样下发，就是 22 个 IP 分片 + 10Hz = 325KB/s 每客户端。
+# 压缩是「丢包代价」的前置条件：包越小，分片越少，坏一个分片整包作废的概率越低。
+func test_large_snapshot_packet_is_compressed() -> void:
+	var payload := _big_snapshot_payload(200)
+	var raw_size: int = var_to_bytes(NetProtocol._envelope("snapshot", payload)).size()
+	gt(float(raw_size), 8000.0, "测试数据本身要够大，否则压缩无从谈起")
+	var bytes: PackedByteArray = NetProtocol.encode("snapshot", payload)
+	check(NetProtocol.is_compressed_frame(bytes), "大快照走压缩帧")
+	lt(float(bytes.size()), float(raw_size) / 3.0, "大快照必须压到原体积 1/3 以下")
+	var decoded: Dictionary = NetProtocol.decode(bytes)
+	check(decoded.ok, "压缩包能解开")
+	eq(decoded.type, "snapshot", "压缩后类型不变")
+	eq(decoded.payload.entities.size(), 200, "压缩后实体一个不少")
+	near(float(decoded.payload.entities[199].x), 99.5, 0.001, "压缩后数值不变")
+	eq(decoded.payload.entities[1].team, "red", "压缩后字符串不变")
+
+func test_small_control_packets_skip_compression() -> void:
+	var bytes: PackedByteArray = NetProtocol.encode("ping", {})
+	check(not NetProtocol.is_compressed_frame(bytes), "小包不压缩，保持原始 var_to_bytes 格式")
+	var decoded: Dictionary = NetProtocol.decode(bytes)
+	check(decoded.ok, "未压缩包照旧能解")
+	eq(decoded.type, "ping", "未压缩包类型正确")
+
+func test_corrupt_or_lying_compressed_frames_are_rejected() -> void:
+	var bytes: PackedByteArray = NetProtocol.encode("snapshot", _big_snapshot_payload(200))
+	var lying: PackedByteArray = bytes.duplicate()
+	# 原始长度字段被改成超大值：不能按这个值去分配/解压（防放大攻击）。
+	lying.encode_u32(1, NetProtocol.MAX_PACKET * 4)
+	check(not bool(NetProtocol.decode(lying).get("ok", false)), "谎报原始长度的包必须拒绝")
+	var truncated: PackedByteArray = bytes.slice(0, 12)
+	check(not bool(NetProtocol.decode(truncated).get("ok", false)), "被截断的压缩包必须拒绝")
+	var header_only := PackedByteArray([1, 0, 0, 0, 0])
+	check(not bool(NetProtocol.decode(header_only).get("ok", false)), "只有帧头的包必须拒绝")
+
+func test_event_packet_sanitizer_keeps_whitelisted_fields_only() -> void:
+	var clean: Dictionary = NetProtocol.sanitize_events({
+		"time": 33.0,
+		"events": [
+			{"type": "skill_cast", "hero_type": "blade", "slot": "w", "x": 1.0, "y": 2.0, "aim_x": 3.0, "aim_y": 4.0, "secret": "nope"},
+			"garbage",
+			{"type": "match_end", "winner": "blue"},
+		],
+	})
+	near(clean.time, 33.0, 0.001, "事件包带时间戳")
+	eq(clean.events.size(), 2, "非字典事件被丢弃")
+	check(not clean.events[0].has("secret"), "白名单外字段被剥掉")
+	eq(clean.events[0].type, "skill_cast", "类型保留")
+	near(float(clean.events[0].aim_x), 3.0, 0.001, "落点保留")
+	eq(clean.events[1].winner, "blue", "结算事件保留")
+
+	var many: Array = []
+	for i in 80:
+		many.append({"type": "hit", "damage": 1.0})
+	var capped: Dictionary = NetProtocol.sanitize_events({"time": 1.0, "events": many})
+	eq(capped.events.size(), NetProtocol.MAX_EVENTS, "事件数按 MAX_EVENTS 截断")
+
+func test_event_packet_rejects_junk_payload() -> void:
+	eq(NetProtocol.sanitize_events({}).events.size(), 0, "缺 events 字段给空数组")
+	eq(NetProtocol.sanitize_events({"events": "nope"}).events.size(), 0, "非数组事件给空数组")
+
 func test_room_code_sanitizer_accepts_short_codes_only() -> void:
 	eq(NetProtocol.sanitize_room_code(" ab12c "), "AB12C", "code normalized")
 	eq(NetProtocol.sanitize_room_code("AB-12C!"), "AB12C", "code strips punctuation")

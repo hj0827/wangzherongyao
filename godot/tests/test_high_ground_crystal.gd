@@ -67,6 +67,15 @@ func test_twin_guard_slots_flank_each_crystal() -> void:
 			lt(distance, 14.0, "%s双子塔守在高地近处" % team)
 			sides[str(slot.get("side", ""))] = true
 		eq(sides.size(), 2, "%s双子塔分列左右" % team)
+	# 双子塔必须守在基地**朝战场**的一侧（基地 → 地图中心方向）。
+	# 曾经用固定 (x, y) 偏移，两座塔一起落到基地背离战场的墙角（泉水背后）：
+	# 敌人从正面推上高地时，塔根本不在防线上，视觉上也是「缩在水晶后面」。
+	for team in ["blue", "red"]:
+		var home := MapData.BLUE_BASE if team == "blue" else MapData.RED_BASE
+		var toward := (Vector2.ZERO - home).normalized()
+		for slot in slots.filter(func(item): return str(item.get("team", "")) == team):
+			var offset: Vector2 = (slot.pos as Vector2) - home
+			gt(offset.dot(toward), MapData.BASE_RADIUS, "%s双子塔在基地朝战场一侧" % team)
 	# 双方基地在同一条对角线上，队伍对称是绕地图中心的 180° 旋转，
 	# 而不是 MapLayout.mirror 的 y=x 镜像（那只会把蓝方基地映射回自己）。
 	for slot in slots.filter(func(item): return str(item.get("team", "")) == "blue"):

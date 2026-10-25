@@ -1,8 +1,11 @@
 extends Control
-## 双方经济面板（Tab 计分板）。
+## 双方经济面板（Tab 计分板 / 点顶部经济条）。
 ##
 ## 布局参考王者：左右两列镜像，每列一队五人，一行一个人。
-## 一行里的信息优先级：谁 → 多少级 → K/D/补刀 → 经济 → 装备。
+## 一行分两层：上层是「谁 → 等级 → K/D/A → 补刀 → 经济 → 装备」，
+## 下层是属性行（攻击 / 法强 / 生命 / 移速 / 暴击 / 输出 / 承伤 / 推塔）。
+## 王者把输出、承伤、参团、推塔放在「数据」页；本作信息量没那么大，
+## 直接并进同一行，省一次点击。
 ## 装备格显示图标（assets/ui/items/<id>.png），缺图时退回职业色块，
 ## 不会因为美术资产没跟上就整行不显示。
 ##
@@ -13,9 +16,15 @@ const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const ItemShop = preload("res://sim/item_shop.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 
-const ROW_H := 46.0
+const ROW_H := 62.0
 const SLOT_COUNT := 6
-const SLOT_SIZE := 26.0
+const SLOT_SIZE := 24.0
+const AVATAR_SIZE := 48.0
+# 列宽。两列加起来必须装得进面板内宽（面板宽 - 28 的 content margin），
+# 否则 HBoxContainer 会去挤第一个 Label，标题首字被切掉半截。
+const NAME_W := 138.0
+const KDA_W := 100.0
+const ECON_W := 70.0
 
 const ROLE_COLORS := {
 	"坦克": Color(0.42, 0.78, 0.74),
@@ -35,6 +44,7 @@ var _red_rows: VBoxContainer
 var _blue_total: Label
 var _red_total: Label
 var _gap_label: Label
+var _rate_label: Label
 var _local_owner := ""
 var _signature := ""
 
@@ -52,22 +62,29 @@ func _build() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	visible = false
+	# 弹层必须压在所有 HUD 控件之上：小地图在左上角、商店在右上角，
+	# 面板居中展开时两者在几何上是重叠的。只靠 add_child 的顺序不够稳
+	# （HUD 之后还会插别的控件），显式抬 z。
+	z_index = 100
 
 	_root = ColorRect.new()
 	(_root as ColorRect).color = Color(0.0, 0.0, 0.0, 0.55)
 	_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# 点面板外的空白处收起 —— 弹窗的默认预期，省得玩家回去找 Tab。
+	_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	_root.gui_input.connect(_on_backdrop_input)
 	add_child(_root)
 
 	_panel = PanelContainer.new()
 	_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	var width := 1180.0 if not touch_mode else 1060.0
-	var height := 560.0 if not touch_mode else 600.0
+	var width := 1240.0 if not touch_mode else 1180.0
+	var height := 470.0 if not touch_mode else 500.0
 	_panel.offset_left = -width * 0.5
 	_panel.offset_right = width * 0.5
 	_panel.offset_top = -height * 0.5
 	_panel.offset_bottom = height * 0.5
-	_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# STOP：点击落在面板上就停住，不会冒泡到遮罩被当成「点空白」。
+	_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.97), Color(0.7, 0.55, 0.28, 0.9), 2, 12))
 	_root.add_child(_panel)
 
@@ -81,12 +98,15 @@ func _build() -> void:
 	title_row.add_theme_constant_override("separation", 16)
 	title_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	column.add_child(title_row)
-	title_row.add_child(_label("对局战绩 · 双方经济", 26, GameTheme.GOLD_LIGHT))
+	title_row.add_child(_label("对局战绩 · 双方经济", 22, GameTheme.GOLD_LIGHT))
 	_gap_label = _label("经济持平", 18, GameTheme.TEXT)
 	_gap_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_gap_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title_row.add_child(_gap_label)
-	title_row.add_child(_label("Tab 关闭", 14, GameTheme.MUTED))
+	# 分均经济：王者面板之外，玩家真正用来判断「谁在滚雪球」的指标。
+	_rate_label = _label("分均 蓝 0 · 红 0", 14, GameTheme.MUTED)
+	title_row.add_child(_rate_label)
+	title_row.add_child(_label("Tab", 13, GameTheme.MUTED))
 
 	# —— 两列 ——
 	var teams := HBoxContainer.new()
@@ -149,14 +169,15 @@ func _legend() -> Control:
 	row.add_theme_constant_override("separation", 6)
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var name_col := _label("英雄 / 等级", 12, GameTheme.MUTED)
-	name_col.custom_minimum_size.x = 168.0
+	# 头像列 + 间距 + 名字列，和图例下面的行对齐。
+	name_col.custom_minimum_size.x = AVATAR_SIZE + 4.0 + 6.0 + NAME_W
 	row.add_child(name_col)
-	var kda := _label("K / D / 补刀", 12, GameTheme.MUTED)
-	kda.custom_minimum_size.x = 110.0
+	var kda := _label("K / D / A", 12, GameTheme.MUTED)
+	kda.custom_minimum_size.x = KDA_W
 	kda.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	row.add_child(kda)
 	var econ := _label("经济", 12, GameTheme.MUTED)
-	econ.custom_minimum_size.x = 74.0
+	econ.custom_minimum_size.x = ECON_W
 	econ.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	row.add_child(econ)
 	var items := _label("装备", 12, GameTheme.MUTED)
@@ -165,27 +186,57 @@ func _legend() -> Control:
 	row.add_child(items)
 	return row
 
+# 行内边距比面板小一档：GameTheme.style 默认 14/10 会把每行撑到 80 高、576 宽，
+# 两列叠起来把面板顶到 1260，标题行反而被挤。
+func _row_style() -> StyleBoxFlat:
+	var box := GameTheme.style(Color(0.05, 0.075, 0.095, 0.75), Color(0.18, 0.22, 0.26, 0.7), 1, 6, 4, 0.3)
+	box.content_margin_left = 4
+	box.content_margin_right = 6
+	box.content_margin_top = 3
+	box.content_margin_bottom = 3
+	return box
+
 # 预建一行，避免每次刷新都重建节点。内容通过 meta 里的引用回填。
 func _make_row() -> Control:
 	var row := PanelContainer.new()
 	row.custom_minimum_size = Vector2(0.0, ROW_H)
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_theme_stylebox_override("panel", GameTheme.style(Color(0.05, 0.075, 0.095, 0.75), Color(0.18, 0.22, 0.26, 0.7), 1, 6))
+	row.add_theme_stylebox_override("panel", _row_style())
+
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 1)
+	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(stack)
 
 	var line := HBoxContainer.new()
 	line.add_theme_constant_override("separation", 6)
 	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(line)
+	stack.add_child(line)
 
-	# 职业色块：没有立绘也能一眼分职业
-	var badge := ColorRect.new()
-	badge.custom_minimum_size = Vector2(6.0, 0.0)
-	badge.color = GameTheme.MUTED
-	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	line.add_child(badge)
+	# 头像：一张脸比「战士」两个字认人快得多。边框用职业色，
+	# 于是原来那条 6px 的职业色块就并进边框里了，不占额外宽度。
+	var avatar_frame := PanelContainer.new()
+	avatar_frame.custom_minimum_size = Vector2(AVATAR_SIZE + 4.0, AVATAR_SIZE + 4.0)
+	avatar_frame.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	avatar_frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var avatar_box := StyleBoxFlat.new()
+	avatar_box.bg_color = Color(0.02, 0.03, 0.04, 0.95)
+	avatar_box.border_color = GameTheme.MUTED
+	avatar_box.set_border_width_all(2)
+	avatar_box.set_corner_radius_all(7)
+	avatar_box.set_content_margin_all(0)
+	avatar_frame.add_theme_stylebox_override("panel", avatar_box)
+	line.add_child(avatar_frame)
+
+	var avatar := TextureRect.new()
+	avatar.custom_minimum_size = Vector2(AVATAR_SIZE, AVATAR_SIZE)
+	avatar.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	avatar.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	avatar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	avatar_frame.add_child(avatar)
 
 	var name_box := VBoxContainer.new()
-	name_box.custom_minimum_size.x = 162.0
+	name_box.custom_minimum_size.x = NAME_W
 	name_box.add_theme_constant_override("separation", 0)
 	name_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	line.add_child(name_box)
@@ -195,12 +246,12 @@ func _make_row() -> Control:
 	name_box.add_child(role_label)
 
 	var kda := _label("", 14, GameTheme.TEXT)
-	kda.custom_minimum_size.x = 110.0
+	kda.custom_minimum_size.x = KDA_W
 	kda.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	line.add_child(kda)
 
 	var econ := _label("", 15, GameTheme.GOLD)
-	econ.custom_minimum_size.x = 74.0
+	econ.custom_minimum_size.x = ECON_W
 	econ.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	line.add_child(econ)
 
@@ -235,11 +286,19 @@ func _make_row() -> Control:
 		slots.add_child(cell)
 		slot_nodes.append({"cell": cell, "bg": bg, "icon": icon, "text": initial})
 
-	row.set_meta("badge", badge)
+	# 属性行：攻击 / 法强 / 生命 / 移速 / 暴击 / 输出 / 承伤 / 推塔。
+	# 王者把这部分拆到「数据」页；本作信息量小，直接并进同一行省一次点击。
+	var stats_label := _label("", 11, GameTheme.MUTED)
+	stats_label.clip_text = true
+	stack.add_child(stats_label)
+
+	row.set_meta("avatar", avatar)
+	row.set_meta("avatar_box", avatar_box)
 	row.set_meta("name", name_label)
 	row.set_meta("role", role_label)
 	row.set_meta("kda", kda)
 	row.set_meta("econ", econ)
+	row.set_meta("stats", stats_label)
 	row.set_meta("slots", slot_nodes)
 	return row
 
@@ -258,6 +317,14 @@ func set_state(board: Dictionary, local_owner: String) -> void:
 	_fill_column(_red_rows, red, "red")
 	_blue_total.text = _k(int(totals.get("blue", 0)))
 	_red_total.text = _k(int(totals.get("red", 0)))
+	# 分均经济：把「已经打了多久」折算进去，避免开局 3 分钟 1.2k 看着比
+	# 20 分钟 6k 还肥。不足一分钟按一分钟算，否则开局那几秒会炸出天文数字。
+	var minutes := maxf(float(board.get("time", 0.0)) / 60.0, 1.0)
+	if _rate_label != null:
+		_rate_label.text = "分均 蓝 %s · 红 %s" % [
+			_k(int(round(float(totals.get("blue", 0)) / minutes))),
+			_k(int(round(float(totals.get("red", 0)) / minutes))),
+		]
 	var diff := int(totals.get("blue", 0)) - int(totals.get("red", 0))
 	if absi(diff) < 50:
 		_gap_label.text = "经济持平"
@@ -273,10 +340,16 @@ func _build_signature(blue: Array, red: Array, totals: Dictionary, local_owner: 
 	var parts: Array[String] = [local_owner]
 	for side in [blue, red]:
 		for row in side:
-			parts.append("%d:%d:%d:%d:%d:%s" % [
+			parts.append("%d:%d:%d:%d:%d:%d:%d:%d:%d:%s" % [
 				int(row.get("id", 0)), int(row.get("level", 0)),
 				int(row.get("kills", 0)), int(row.get("deaths", 0)),
-				int(row.get("net_worth", 0)), ",".join(row.get("inventory", [])),
+				int(row.get("assists", 0)), int(row.get("tower_kills", 0)),
+				int(row.get("net_worth", 0)),
+				# 伤害取到 10 的整数倍：每帧都在涨的浮点数会让整张表每帧重排，
+				# 面板是看一眼的东西，不需要逐帧刷新。
+				int(float(row.get("damage_dealt", 0.0)) / 10.0),
+				int(float(row.get("damage_taken", 0.0)) / 10.0),
+				",".join(row.get("inventory", [])),
 			])
 	parts.append("%d/%d" % [int(totals.get("blue", 0)), int(totals.get("red", 0))])
 	return "|".join(parts)
@@ -292,19 +365,27 @@ func _fill_column(rows: VBoxContainer, data: Array, team: String) -> void:
 		var entry: Dictionary = data[i]
 		var role := str(entry.get("role", ""))
 		var accent: Color = ROLE_COLORS.get(role, GameTheme.MUTED)
-		(row.get_meta("badge") as ColorRect).color = accent
-
-		var name_label: Label = row.get_meta("name")
 		# 账本里的 name 是玩家昵称（p1 / 小明），计分板要的是英雄名。
 		# 英雄中文名属于表现层，所以在这里用 hero_type 翻译，而不是塞进 sim 快照。
 		var hero_type := str(entry.get("hero_type", "blade"))
+		var alive := bool(entry.get("alive", true))
+		var avatar: TextureRect = row.get_meta("avatar")
+		var avatar_tex := GameTheme.hero_avatar(hero_type, int(AVATAR_SIZE))
+		avatar.texture = avatar_tex
+		avatar.visible = avatar_tex != null
+		# 边框 = 职业色（原来那条 6px 色块的位置让给头像了）。
+		(row.get_meta("avatar_box") as StyleBoxFlat).border_color = accent
+		# 阵亡时头像压暗，和名字变灰是同一套语言。
+		avatar.modulate = Color(1.0, 1.0, 1.0) if alive else Color(0.42, 0.44, 0.5)
+
+		var name_label: Label = row.get_meta("name")
 		var display := str(HeroDefs.get_hero(hero_type).get("name", hero_type))
 		if str(entry.get("owner_id", "")) == _local_owner:
 			display = "%s（你）" % display
-		if not bool(entry.get("alive", true)):
+		if not alive:
 			display = "%s  阵亡 %.0fs" % [display, float(entry.get("respawn_timer", 0.0))]
 		name_label.text = "Lv.%d  %s" % [int(entry.get("level", 1)), display]
-		name_label.add_theme_color_override("font_color", GameTheme.TEXT if bool(entry.get("alive", true)) else GameTheme.MUTED)
+		name_label.add_theme_color_override("font_color", GameTheme.TEXT if alive else GameTheme.MUTED)
 
 		var role_line := "%s · %s" % [role, _lane_name(str(entry.get("lane", "")))]
 		var owner_name := str(entry.get("name", ""))
@@ -315,9 +396,12 @@ func _fill_column(rows: VBoxContainer, data: Array, team: String) -> void:
 
 		var kda: Label = row.get_meta("kda")
 		kda.text = "%d / %d / %d" % [
-			int(entry.get("kills", 0)), int(entry.get("deaths", 0)), int(entry.get("cs", 0)),
+			int(entry.get("kills", 0)), int(entry.get("deaths", 0)), int(entry.get("assists", 0)),
 		]
 		(row.get_meta("econ") as Label).text = _k(int(entry.get("net_worth", 0)))
+		var stats_label: Label = row.get_meta("stats")
+		if stats_label != null:
+			stats_label.text = _stats_text(entry)
 
 		var slots: Array = row.get_meta("slots")
 		var inventory: Array = entry.get("inventory", [])
@@ -346,6 +430,31 @@ func _fill_column(rows: VBoxContainer, data: Array, team: String) -> void:
 				bg.color = _category_color(str(item.get("category", "")))
 		for s in range(inventory.size(), slots.size()):
 			(slots[s].cell as Control).visible = false
+
+# 属性行：把「这个人到底强在哪」压成一行。
+# 零值项不占宽度（法师不需要看「法强 0」），但补刀/攻击/生命/移速常显 ——
+# 少了它们，面板就退回成一张只有经济的表。
+func _stats_text(entry: Dictionary) -> String:
+	var parts: Array[String] = []
+	parts.append("补刀 %d" % int(entry.get("cs", 0)))
+	parts.append("攻击 %d" % int(round(float(entry.get("attack_damage", 0.0)))))
+	var ap := float(entry.get("ability_power", 0.0))
+	if ap > 0.5:
+		parts.append("法强 %d" % int(round(ap)))
+	parts.append("生命 %d" % int(round(float(entry.get("max_hp", 0.0)))))
+	parts.append("移速 %.1f" % float(entry.get("speed", 0.0)))
+	var crit := float(entry.get("crit_rate", 0.0))
+	if crit > 0.001:
+		parts.append("暴击 %d%%" % int(round(crit * 100.0)))
+	parts.append("输出 %s" % _amount(float(entry.get("damage_dealt", 0.0))))
+	parts.append("承伤 %s" % _amount(float(entry.get("damage_taken", 0.0))))
+	parts.append("推塔 %d" % int(entry.get("tower_kills", 0)))
+	return " · ".join(parts)
+
+func _amount(value: float) -> String:
+	if value >= 1000.0:
+		return "%.1fk" % (value / 1000.0)
+	return str(int(round(value)))
 
 func _lane_name(lane: String) -> String:
 	match lane:
@@ -376,6 +485,15 @@ func _k(value: int) -> String:
 	if value >= 1000:
 		return "%.1fk" % (float(value) / 1000.0)
 	return str(value)
+
+func _on_backdrop_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		var click := event as InputEventMouseButton
+		if click.pressed and click.button_index == MOUSE_BUTTON_LEFT:
+			close()
+	elif event is InputEventScreenTouch:
+		if (event as InputEventScreenTouch).pressed:
+			close()
 
 func toggle() -> void:
 	if not _built:

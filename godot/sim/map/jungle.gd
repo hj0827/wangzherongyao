@@ -33,7 +33,6 @@ static func monster_stats(camp: Dictionary) -> Dictionary:
 		"attack_damage": damage,
 		"attack_range": 1.8,
 		"attack_interval": 1.4,
-		"aggro_range": 5.5,
 		"leash_range": 11.0,
 		"move_speed": 3.4,
 		"respawn_time": RESPAWN_TIME,

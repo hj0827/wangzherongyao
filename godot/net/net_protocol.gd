@@ -15,6 +15,15 @@ const MODES := ["duel", "team"]
 const ATTACK_MODES := ["default", "minion", "tower"]
 const SUMMONER_SPELLS := ["flash", "execute", "cleanse", "heal"]
 const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster"]
+# 压缩帧：1 字节编解码标记 + 4 字节原始长度 + ZSTD 数据。
+# 不压缩的包保持 var_to_bytes 原样，首字节是 Variant 类型号（Dictionary = 27），
+# 与压缩标记 1 天然不冲突，所以两种格式在线上共存、不会误判。
+# ZSTD 是三种内建算法里唯一双向都便宜的：33KB 快照压 0.35ms、解 0.04ms，
+# 而 FASTLZ 解压要 11ms、DEFLATE 压缩要 8.6ms，都会在 30Hz 的主循环里露出毛刺。
+const CODEC_ZSTD := 1
+const CODEC_HEADER := 5
+# 小于这个体积不压：控制包只有几十字节，压了反而多 5 字节帧头。
+const COMPRESS_MIN_BYTES := 512
 const TYPES := [
 	"hello",
 	"welcome",
@@ -23,6 +32,7 @@ const TYPES := [
 	"start_match",
 	"input",
 	"snapshot",
+	"events",
 	"peer_joined",
 	"leave",
 	"peer_left",
@@ -63,14 +73,39 @@ static func _envelope(type: String, payload: Variant) -> Dictionary:
 static func encode(type: String, payload: Dictionary) -> PackedByteArray:
 	if not is_valid_type(type):
 		return PackedByteArray()
-	return var_to_bytes(_envelope(type, payload))
+	var raw: PackedByteArray = var_to_bytes(_envelope(type, payload))
+	if raw.size() < COMPRESS_MIN_BYTES:
+		return raw
+	var packed: PackedByteArray = raw.compress(FileAccess.COMPRESSION_ZSTD)
+	if packed.is_empty() or packed.size() + CODEC_HEADER >= raw.size():
+		return raw
+	var frame := PackedByteArray()
+	frame.resize(CODEC_HEADER)
+	frame[0] = CODEC_ZSTD
+	frame.encode_u32(1, raw.size())
+	frame.append_array(packed)
+	return frame
+
+static func is_compressed_frame(bytes: PackedByteArray) -> bool:
+	return not bytes.is_empty() and int(bytes[0]) == CODEC_ZSTD
 
 static func decode(bytes: PackedByteArray) -> Dictionary:
 	if bytes.is_empty():
 		return {"ok": false, "error": "empty"}
 	if bytes.size() > MAX_PACKET:
 		return {"ok": false, "error": "too_large"}
-	var value: Variant = bytes_to_var(bytes)
+	var raw := bytes
+	if is_compressed_frame(bytes):
+		if bytes.size() <= CODEC_HEADER:
+			return {"ok": false, "error": "decode_failed"}
+		var original_size := int(bytes.decode_u32(1))
+		# 谎报长度会直接变成一次大分配，超过上限一律当坏包。
+		if original_size <= 0 or original_size > MAX_PACKET:
+			return {"ok": false, "error": "decode_failed"}
+		raw = bytes.slice(CODEC_HEADER).decompress(original_size, FileAccess.COMPRESSION_ZSTD)
+		if raw.size() != original_size:
+			return {"ok": false, "error": "decode_failed"}
+	var value: Variant = bytes_to_var(raw)
 	if not (value is Dictionary):
 		return {"ok": false, "error": "decode_failed"}
 	var envelope: Dictionary = value
@@ -219,13 +254,33 @@ static func sanitize_snapshot(raw: Variant) -> Dictionary:
 		},
 	}
 
+# 离散事件包：与状态快照分开走可靠通道。
+# 状态快照丢了下一格就覆盖，事件丢一次就是永久缺失（客机不会播胜利曲、不会弹播报）。
+# 字段白名单复用 _sanitize_event，避免同一事件在两条路径里解析出不同结果。
+static func sanitize_events(raw: Variant) -> Dictionary:
+	var payload: Dictionary = raw if raw is Dictionary else {}
+	var events: Array = []
+	var source: Variant = payload.get("events", [])
+	if source is Array:
+		for item in source:
+			if events.size() >= MAX_EVENTS:
+				break
+			var event := _sanitize_event(item)
+			if not event.is_empty():
+				events.append(event)
+	return {
+		"time": clampf(_number(payload.get("time", 0.0)), 0.0, 86400.0),
+		"events": events,
+	}
+
 # 计分板账本：只放公开统计，不放坐标。
 # 总量在这里按行重算，不采信对端上报的 net_worth 合计。
 static func _sanitize_board(raw: Variant) -> Dictionary:
-	var board := {"blue": [], "red": [], "net_worth": {"blue": 0, "red": 0}}
+	var board := {"blue": [], "red": [], "net_worth": {"blue": 0, "red": 0}, "time": 0.0}
 	if not (raw is Dictionary):
 		return board
 	var source: Dictionary = raw
+	board["time"] = clampf(_number(source.get("time", 0.0)), 0.0, 100000.0)
 	for side in ["blue", "red"]:
 		var rows: Array = []
 		var raw_rows: Variant = source.get(side, [])
@@ -263,9 +318,21 @@ static func _sanitize_board(raw: Variant) -> Dictionary:
 					"level": clampi(int(_number(row.get("level", 1))), 1, 30),
 					"kills": clampi(int(_number(row.get("kills", 0))), 0, 9999),
 					"deaths": clampi(int(_number(row.get("deaths", 0))), 0, 9999),
+					"assists": clampi(int(_number(row.get("assists", 0))), 0, 9999),
 					"cs": clampi(int(_number(row.get("cs", 0))), 0, 100000),
 					"gold": gold,
 					"net_worth": clampi(gold + item_value, 0, 2000000),
+					# 经济面板的明细字段。少一项就是「客机面板永远显示 0」，
+					# 而且不报错 —— 加字段时务必和 _snapshot_board 一一对齐。
+					"item_value": clampi(item_value, 0, 2000000),
+					"damage_dealt": clampf(_number(row.get("damage_dealt", 0.0)), 0.0, 100000000.0),
+					"damage_taken": clampf(_number(row.get("damage_taken", 0.0)), 0.0, 100000000.0),
+					"tower_kills": clampi(int(_number(row.get("tower_kills", 0))), 0, 99),
+					"attack_damage": clampf(_number(row.get("attack_damage", 0.0)), 0.0, 100000.0),
+					"ability_power": clampf(_number(row.get("ability_power", 0.0)), 0.0, 100000.0),
+					"max_hp": clampf(_number(row.get("max_hp", 0.0)), 0.0, 1000000.0),
+					"speed": clampf(_number(row.get("speed", 0.0)), 0.0, 100.0),
+					"crit_rate": clampf(_number(row.get("crit_rate", 0.0)), 0.0, 5.0),
 					"alive": _flag(row.get("alive", true)),
 					"respawn_timer": clampf(_number(row.get("respawn_timer", 0.0)), 0.0, 600.0),
 					"inventory": inventory,
@@ -398,6 +465,8 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["shield"] = clampf(_number(source.get("shield", 0.0)), 0.0, 1000000.0)
 		entity["shield_max"] = clampf(_number(source.get("shield_max", 0.0)), 0.0, 1000000.0)
 		entity["guards_alive"] = clampi(int(_number(source.get("guards_alive", 0))), 0, 2)
+		# 主堡射程（9 米）：范围圈在客机上是按这个值画的，白名单漏了就会画成塔的 8 米。
+		entity["range"] = clampf(_number(source.get("range", 0.0)), 0.0, 64.0)
 	elif type == "monster":
 		entity["monster_type"] = _short_string(str(source.get("monster_type", "wolf")), 24)
 		entity["camp_id"] = _short_string(str(source.get("camp_id", "")), 32)
@@ -424,7 +493,7 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		"victim_name", "victim_hero_type", "victim_team",
 		"tier", "side", "guards_left", "buff", "objective_id", "name",
 		"pad", "to_x", "to_y", "spell_id", "caster_id",
-		"killer_id", "victim_id", "amount",
+		"killer_id", "victim_id", "amount", "minion_type", "source_type", "target_type",
 		"announcement", "streak_title", "buy_item", "sell_slot", "crit",
 	]:
 		if not source.has(key):

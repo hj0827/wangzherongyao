@@ -8,7 +8,7 @@ const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 
 const MODES := [
-	{"id": "default", "label": "常规"},
+	{"id": "default", "label": "普攻"},
 	{"id": "minion", "label": "补刀"},
 	{"id": "tower", "label": "推塔"},
 ]

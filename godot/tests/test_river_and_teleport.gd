@@ -7,6 +7,7 @@ extends "res://tests/test_base.gd"
 const MatchSim = preload("res://sim/match_sim.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const MapData = preload("res://sim/map_data.gd")
+const Collision = preload("res://sim/map/collision.gd")
 const River = preload("res://sim/map/river.gd")
 const Teleport = preload("res://sim/map/teleport.gd")
 const Vision = preload("res://sim/map/vision.gd")
@@ -52,7 +53,7 @@ func test_river_spirits_spawn_after_delay_and_are_mirrored() -> void:
 		eq(str(spirit.team), "neutral", "河道之灵中立")
 		check(bool(spirit.get("river_spirit", false)), "河道之灵带专属标记")
 	var mirrored: Vector2 = MapLayout.mirror(spirits[0].pos)
-	check((spirits[1].pos as Vector2).distance_to(mirrored) < 0.01, "两只河道之灵关于 y=x 镜像")
+	check((spirits[1].pos as Vector2).distance_to(mirrored) < 0.01, "两只河道之灵关于 y=-x 镜像")
 	near(float(sim.state.river.spawn_timer), 0.0, 0.001, "刷新后计时归零")
 
 func test_killing_river_spirit_grants_reveal_and_xp() -> void:
@@ -129,12 +130,87 @@ func test_teleport_pads_pair_across_river() -> void:
 	check(not second.is_empty(), "传送阵能查到对端")
 	if not second.is_empty():
 		eq(str(Teleport.partner_of(str(second.id)).get("id", "")), str(first.id), "对端关系双向")
-		check((second.pos as Vector2).distance_to(MapLayout.mirror(first.pos)) < 0.01, "两座传送阵关于 y=x 镜像")
+		# 对称口径是**绕地图中心 180°**（-p），不是 y=-x 镜像。
+		# 和营地犯过的是同一个错：mirror 保持 a = x - y 不变，也就是「同一队的半场」。
+		# 用 mirror 配对的结果是两座阵都落在蓝方河岸 —— 红方要过河才能用，
+		# 而这种不对称在俯视图上根本看不出来（两侧各有一座，位置还"挺对称"）。
+		check((second.pos as Vector2).distance_to(-(first.pos as Vector2)) < 0.01, "两座传送阵绕地图中心 180° 对称")
+		check(
+			signf((second.pos as Vector2).x - (second.pos as Vector2).y)
+				!= signf((first.pos as Vector2).x - (first.pos as Vector2).y),
+			"两座传送阵分处两个半场（a = x - y 异号）"
+		)
 	for pad in pads:
 		var point: Vector2 = pad.pos
-		check(absf(point.x + point.y) * 0.70710678 <= MapData.RIVER_HALF_WIDTH, "传送阵位于河道内")
+		var from_river := absf(point.x - point.y) * 0.70710678 - MapData.RIVER_HALF_WIDTH
+		check(
+			from_river - MapLayout.PAD_DISC_RADIUS > 0.3,
+			"传送阵盘必须整块落在岸上（离水面 %.2f 米）" % (from_river - MapLayout.PAD_DISC_RADIUS)
+		)
+		# 阵盘也不能压兵线路面：3 厘米厚的实心圆盘盖到柏油上是「贴地塑料片」，
+		# 而且会和路面 z-fighting。
+		var from_lane := MapLayout.distance_to_lanes(point) - MapData.LANE_HALF_WIDTH
+		check(
+			from_lane - MapLayout.PAD_DISC_RADIUS > 0.3,
+			"传送阵盘不压兵线路面（离路缘 %.2f 米）" % (from_lane - MapLayout.PAD_DISC_RADIUS)
+		)
+		# 阵心本身要能站人：有墙的地方点不进去，阵就永远用不了。
+		check(not Collision.is_blocked(point, 0.55), "阵心可以站人")
 		check(not Teleport.pad_at(point).is_empty(), "站在阵内能识别传送阵")
 	check(Teleport.pad_at(Vector2(0.0, 0.0)).is_empty(), "阵外不识别")
+
+func test_vegetation_keeps_a_canopy_clearance_around_every_pad() -> void:
+	# 截图里阵盘正中长着一棵树：避让半径只按阵盘半径 3.0 算，
+	# 而树冠的水平半径就有 2~3.5 米 —— 树干站在盘边 1 米外，树冠照样盖住整个阵。
+	# 契约：布景避让要按**树冠**而不是树干留白，阵盘半径之外再加一圈树冠空间。
+	var arena: Node3D = Arena.new()
+	arena._props_root = Node3D.new()
+	arena.add_child(arena._props_root)
+	gt(float(MapLayout.PAD_CANOPY_CLEARANCE), 2.0, "树冠留白至少 2 米，否则树冠会探进阵里")
+	for pad in MapLayout.TELEPORT_PADS:
+		var point: Vector2 = pad.pos
+		check(
+			not bool(arena.call("_feature_clear", point, 2.0)),
+			"阵盘正中不能长布景：%s" % str(pad.id)
+		)
+		check(
+			not bool(arena.call("_feature_clear", point + Vector2(0.0, MapLayout.PAD_DISC_RADIUS + 2.5), 2.0)),
+			"阵盘边缘一圈也不该种树（树冠会盖上来）：%s" % str(pad.id)
+		)
+		# 反向对照：远在树冠之外的点至少有一部分是能长东西的 ——
+		# 否则上面的断言只是「这个函数永远返回 false」，等于什么都没测。
+		var clear := 0
+		for i in 36:
+			var angle := TAU * float(i) / 36.0
+			var ring := point + Vector2(cos(angle), sin(angle)) * (MapLayout.PAD_DISC_RADIUS + MapLayout.PAD_CANOPY_CLEARANCE + 6.0)
+			if bool(arena.call("_feature_clear", ring, 2.0)):
+				clear += 1
+		gt(float(clear), 0.0, "阵外远处必须还有能长布景的地方：%s" % str(pad.id))
+	arena.free()
+
+func test_random_props_keep_clear_of_the_pads() -> void:
+	# 阵盘从河心挪到岸上之后立刻暴露的一个问题：岸上是有随机树木 / 石头的，
+	# 而布景的避让清单里只写了墙、草丛、营地、首领坑 —— 没有传送阵。
+	# 结果是第一版截图里正有一棵树长在阵盘正中。
+	var arena: Node3D = Arena.new()
+	for pad in MapLayout.TELEPORT_PADS:
+		check(
+			not arena._feature_clear(pad.pos, 1.0),
+			"阵心不能长树：%s" % str(pad.id)
+		)
+		# 阵盘边缘也要干净，不然树冠会压进圈里。
+		var rim: Vector2 = pad.pos + Vector2(MapLayout.PAD_DISC_RADIUS * 0.7, 0.0)
+		check(
+			not arena._feature_clear(rim, 1.0),
+			"阵盘边缘不能长树：%s" % str(pad.id)
+		)
+	# 反例：阵外 8 米必须有布景自由，否则等于把整片野区的植被都关了。
+	check(
+		arena._feature_clear(MapLayout.TELEPORT_PADS[0].pos + Vector2(0.0, 8.0), 0.0)
+			or arena._feature_clear(MapLayout.TELEPORT_PADS[0].pos + Vector2(8.0, 0.0), 0.0),
+		"阵外仍然允许布景"
+	)
+	arena.free()
 
 func test_teleport_channels_to_partner_and_starts_cooldown() -> void:
 	var sim := _sim()

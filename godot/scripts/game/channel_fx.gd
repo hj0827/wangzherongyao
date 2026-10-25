@@ -157,8 +157,10 @@ func _make_ring(inner: float, outer: float, radius: float) -> MeshInstance3D:
 func _make_beam() -> MeshInstance3D:
 	var beam := MeshInstance3D.new()
 	var cylinder := CylinderMesh.new()
-	# 高度 1 的锥台，靠 scale.y 拉伸，避免每帧重建网格。
-	cylinder.top_radius = BEAM_BASE_RADIUS * 0.32
+	# 高度 1 的圆柱，靠 scale.y 拉伸，避免每帧重建网格。
+	# 上下必须同半径。锥台（上小下大）在俯视角下像一只倒扣的灯罩，
+	# 读起来是「光在往下灌」，与「人被一束光吸上去」正好相反。
+	cylinder.top_radius = BEAM_BASE_RADIUS
 	cylinder.bottom_radius = BEAM_BASE_RADIUS
 	cylinder.height = 1.0
 	cylinder.radial_segments = 28

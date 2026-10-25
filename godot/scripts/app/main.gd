@@ -12,6 +12,12 @@ const CinematicBackground = preload("res://scripts/ui/cinematic_background.gd")
 const AudioDirector = preload("res://scripts/game/audio_director.gd")
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const DepthCard = preload("res://scripts/ui/depth_card.gd")
+const OrnateTitle = preload("res://scripts/ui/ornate_title.gd")
+const OrnateFrame = preload("res://scripts/ui/ornate_frame.gd")
+const OrnamentRule = preload("res://scripts/ui/ornament_rule.gd")
+const RibbonLayer = preload("res://scripts/ui/ribbon_layer.gd")
+const MenuLayout = preload("res://scripts/ui/menu_layout.gd")
+const VideoLineCycle = preload("res://scripts/ui/video_line_cycle.gd")
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
 
 # 选人界面按五大职业排列：坦克 / 战士 / 刺客 / 法师 / 射手
@@ -57,6 +63,11 @@ var _arena: Node3D = null
 var _ui: CanvasLayer
 var _screen_root: Control
 var _background: Control
+# 菜单的丝带层 / 战场面板 / 入口按钮：面板矩形要回填给丝带层（走位跟着面板算），
+# 按钮要按键取回（测试与键盘导航都靠这个稳定的键）。
+var _ribbon_layer: Control = null
+var _menu_panel: PanelContainer = null
+var _menu_buttons := {}
 # 音频导演挂在应用壳上（菜单 / 选人 / 大厅 / 战斗共用一套声道）：
 # 进战斗时是把同一台混音台换曲，不会出现菜单音乐和战斗音乐叠着响。
 var _audio: Node = null
@@ -64,6 +75,8 @@ var _audio: Node = null
 var _hero_cards := {}
 var _hero_marks := {}
 var _hero_videos := {}
+# 每个英雄一条「台词只念一遍」的循环状态：第一轮带原声，之后每轮静音。
+var _hero_video_cycles := {}
 var _hero_confirm: Button
 var _quote_banner: PanelContainer = null
 var _quote_label: Label = null
@@ -123,12 +136,27 @@ func _process(_delta: float) -> void:
 	elif screen == "lobby" and now >= _next_refresh:
 		_next_refresh = now + 250
 		_show_lobby()
+	if screen == "menu":
+		_sync_ribbon_focus()
+	_advance_hero_video_lines()
+
+## 卡面视频是 loop 的，台词不该每 7 秒重念一遍：
+## 走完第一轮就把那一路播放器静音，直到这个英雄被重新选中（cycle.reset()）。
+func _advance_hero_video_lines() -> void:
+	for hero_type in _hero_videos:
+		var video: VideoStreamPlayer = _hero_videos[hero_type]
+		var cycle: VideoLineCycle = _hero_video_cycles.get(hero_type)
+		if video == null or cycle == null or not video.is_playing():
+			continue
+		if cycle.sample(video.stream_position):
+			video.volume_db = cycle.volume_db()
 
 func _connect_session() -> void:
 	session.state_changed.connect(_on_session_state)
 	session.room_updated.connect(_on_room_updated)
 	session.match_started.connect(_on_match_started)
 	session.snapshot_received.connect(_on_network_snapshot)
+	session.events_received.connect(_on_network_events)
 	session.input_received.connect(_on_network_input)
 	session.peer_left.connect(_on_network_peer_left)
 	session.error_received.connect(_on_session_error)
@@ -169,6 +197,13 @@ func _show_menu() -> void:
 	if session != null and session.state not in ["idle", "match"]:
 		session.close()
 
+	# 丝带层必须先入树：Godot 按子节点顺序绘制，排在内容后面就会被面板整块盖住。
+	# 它的走位要按面板矩形算，所以先建节点，等排版完成再把矩形回填（见 _sync_ribbon_focus）。
+	_ribbon_layer = RibbonLayer.new()
+	_ribbon_layer.name = "Ribbons"
+	_ribbon_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_screen_root.add_child(_ribbon_layer)
+
 	var margin := _full_margin(86, 62)
 	_screen_root.add_child(margin)
 	var row := HBoxContainer.new()
@@ -182,13 +217,8 @@ func _show_menu() -> void:
 
 	var kicker := _make_label("O R I G I N A L   C A N Y O N   M O B A", 15, GameTheme.GOLD)
 	left.add_child(kicker)
-	var title := _make_label("烽 火 峡 谷", 112, GameTheme.GOLD_LIGHT)
-	title.add_theme_font_override("font", GameTheme.FONT_DISPLAY)
-	title.add_theme_color_override("font_outline_color", Color(0.02, 0.02, 0.015, 0.95))
-	title.add_theme_constant_override("outline_size", 10)
-	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
-	title.add_theme_constant_override("shadow_offset_x", 4)
-	title.add_theme_constant_override("shadow_offset_y", 6)
+	# 鎏金浮雕字 + 匾额花边：层次与花边都在 ornate_title 里，这里只给文字和字号。
+	var title := OrnateTitle.build("烽 火 峡 谷", 112)
 	left.add_child(title)
 
 	var subtitle := _make_label("原创峡谷竞技 · 单机试炼 · 双人联机 · 五人军团", 19, GameTheme.TEXT)
@@ -224,39 +254,65 @@ func _show_menu() -> void:
 	right.add_theme_constant_override("separation", 22)
 	row.add_child(right)
 
-	var panel: PanelContainer = DepthCard.build(
-		Color(0.018, 0.036, 0.052, 0.93), Color(0.55, 0.43, 0.24, 0.62), 14, 22, 30
-	)
-	right.add_child(panel)
-	var box: VBoxContainer = panel.get_meta("box")
-	box.add_theme_constant_override("separation", 10)
+	# 面板故意做到 0.82 半透：丝带从它底下穿过时，要能隐约看见绸子 ——
+	# 这一层透明度就是「面板浮在丝带上面」和「按钮贴在背景上」的分界线。
+	_menu_panel = DepthCard.build(
+		Color(0.014, 0.032, 0.048, 0.82), Color(0.55, 0.43, 0.24, 0.62), 12, 24, 34
+	) as PanelContainer
+	right.add_child(_menu_panel)
+	var glass := _glass_light()
+	var depth_layer := _menu_panel.get_node_or_null("Depth")
+	if depth_layer != null:
+		# 挂进 Depth 层（普通 Control，不吃容器排版）：PanelContainer 会把直接子节点
+		# 全部拉满，透光带就变成铺满整块面板的渐变，位置全丢。
+		depth_layer.add_child(glass)
+		depth_layer.move_child(glass, 0)
 
-	box.add_child(_make_label("选 择 战 场", 22, GameTheme.GOLD_LIGHT))
-	box.add_child(_divider())
-	var modes := [
-		{"text": "单人试炼    ·    1 V 1", "mode": "duel", "online": false},
-		{"text": "人机军团    ·    5 V 5", "mode": "team", "online": false},
-		{"text": "双人联机    ·    1 V 1", "mode": "duel", "online": true},
-		{"text": "五人联机    ·    5 V 5", "mode": "team", "online": true},
-	]
+	var box: VBoxContainer = _menu_panel.get_meta("box")
+	box.add_theme_constant_override("separation", 8)
+
+	var head := HBoxContainer.new()
+	head.name = "PanelHead"
+	head.add_theme_constant_override("separation", 12)
+	box.add_child(head)
+	var panel_title := _make_label("选 择 战 场", 21, GameTheme.GOLD_LIGHT)
+	panel_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(panel_title)
+	head.add_child(_make_label("SELECT ARENA", 10, Color(0.48, 0.40, 0.29)))
+	box.add_child(OrnamentRule.build(-1.0, 12.0))
+
 	var mode_buttons: Array[Control] = []
-	for entry in modes:
-		var button := _menu_button(entry.text)
-		if bool(entry.online):
-			button.add_theme_color_override("font_color", GameTheme.GOLD_LIGHT)
-		button.pressed.connect(_on_mode_pressed.bind(entry.mode, entry.online))
-		box.add_child(button)
-		mode_buttons.append(button)
-	box.add_child(_make_label("联机模式通过局域网自动发现房间，无需服务器。", 12, GameTheme.MUTED))
+	for group in MenuLayout.groups():
+		box.add_child(_group_header(group))
+		for entry in (group as Dictionary).get("entries", []):
+			var row_entry: Dictionary = entry
+			# 只有主推进口给金边 + 竖条：四个按钮一样重，等于四个都不是重点。
+			var button := _menu_button(
+				MenuLayout.label(row_entry), MenuLayout.emphasis(row_entry) >= 0.99
+			)
+			button.pressed.connect(_on_mode_pressed.bind(
+				str(row_entry.get("mode")), bool(row_entry.get("online"))
+			))
+			_menu_buttons[str(row_entry.get("key"))] = button
+			box.add_child(button)
+			mode_buttons.append(button)
+		if str(group.get("key")) != "online":
+			var gap := Control.new()
+			gap.name = "GroupGap"
+			gap.custom_minimum_size = Vector2(0, 8)
+			box.add_child(gap)
+
+	box.add_child(_make_label("联机通过局域网自动发现房间，无需服务器。", 12, GameTheme.MUTED))
 
 	var footer := _make_label("原型版本 0.9   ·   Godot 4.7   ·   本地权威模拟", 12, Color(0.62, 0.7, 0.76, 0.88))
 	right.add_child(footer)
 
-	# 入场：文字先亮起，卡片随后浮出，按钮逐个落下
-	_fade_in([left], 0.0)
-	_fade_in([panel], 0.08)
-	_fade_in(mode_buttons, 0.16, 0.05)
-	_fade_in([footer], 0.32)
+	# 入场：丝带先浮出来，文字随后亮起，卡片再浮出，按钮逐个落下
+	_fade_in([_ribbon_layer], 0.0)
+	_fade_in([left], 0.06)
+	_fade_in([_menu_panel], 0.12)
+	_fade_in(mode_buttons, 0.20, 0.05)
+	_fade_in([footer], 0.36)
 
 func _on_mode_pressed(mode: String, online: bool) -> void:
 	_pending_mode = mode
@@ -272,6 +328,7 @@ func _show_hero_select() -> void:
 	_hero_cards.clear()
 	_hero_marks.clear()
 	_hero_videos.clear()
+	_hero_video_cycles.clear()
 
 	var margin := _full_margin(64, 48)
 	_screen_root.add_child(margin)
@@ -377,6 +434,7 @@ func _make_hero_card(hero_type: String) -> PanelContainer:
 		video_player.visible = false
 		video_holder.add_child(video_player)
 		_hero_videos[hero_type] = video_player
+		_hero_video_cycles[hero_type] = VideoLineCycle.new()
 		# 16:9 素材按「cover」裁切：超宽屏也不会把人物横向拉扁。
 		preview_box.resized.connect(_fit_hero_video.bind(preview_box, video_player))
 		_fit_hero_video(preview_box, video_player)
@@ -483,6 +541,12 @@ func _refresh_hero_selection() -> void:
 						video.stream = load(video_path)
 				video.visible = video.stream != null
 				if video.visible and is_inside_tree() and not video.is_playing():
+					# 每次「选中」都从带台词的第一轮重新开始，之后的循环自动静音。
+					# 只有真的重新开始播才 reset：反复点同一张卡不会把台词念个没完。
+					var cycle: VideoLineCycle = _hero_video_cycles.get(hero_type)
+					if cycle != null:
+						cycle.reset()
+						video.volume_db = cycle.volume_db()
 					video.play()
 			else:
 				video.visible = false
@@ -1076,6 +1140,10 @@ func _on_network_snapshot(snapshot: Dictionary) -> void:
 	if screen == "game" and is_instance_valid(_arena):
 		_arena.receive_snapshot(snapshot)
 
+func _on_network_events(events: Array) -> void:
+	if screen == "game" and is_instance_valid(_arena):
+		_arena.receive_events(events)
+
 func _on_network_input(peer_id: int, input: Dictionary) -> void:
 	if screen == "game" and is_instance_valid(_arena):
 		_arena.apply_remote_input(peer_id, input)
@@ -1176,6 +1244,7 @@ func _clear_screen() -> void:
 	_hero_cards.clear()
 	_hero_marks.clear()
 	_hero_videos.clear()
+	_hero_video_cycles.clear()
 	_hero_confirm = null
 	_quote_banner = null
 	_quote_label = null
@@ -1183,6 +1252,9 @@ func _clear_screen() -> void:
 	_name_input = null
 	_offer_box = null
 	_lobby_status = null
+	_ribbon_layer = null
+	_menu_panel = null
+	_menu_buttons.clear()
 
 func _queue_free_tree(node: Node) -> void:
 	# 逐节点标记：只 queue_free 根节点时，子树各节点在帧末前都不会处于
@@ -1191,13 +1263,99 @@ func _queue_free_tree(node: Node) -> void:
 		_queue_free_tree(child)
 	node.queue_free()
 
-func _menu_button(text: String) -> Button:
+func _menu_button(text: String, primary: bool = false) -> Button:
 	var button := Button.new()
 	button.text = text
 	button.custom_minimum_size = Vector2(0, TouchLayout.BUTTON_HEIGHT if touch_mode else 58)
-	button.add_theme_font_size_override("font_size", 20)
-	_polish_button(button, 1.02)
+	button.add_theme_font_size_override("font_size", 21 if primary else 20)
+	if primary:
+		# 主推：金边 + 左侧 3px 竖条 + 缓发光。
+		# 竖条是唯一「不靠颜色也能认出来」的标记 —— 色弱玩家看不出金边和灰边的区别。
+		button.set_meta("primary", true)
+		button.add_theme_stylebox_override("normal", _primary_style(false))
+		button.add_theme_stylebox_override("hover", _primary_style(true))
+		button.add_theme_color_override("font_color", GameTheme.GOLD_LIGHT)
+		var bar := ColorRect.new()
+		bar.name = "PrimaryBar"
+		bar.color = GameTheme.GOLD_LIGHT
+		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bar.custom_minimum_size = Vector2(3, 0)
+		bar.set_anchors_and_offsets_preset(Control.PRESET_LEFT_WIDE)
+		bar.offset_right = 3.0
+		button.add_child(bar)
+	_polish_button(button, 1.03 if primary else 1.02)
+	# 只有主操作按钮挂花边：小按钮（返回 / 刷新）保持无装饰，层级才分得出来。
+	OrnateFrame.attach(button, button.custom_minimum_size.y)
 	return button
+
+## 主推按钮的底样式。压暗的金褐 + 金边 + 金色外发光：它要看起来像「被光照着」，
+## 而不是「换了个颜色」。悬停时发光加强，与其它按钮的抬升是同一套手感。
+func _primary_style(hover: bool) -> StyleBoxFlat:
+	var background := Color(0.115, 0.092, 0.050, 0.94)
+	var glow := 0.15
+	if hover:
+		background = Color(0.170, 0.138, 0.072, 0.97)
+		glow = 0.26
+	var style := GameTheme.style(background, GameTheme.GOLD, 1, 4, 20 if hover else 14, 0.55)
+	style.content_margin_left = 26
+	style.content_margin_right = 26
+	style.content_margin_top = 14
+	style.content_margin_bottom = 14
+	style.shadow_color = Color(0.85, 0.62, 0.25, glow)
+	return style
+
+## 分组小标题：中文组名靠左、英文小标靠右。
+## 没有这一行，两组按钮在视觉上仍然是一条四连队列 —— 分组必须被「说」出来。
+func _group_header(group: Dictionary) -> Control:
+	var row := HBoxContainer.new()
+	row.name = "GroupHeader_%s" % str(group.get("key"))
+	row.add_theme_constant_override("separation", 10)
+	var title := _make_label(str(group.get("label")), 12, Color(0.72, 0.60, 0.38))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(title)
+	row.add_child(_make_label(str(group.get("label_en")), 10, Color(0.46, 0.40, 0.30)))
+	return row
+
+## 面板内部的「透光带」：丝带从面板底下穿过时，光会隔着玻璃漫上来。
+## 极淡的一层，只负责让玻璃看起来是玻璃；再亮一点就会糊住面板标题。
+func _glass_light() -> TextureRect:
+	var gradient := Gradient.new()
+	gradient.offsets = PackedFloat32Array([0.0, 0.45, 1.0])
+	gradient.colors = PackedColorArray([
+		Color(0.95, 0.76, 0.42, 0.0),
+		Color(0.95, 0.76, 0.42, 0.10),
+		Color(0.95, 0.76, 0.42, 0.0),
+	])
+	var texture := GradientTexture2D.new()
+	texture.gradient = gradient
+	texture.width = 1
+	texture.height = 96
+	texture.fill_from = Vector2(0, 0)
+	texture.fill_to = Vector2(0, 1)
+	var rect := TextureRect.new()
+	rect.name = "GlassLight"
+	rect.texture = texture
+	rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	rect.stretch_mode = TextureRect.STRETCH_SCALE
+	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rect.anchor_left = 0.0
+	rect.anchor_right = 1.0
+	rect.anchor_top = 0.16
+	rect.anchor_bottom = 0.16
+	rect.offset_top = 0.0
+	rect.offset_bottom = 150.0
+	return rect
+
+## 把面板的矩形回填给丝带层：丝带是按「面板在哪」算走位的，不是硬编码坐标。
+## 排版每帧可能还在微调，set_focus_rect 内部有半像素的容差，不会每帧重建几何。
+func _sync_ribbon_focus() -> void:
+	if _ribbon_layer == null or _menu_panel == null or _screen_root == null:
+		return
+	var panel_rect := _menu_panel.get_global_rect()
+	if panel_rect.size.x < 8.0 or panel_rect.size.y < 8.0:
+		return
+	var root_rect := _screen_root.get_global_rect()
+	_ribbon_layer.call("set_focus_rect", Rect2(panel_rect.position - root_rect.position, panel_rect.size))
 
 func _small_button(text: String) -> Button:
 	var button := Button.new()
@@ -1277,8 +1435,9 @@ func _chip(text: String) -> PanelContainer:
 	return panel
 
 func _divider() -> ColorRect:
+	# 偏冷的中性色会和标题/按钮上的金色花边打架，这里统一压到暖金一侧。
 	var line := ColorRect.new()
-	line.color = Color(0.55, 0.45, 0.26, 0.32)
+	line.color = Color(0.62, 0.50, 0.28, 0.42)
 	line.custom_minimum_size = Vector2(0, 1)
 	return line
 

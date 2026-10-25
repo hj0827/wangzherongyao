@@ -25,12 +25,40 @@ else                           → 纯本地（无 session）
 | 项 | 值 | 位置 |
 | --- | --- | --- |
 | 逻辑 tick | **30 Hz** | `match_sim.TICK_RATE` / `arena.TICK` |
-| 快照广播 | **10 Hz**（0.1s） | `arena._snapshot_timer >= 0.1` |
+| 状态快照广播 | **10 Hz**（0.1s），**不可靠有序** | `arena._snapshot_timer >= 0.1` → `session.broadcast_team_snapshots` |
+| 离散事件广播 | **10 Hz**，**可靠** | `session.broadcast_team_events` |
 | 输入上报 | **20 Hz**（0.05s） | `arena._input_timer >= 0.05` |
 | 客机渲染延迟 | **0.16s** | `arena.NET_RENDER_DELAY` |
 | 缓冲上限 | **16 帧** | `arena.NET_BUFFER_LIMIT` |
 
 **注意**：`_input_timer` 的刷新条件是把所有即时输入键逐个 `or` 起来的（Q/W/E/R、召唤师、回城、传送、`buy_item`/`sell_slot`）。新增任何即时键时，这里必须同步加，否则新键按下后最多要等 50ms 才上报（手感发粘）。
+
+### 2.1 两条通道：状态走不可靠，事件走可靠
+
+同一次 10Hz 广播拆成两个包：
+
+| 包 | 通道 | 丢了会怎样 | 为什么 |
+| --- | --- | --- | --- |
+| `snapshot` | `TRANSFER_MODE_UNRELIABLE_ORDERED` | 下一格快照覆盖，无感 | 状态是幂等的；可靠通道一旦丢包会队头阻塞，把后面所有快照一起拖住 |
+| `events` | `TRANSFER_MODE_RELIABLE` | 永久缺失：没有播报、没有击杀特效、结算时不放胜利/失败曲 | 事件是离散的一次性事实，丢了不会补 |
+
+`game_session.last_send_mode` 记录最近一个包的通道（`"reliable"` / `"unreliable"`），`test_state_snapshot_and_events_use_separate_channels` 用它把"快照有没有走错通道"变成可断言的事实——环回网络上看不出这个回归。
+
+事件包按队伍分别构造：`sim.events_for(team, events)` 只做视野过滤，不构造整份快照；与 `snapshot_for` 共用 `Vision` 同一套规则，避免两条路径对"敌人是否看得见"判断不一致。客机收到后走 `session.events_received` → `main._on_network_events` → `arena.receive_events`。
+
+### 2.2 压缩帧
+
+`NetProtocol.encode()` 在包 ≥ 512 字节时用 ZSTD 压一遍；压不小就原样发。
+
+```
+[1 字节 0x01][4 字节原始长度 u32][ZSTD 数据]
+```
+
+首字节是编解码标记。未压缩包的首字节是 `var_to_bytes` 的 Variant 类型号（Dictionary = 27），与标记 `1` 天然不冲突，两种格式在线上共存。`decode()` 先看标记，再校验谎报的原始长度（> `MAX_PACKET` 直接拒），最后核对解压后长度。
+
+选 ZSTD 的依据（33KB 快照实测）：ZSTD 压 0.35ms / 解 0.04ms，FASTLZ 解压要 11ms、DEFLATE 压缩要 8.6ms——后两者会直接在 30Hz 主循环里露出毛刺。
+
+实测带宽（团队模式满编、`probe_packet_size.gd`）：状态 3958 B/包（原 33270 B）+ 事件 311 B/包，合计 **41.7 KB/s/客户端**，压缩前仅状态就是 325 KB/s。
 
 ---
 
@@ -90,19 +118,27 @@ hero 分支逐字段列举并钳制范围。W/R/召唤师冷却、金币、装�
 `match_sim.snapshot_for(team)` 会调用 `Vision.filter_snapshot()`：
 
 - 实体：只保留友军、建筑与视野内敌人。
-- 事件：全局播报（兵线、首领刷新、塔毁、比赛结束等）照常下发；攻击/技能/受击/死亡等带坐标事件只有在本队视野内才下发，防止通过事件流透视。
+- 事件：`snapshot` 包里**不再携带事件**（联机时事件单独走 `events` 包，见 §2.1）；`events_for(team, events)` 用的是同一套 `Vision.filter_events()`：全局播报（兵线、首领刷新、塔毁、比赛结束等）照常下发；攻击/技能/受击/死亡等带坐标事件只有在本队视野内才下发，防止通过事件流透视。
 - 河道视野：只下发本队掌握的眼位。
 - 单机与主机同样使用 `snapshot_for(local_team)`，不再全图可见。
 
 ### 4.3 快照顶层白名单（`sanitize_snapshot`）
 
-只放行：`time / winner / mode / bounds / ended / entities / scores / events / wave / objectives`。
+只放行：`time / winner / mode / bounds / ended / entities / scores / events / wave / objectives / river / board`。
+
+`events` 字段仍保留在快照白名单里（单机与测试路径会用），但联机广播的状态快照不带事件。`river` 放河道之灵刷新计时与本队眼位；`board` 是计分板账本——只放公开统计（等级/人头/经济/装备），不放坐标，所以不算透视。
 
 **加新的顶层字段（比如 `gold` 汇总、`shop` 状态）必须改这里**，否则联机永远收不到。
 
+### 4.3.1 事件包白名单（`sanitize_events`）
+
+`events` 包的载荷是 `{time, events}`，事件逐条复用 `_sanitize_event`，上限 `MAX_EVENTS`。两条路径共用同一个清洗函数，避免同一事件在快照与事件包里解析出不同结果。
+
 ### 4.4 事件白名单（`_sanitize_event`）
 
-只放行固定键名列表：`type / hero / source / target / slot / hero_type / team / x / y / aim_x / aim_y / target_x / target_y / value / damage / wave / level / winner / entity_type / killer* / victim* / tier / buff / objective_id / name`。
+只放行固定键名列表：`type / hero / source / source_type / target / target_type / slot / hero_type / minion_type / team / x / y / aim_x / aim_y / target_x / target_y / value / damage / wave / level / winner / entity_type / killer* / victim* / tier / buff / objective_id / name`。
+
+`minion_attack`（小兵普攻）与 `structure_attack`（塔/主堡开火）的表现靠 `minion_type / source_type / target_type / tier` 选刀光、弹丸或光束；漏掉任何一个，客机会退回默认特效。
 
 **自定义事件里带的新键会被丢掉**——比如你想发 `{"type":"gold_gain","amount":50}`，`amount` 不在名单里，客机收到的事件里没有金额。
 
@@ -118,8 +154,8 @@ func snapshot_for(team: String, events = null):         # 按视野过滤：所�
 单机、主机、客机都只拿本队视角：
 
 - 主机/单机：`arena.current_snapshot = sim.snapshot_for(local_team)`，sim 内部照常全算。
-- 主机联网广播：`sim.snapshot_for(team, outgoing_events)`，按队伍分别过滤实体、事件与河道眼位；`outgoing_events` 攒的是两次 10Hz 快照之间的全部 30Hz 事件，避免漏事件。
-- 客机：服务端下发的已经是过滤后的快照，jitter buffer 直接回放。
+- 主机联网广播：状态用 `sim.snapshot_for(team)`（按队伍过滤实体、河道眼位），事件用 `sim.events_for(team, outgoing_events)`（只过滤事件，不重建快照），分别走不可靠与可靠通道。`outgoing_events` 攒的是两次 10Hz 广播之间的全部 30Hz 事件，避免漏事件。
+- 客机：服务端下发的已经是过滤后的快照，jitter buffer 直接回放；事件通过 `session.events_received` 单独到达。
 
 `_sync_units()` 会把离开视野的敌方英雄视图 `visible = false`，重新进入视野时直接落位，避免从旧位置滑入泄露动向。
 

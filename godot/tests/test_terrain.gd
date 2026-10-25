@@ -47,13 +47,15 @@ func test_river_bed_is_below_water_surface() -> void:
 
 func test_river_distance_matches_sim_collision() -> void:
 	# 视觉河道和碰撞河道必须同源，否则会出现「看得见水却能走进去」。
+	# 地图已顺时针旋转 90°，河心线是 y = x（不再是 y = -x）。
 	var terrain = _terrain()
-	near(terrain.river_distance(9.0, -9.0), 0.0, 0.001, "point on the river centre line")
+	near(terrain.river_distance(9.0, 9.0), 0.0, 0.001, "point on the river centre line")
+	near(terrain.river_distance(-9.0, -9.0), 0.0, 0.001, "the other side of the centre line")
 	near(terrain.river_distance(0.0, 0.0), 0.0, 0.001, "map centre is on the river line")
-	# 沿法线 (1,1)/√2 走 RIVER_HALF 正好到岸线
+	# 沿法线 (1,-1)/√2 走 RIVER_HALF 正好到岸线
 	var half: float = MapData.RIVER_HALF_WIDTH
 	var on_bank := half * 0.70710678
-	near(terrain.river_distance(on_bank, on_bank), half, 0.01, "river_distance must match RIVER_HALF_WIDTH")
+	near(terrain.river_distance(on_bank, -on_bank), half, 0.01, "river_distance must match RIVER_HALF_WIDTH")
 
 func test_outer_ring_lifts_into_hills() -> void:
 	# 地图外围要有真实起伏，否则还是「一块平板 + 一圈纸片山」。
@@ -81,7 +83,7 @@ func test_river_corridor_cuts_through_the_hills() -> void:
 	# 否则水面会插进山体里，河看起来是断的。
 	var terrain = _terrain()
 	for r in [70.0, 90.0, 110.0]:
-		var p := Vector2(r * 0.70710678, -r * 0.70710678)
+		var p := Vector2(r * 0.70710678, r * 0.70710678)
 		lt(terrain.height_at(p.x, p.y), 0.5, "river corridor must stay low at radius %.0f" % r)
 
 func test_mesh_is_a_single_shared_index_surface() -> void:

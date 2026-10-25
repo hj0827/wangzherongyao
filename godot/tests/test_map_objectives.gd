@@ -1,20 +1,37 @@
 extends "res://tests/test_base.gd"
 
-# 中立首领契约：暴君 / 主宰两处镜像首领坑、首刷与刷新节奏、击杀后全队增伤。
+# 中立首领契约：暴君 / 主宰两处首领坑、首刷与刷新节奏、击杀后全队增伤。
 # 首领给团队一个「争夺时间点」，而不是让玩家从头到尾只在一条路上互推。
 
 const Objectives = preload("res://sim/map/objectives.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
+const MapData = preload("res://sim/map_data.gd")
 
-func test_two_mirrored_objective_pits_with_distinct_bosses() -> void:
+func test_two_rotated_objective_pits_with_distinct_bosses() -> void:
 	eq(Objectives.PITS.size(), 2, "暴君与主宰各一处")
 	var names := {}
+	var halves := {}
 	for pit in Objectives.PITS:
 		names[str(pit.name)] = true
-		check(MapLayout.objective_at(MapLayout.mirror(pit.pos)).size() > 0, "首领坑必须镜像")
+		# 对称用**绕地图中心 180°（-p）**，不是 y=-x 镜像：
+		# mirror 保持 a = x-y 不变，也就是「同一个半场」——
+		# 上一版用 mirror，结果暴君和主宰双双落在蓝方半场，红方野区一个首领都没有。
+		check(MapLayout.objective_at(-(pit.pos as Vector2)).size() > 0, "首领坑必须 180° 对称")
+		halves["blue" if (pit.pos as Vector2).x - (pit.pos as Vector2).y > 0.0 else "red"] = true
 	eq(names.size(), 2, "两处首领名称不同")
+	eq(halves.size(), 2, "暴君与主宰必须分处两个半场")
 	eq(Objectives.FIRST_SPAWN, 120.0, "首领两分钟首刷")
 	eq(Objectives.RESPAWN, 180.0, "首领三分钟刷新")
+
+func test_objective_pits_stand_whole_on_the_bank() -> void:
+	# 坑盘半径 5.6（arena._add_map_disc），整圈都得露出水面 ——
+	# 旧数据 |a| = 14 时盘子有 1.9 米泡在河里。
+	for pit in Objectives.PITS:
+		var offset: float = absf((pit.pos as Vector2).x - (pit.pos as Vector2).y) * 0.70710678
+		var dry: float = offset - MapData.RIVER_HALF_WIDTH
+		gt(dry, 5.6, "首领坑的盘子必须整圈在岸上：%s（离水面 %.2f 米）" % [str(pit.id), dry])
+	for pit in Objectives.PITS:
+		gt(MapLayout.distance_to_lanes(pit.pos), MapData.LANE_HALF_WIDTH + 2.0, "首领坑不能压在兵线上：%s" % str(pit.id))
 
 func test_objective_monster_stats_are_team_level_threats() -> void:
 	for pit in Objectives.PITS:

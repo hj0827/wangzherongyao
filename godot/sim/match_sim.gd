@@ -27,6 +27,9 @@ const MINION_AGGRO_RANGE := 5.5
 const STRUCTURE_RANGE := 8.0
 const BASE_RANGE := 9.0
 const MAX_LEVEL := 15
+# 助攻判定窗口：和击杀归属用的是同一个 10 秒口径（见 _kill_entity 的分支 2），
+# 两处不一致会出现「算他击杀、却不给旁边那个一起打的人助攻」。
+const ASSIST_WINDOW := 10.0
 
 const TOWER_HP := {"outer": 2800.0, "inner": 3200.0, "high": 3600.0}
 const TOWER_DAMAGE := {"outer": 150.0, "inner": 170.0, "high": 190.0}
@@ -177,6 +180,15 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"attack_cd": 0.0,
 		"kills": 0,
 		"deaths": 0,
+		"assists": 0,
+		# 经济面板的统计口径：输出/承伤按「打出去的伤害」算（含被护盾吃掉的部分），
+		# 因为那同样是玩家打出的输出；面板要能回答「谁在打伤害」，不是「谁破了盾」。
+		"damage_dealt": 0.0,
+		"damage_taken": 0.0,
+		"tower_kills": 0,
+		# 助攻判定：谁在这 10 秒内对目标造成过伤害（id → 时刻）。
+		# 只留 last_hero_attacker 一个字段的话，多打一就只剩最后那一下的人算助攻。
+		"hero_damagers": {},
 		"alive": true,
 		"respawn_timer": 0.0,
 		"skill_q_cd": 0.0,
@@ -392,8 +404,20 @@ func set_player_controller(owner_id: String, controller: String) -> void:
 	if controller == "bot":
 		state.bot_ai = true
 
+# 取走本批事件并清空。事件是一次性的，消费方（表现层 / 联机广播）必须显式取走。
+#
+# 为什么不靠 tick() 开头那句 state.events = [] 兜底：对局结束后 tick() 直接 return，
+# 清空那一行就再也不执行，而快照每帧都从 state.events 复制事件。于是 match_end 被
+# 每个 tick 重放一次 —— 顿帧常驻、震屏每帧重算、结算音乐反复重播，结算界面持续抖动。
+func consume_events() -> Array:
+	var events: Array = state.events
+	state.events = []
+	return events
+
 func tick(dt: float) -> void:
 	if ended:
+		# 结束后不再推进模拟，但事件不能在这里清空：可能还有一方没取走
+		# （例如 ended 由 tick 之外的 apply_damage 触发）。取走由 consume_events 负责。
 		return
 	state.time = float(state.time) + dt
 	state.events = []
@@ -454,24 +478,22 @@ func _update_monsters(dt: float) -> void:
 				entity.moving = true
 
 func _monster_target(monster: Dictionary) -> Dictionary:
-	var best: Dictionary = {}
-	var best_distance := float(monster.get("aggro_range", 5.5))
-	for entity in state.entities:
-		if not bool(entity.get("alive", false)) or str(entity.get("type", "")) != "hero":
-			continue
-		if str(entity.get("team", "")) == "neutral" or str(entity.get("team", "")) == str(monster.get("team", "")):
-			continue
-		var distance: float = monster.pos.distance_to(entity.pos)
-		if distance < best_distance:
-			best_distance = distance
-			best = entity
-	if not best.is_empty():
-		return best
+	# 野怪纯反击：不主动索敌。英雄站在旁边、路过、蹲草丛都不会把它引过来，
+	# 只有对它造成过伤害的人才会被它盯上（2026-10-24 用户定稿）。
+	# 以前这里有一段「aggro_range 内自动锁最近的英雄」，结果是打野还没出手
+	# 野怪就先扑上来，蹲草丛绕后也完全无效。
 	var attacker: Dictionary = _entity_by_id(int(monster.get("last_attacker_id", -1)))
-	if not attacker.is_empty() and bool(attacker.get("alive", false)) and str(attacker.get("type", "")) == "hero":
-		if monster.pos.distance_to(attacker.pos) <= float(monster.get("leash_range", 11.0)):
-			return attacker
-	return {}
+	if attacker.is_empty() or not bool(attacker.get("alive", false)):
+		return {}
+	if str(attacker.get("type", "")) != "hero":
+		return {}
+	if monster.pos.distance_to(attacker.pos) > float(monster.get("leash_range", 11.0)):
+		# 追丢了就彻底忘掉。否则它会带着旧账回窝，英雄再靠近就「隔空」冲出来咬人，
+		# 等于又变回主动索敌。
+		monster["last_attacker_id"] = -1
+		monster["last_attacker_time"] = -999.0
+		return {}
+	return attacker
 
 func _advance_monster_home(monster: Dictionary, dt: float) -> void:
 	var home: Vector2 = monster.get("home_pos", monster.pos)
@@ -761,6 +783,18 @@ func _update_minions(dt: float) -> void:
 			if float(entity.attack_cd) <= 0.0:
 				entity.attack_cd = float(entity.attack_interval)
 				entity.facing = (target.pos - entity.pos).normalized()
+				# 表现层靠这条事件画刀光/弹丸：小兵攻击不能再只改数值。
+				_emit("minion_attack", {
+					"source": entity.id,
+					"team": entity.team,
+					"minion_type": str(entity.get("minion_type", "melee")),
+					"x": float(entity.pos.x),
+					"y": float(entity.pos.y),
+					"target": target.id,
+					"target_type": target.type,
+					"target_x": float(target.pos.x),
+					"target_y": float(target.pos.y),
+				})
 				_damage(target, float(entity.attack_damage), entity)
 		else:
 			var step: Vector2 = (target.pos - entity.pos).normalized()
@@ -784,6 +818,8 @@ func _update_structures(dt: float) -> void:
 			entity.attack_cd = float(entity.attack_interval)
 			_emit("structure_attack", {
 				"source": entity.id,
+				"source_type": entity.type,
+				"tier": str(entity.get("tier", "")),
 				"team": entity.team,
 				"x": float(entity.pos.x),
 				"y": float(entity.pos.y),
@@ -833,8 +869,12 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 		"hero": hero.id,
 		"hero_type": hero.hero_type,
 		"name": skill.name,
+		"kind": kind,
+		"team": hero.team,
 		"x": float(hero.pos.x),
 		"y": float(hero.pos.y),
+		"start_x": float(hero.pos.x),
+		"start_y": float(hero.pos.y),
 		"aim_x": float(target.pos.x),
 		"aim_y": float(target.pos.y),
 	})
@@ -858,6 +898,9 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 	var skill: Dictionary = hero_def.e
 	if float(hero.skill_e_cd) > 0.0 or float(hero.mp) < float(skill.cost):
 		return false
+	# 疾风步会先改 hero.pos 再发事件：起点必须在这里留一份，
+	# 否则渲染层拿到的 from == 落点，位移拖尾就整段丢了。
+	var start_pos: Vector2 = hero.pos
 	var kind := str(skill.kind)
 	if kind == "dash":
 		var direction: Vector2 = aim - hero.pos
@@ -889,8 +932,12 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 		"hero": hero.id,
 		"hero_type": hero.hero_type,
 		"name": skill.name,
+		"kind": kind,
+		"team": hero.team,
 		"x": float(hero.pos.x),
 		"y": float(hero.pos.y),
+		"start_x": float(start_pos.x),
+		"start_y": float(start_pos.y),
 		"aim_x": float(aim.x),
 		"aim_y": float(aim.y),
 	})
@@ -1019,6 +1066,13 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 		target["revealed_timer"] = REVEAL_AFTER_COMBAT
 		if str(source.get("type", "")) == "hero":
 			source["revealed_timer"] = REVEAL_AFTER_COMBAT
+	# —— 面板统计 ——
+	# 记的是护盾结算**之前**的伤害：被盾吃掉的输出一样是玩家打出来的，
+	# 面板要能回答「谁在打输出」，而不是「谁把盾打破了」。
+	if not source.is_empty() and str(source.get("type", "")) == "hero":
+		source["damage_dealt"] = float(source.get("damage_dealt", 0.0)) + incoming
+	if target.type == "hero":
+		target["damage_taken"] = float(target.get("damage_taken", 0.0)) + incoming
 	var remaining := incoming
 	if float(target.get("shield", 0.0)) > 0.0:
 		var absorbed: float = minf(float(target.shield), remaining)
@@ -1045,14 +1099,21 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 				"y": float(target.get("teleport_from", target.pos).y),
 			})
 	target.hp = float(target.hp) - remaining
+	# 「谁打了我」要对所有目标都记账，不能只记英雄：野怪改成纯反击后，
+	# 全靠这个字段决定要不要还手，普攻打野怪却不留痕的话它就永远站着不动。
+	if not source.is_empty():
+		target["last_attacker_id"] = int(source.get("id", -1))
+		target["last_attacker_time"] = float(state.time)
 	if target.type == "hero":
 		target.last_damage_time = float(state.time)
 		if not source.is_empty():
-			target.last_attacker_id = int(source.get("id", -1))
-			target.last_attacker_time = float(state.time)
 			if str(source.get("type", "")) == "hero" and str(source.get("team", "")) != str(target.get("team", "")):
 				target.last_hero_attacker_id = int(source.get("id", -1))
 				target.last_hero_attacker_time = float(state.time)
+				# 助攻要靠「所有打过他的人」，单靠 last_hero_attacker 只留得下最后一下。
+				var damagers: Dictionary = target.get("hero_damagers", {})
+				damagers[int(source.get("id", -1))] = float(state.time)
+				target["hero_damagers"] = damagers
 	_emit("hit", {
 		"target": target.id,
 		"target_type": target.type,
@@ -1105,6 +1166,7 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 				killer_hero_type = str(killer.get("hero_type", ""))
 				killer.kills = int(killer.get("kills", 0)) + 1
 				state.scores[killer.team].kills = int(state.scores[killer.team].kills) + 1
+				_award_assists(target, killer_id)
 				EconomySystem.award_hero_kill(killer, kill_log.is_empty())
 				_add_xp(killer, 130.0)
 			elif killer_type == "tower" or killer_type == "base":
@@ -1255,6 +1317,7 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		EconomySystem.award_tower_team_gold(winner_team, state.entities)
 		if not source.is_empty() and source.type == "hero":
 			_add_xp(source, 80.0)
+			source["tower_kills"] = int(source.get("tower_kills", 0)) + 1
 		_emit("tower_destroyed", {
 			"team": target.team,
 			"lane": target.lane,
@@ -1268,6 +1331,28 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		state.winner = "blue" if target.team == "red" else "red"
 		ended = true
 		_emit("match_end", {"winner": state.winner})
+
+func _award_assists(victim: Dictionary, killer_id: int) -> void:
+	# 助攻 = 在窗口内对目标造成过伤害的其他敌方英雄。
+	# 击杀者自己不算；窗口结束后清账，避免下一次团战把旧账算进来。
+	var damagers: Dictionary = victim.get("hero_damagers", {})
+	if damagers.is_empty():
+		return
+	var now := float(state.time)
+	var victim_team := str(victim.get("team", ""))
+	for key in damagers.keys():
+		var hero_id := int(key)
+		if hero_id == killer_id:
+			continue
+		if now - float(damagers[key]) > ASSIST_WINDOW:
+			continue
+		var helper: Dictionary = _entity_by_id(hero_id)
+		if helper.is_empty() or str(helper.get("type", "")) != "hero":
+			continue
+		if str(helper.get("team", "")) == victim_team:
+			continue
+		helper["assists"] = int(helper.get("assists", 0)) + 1
+	victim["hero_damagers"] = {}
 
 func _award_minion_gold(victim: Dictionary, last_hitter: Dictionary) -> void:
 	const ASSIST_RADIUS := 8.0
@@ -1357,6 +1442,14 @@ func snapshot_for(team: String, events_override: Variant = null) -> Dictionary:
 		shot["events"] = (events_override as Array).duplicate(true)
 	return Vision.filter_snapshot(shot, team)
 
+# 联机事件包：只按队伍可见性过滤事件，不构造整份快照。
+# 与 snapshot_for 共用 Vision 的同一套规则，避免两条路径对「敌人是否看得见」判断不一致。
+func events_for(team: String, events: Array) -> Array:
+	River.ensure_state(state)
+	var per_team: Dictionary = state.river.get("reveals", {})
+	var reveals: Array = per_team.get(team, []) if per_team.get(team, null) is Array else []
+	return Vision.filter_events(events, team, state.entities, reveals)
+
 # 双方账本：计分板用的全员公开统计。
 #
 # 为什么不复用 entities：entities 要过视野过滤，敌方英雄在战争迷雾里会被剔掉，
@@ -1387,11 +1480,24 @@ func _snapshot_board() -> Dictionary:
 			"level": int(entity.level),
 			"kills": int(entity.kills),
 			"deaths": int(entity.deaths),
+			"assists": int(entity.get("assists", 0)),
 			"cs": int(entity.get("cs", 0)),
 			"gold": gold,
 			# 总经济的口径 = 手上的钱 + 已买装备的原价。
 			# 买装备不改变总经济，只改变它的形态；这符合玩家的直觉。
 			"net_worth": gold + item_value,
+			# 面板要能回答「他出了什么装、打多少输出、扛多少伤害、推了几座塔」。
+			# 这几项都是公开战报，不带坐标，不会变成透视。
+			"item_value": item_value,
+			"damage_dealt": float(entity.get("damage_dealt", 0.0)),
+			"damage_taken": float(entity.get("damage_taken", 0.0)),
+			"tower_kills": int(entity.get("tower_kills", 0)),
+			# 当前面板属性（已含装备加成，recalculate_stats 写回的实时值）。
+			"attack_damage": float(entity.get("attack_damage", 0.0)),
+			"ability_power": float(entity.get("ability_power", 0.0)),
+			"max_hp": float(entity.get("max_hp", 0.0)),
+			"speed": float(entity.get("speed", 0.0)),
+			"crit_rate": float(entity.get("crit_rate", 0.0)),
 			"alive": alive,
 			"respawn_timer": 0.0 if alive else float(entity.get("respawn_timer", 0.0)),
 			"inventory": inventory.duplicate(),
@@ -1409,6 +1515,9 @@ func _snapshot_board() -> Dictionary:
 			"blue": _sum_net_worth(blue),
 			"red": _sum_net_worth(red),
 		},
+		# 面板要算分均经济，需要「这局打了多久」。跟着 board 一起走，
+		# 免得 UI 再去猜时间戳（客机的本地时钟和服务端不是同一个）。
+		"time": float(state.time),
 	}
 
 func _board_row_before(a: Dictionary, b: Dictionary) -> bool:
@@ -1534,6 +1643,8 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["shield"] = float(entity.get("shield", 0.0))
 		data["shield_max"] = float(entity.get("shield_max", 0.0))
 		data["guards_alive"] = int(entity.get("guards_alive", 0))
+		# 主堡也打人（射程 9 米）。漏了这条，客户端只能用默认值画范围圈。
+		data["range"] = float(entity.get("range", BASE_RANGE))
 	elif entity.type == "monster":
 		data["monster_type"] = str(entity.get("monster_type", "wolf"))
 		data["camp_id"] = str(entity.get("camp_id", ""))

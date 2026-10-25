@@ -27,6 +27,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
 
+import android_env
+
 try:
     import numpy as np
 except ImportError:  # pragma: no cover - numpy is only used for fast masks
@@ -37,9 +39,11 @@ SHOTS = ROOT / "shots"
 RUN_DIR = SHOTS / "device_checks" / datetime.now().strftime("%Y%m%d_%H%M%S")
 REFS = ROOT / "tests" / "device_refs"
 
-DEFAULT_ADB = r"D:\AppCache\Android-Sdk\platform-tools\adb.exe"
-DEFAULT_AAPT = r"D:\AppCache\Android-Sdk\build-tools\36.0.0\aapt2.exe"
-DEFAULT_APKSIGNER = r"D:\AppCache\Android-Sdk\build-tools\36.0.0\apksigner.bat"
+# Resolved from env -> Godot editor settings -> conventional install paths, so a
+# relocated SDK never shows up as "adb: command not found" mid-run.
+DEFAULT_ADB = str(android_env.adb() or "adb")
+DEFAULT_AAPT = str(android_env.build_tool("aapt2.exe") or "aapt2")
+DEFAULT_APKSIGNER = str(android_env.build_tool("apksigner.bat") or "apksigner")
 APK = ROOT / "build" / "android" / "fenghuo-gorge-debug.apk"
 
 PKG = "com.fenghuoxiagu.game"
@@ -48,6 +52,7 @@ SERIAL = os.environ.get("ANDROID_SERIAL", "10AC9J0VZA0011K")
 ADB = os.environ.get("ADB", DEFAULT_ADB)
 AAPT = os.environ.get("AAPT", DEFAULT_AAPT)
 APKSIGNER = os.environ.get("APKSIGNER", DEFAULT_APKSIGNER)
+android_env.apply_java_home()  # apksigner shells out to java
 
 W, H = 2388, 1080
 DENSITY_SCALE = 3.0  # 480dpi / 160

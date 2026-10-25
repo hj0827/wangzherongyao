@@ -131,6 +131,46 @@ static func style(
 static func portrait_path(hero_type: String) -> String:
 	return "res://assets/ui/portraits/%s.png" % hero_type
 
+# 立绘是 1024×1024 的半身像，脸在画面上方中间。整张缩到 44px 之后脸只剩几个像素，
+# 所以先裁出头肩再降采样。框取 (350,95) 起 320×320：
+# 五张立绘的脸中心分别是 blade(500,240) / mage(505,265) / tank(575,205) /
+# archer(490,280) / assassin(510,280)，脸宽约 170px —— 320 的框正好让脸占一半，
+# 缩到 44px 后五官还认得出来。框再放大就会带进半个身子，脸反而更糊。
+const AVATAR_REGION_X := 350
+const AVATAR_REGION_Y := 95
+const AVATAR_REGION_SIZE := 320
+
+# 和 item_icon 同样的做法：裁好 + 缩到目标尺寸后缓存。
+# 原图 2MB/张，每次刷新都重新裁一遍会明显掉帧。
+static var _avatar_cache: Dictionary = {}
+
+static func hero_avatar(hero_type: String, size: int) -> Texture2D:
+	var key := "%s@%d" % [hero_type, size]
+	if _avatar_cache.has(key):
+		return _avatar_cache[key]
+	var tex: Texture2D = null
+	var path := portrait_path(hero_type)
+	if ResourceLoader.exists(path):
+		var loaded := load(path)
+		if loaded is Texture2D:
+			var source := loaded as Texture2D
+			var img := source.get_image()
+			if img != null and not img.is_empty():
+				if img.is_compressed():
+					img.decompress()
+				var region := img.get_region(Rect2i(AVATAR_REGION_X, AVATAR_REGION_Y, AVATAR_REGION_SIZE, AVATAR_REGION_SIZE))
+				region.resize(size, size, Image.INTERPOLATE_LANCZOS)
+				tex = ImageTexture.create_from_image(region)
+			else:
+				# get_image 拿不到（压缩纹理）时退回 AtlasTexture，至少能显示。
+				var atlas := AtlasTexture.new()
+				atlas.atlas = source
+				atlas.region = Rect2(AVATAR_REGION_X, AVATAR_REGION_Y, AVATAR_REGION_SIZE, AVATAR_REGION_SIZE)
+				tex = atlas
+	# 缺图也缓存 null，避免每帧重复走 ResourceLoader.exists。
+	_avatar_cache[key] = tex
+	return tex
+
 # 装备图标：一件一张，缺图时调用方回落到占位色块，不要在这里造默认图。
 static func item_icon_path(item_id: String) -> String:
 	return "res://assets/ui/items/%s.png" % item_id

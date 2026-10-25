@@ -25,12 +25,15 @@ const SkillButton = preload("res://scripts/ui/skill_button.gd")
 const SkillIndicator = preload("res://scripts/ui/skill_indicator.gd")
 const CancelCastZone = preload("res://scripts/ui/cancel_cast_zone.gd")
 const AttackCluster = preload("res://scripts/ui/attack_cluster.gd")
+const AttackModeButton = preload("res://scripts/ui/attack_mode_button.gd")
+const LockBar = preload("res://scripts/ui/lock_bar.gd")
 const ShopPanel = preload("res://scripts/ui/shop_panel.gd")
 const Scoreboard = preload("res://scripts/ui/scoreboard.gd")
 const TouchJoystick = preload("res://scripts/ui/touch_joystick.gd")
 const TouchActionButton = preload("res://scripts/ui/touch_action_button.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
 const HudLayout = preload("res://scripts/ui/hud_layout.gd")
+const RecallBar = preload("res://scripts/ui/recall_bar.gd")
 
 var arena: Node = null
 var local_owner := ""
@@ -45,6 +48,7 @@ var online_mode := false
 var _joystick: TouchJoystick
 var _attack_button: TouchActionButton
 var _pause_button: TouchActionButton
+var _recall_bar: RecallBar
 var _recall_button: TouchActionButton
 var _teleport_button: TouchActionButton
 
@@ -52,6 +56,10 @@ var _score_blue: Label
 var _score_red: Label
 var _timer_label: Label
 var _wave_label: Label
+## 手机端把两队比分折进一行（「0  vs  0」），桌面上是左右两块队伍名，这个节点为空。
+var _score_line: Label
+## 小地图下方那行左边的金币。手机端没有横着的状态卡，钱要在左上角一眼看到。
+var _map_gold_label: Label
 var _objective_label: Label
 var _score_panel: PanelContainer
 var _econ_panel: PanelContainer
@@ -78,6 +86,13 @@ var _skill_e: SkillButton
 var _skill_r: SkillButton
 var _summoner_button: SkillButton
 var _attack_cluster: AttackCluster
+# 触屏端的攻击模式是贴在攻击键旁的三颗圆按钮（桌面端仍是 AttackCluster 横条）。
+var _mode_buttons: Array[Control] = []
+var _lock_bar: LockBar
+# arena 每 20Hz 送一次「敌人 id → 屏幕坐标」，锁定条的连线靠它定位。
+var _enemy_screens: Dictionary = {}
+var _attack_mode_local := "default"
+var _locked_target_local := -1
 var _skill_aim_layer: Control
 var _aim_slot := ""
 var _aim_from := Vector2.ZERO
@@ -86,8 +101,24 @@ var _cancel_state: Dictionary = CancelCastZone.create_state()
 var _cancel_center := Vector2.ZERO
 const CANCEL_ZONE_RADIUS := 66.0
 # 键位提示只当新手引导：进场显示 HINT_SECONDS 秒后淡出，之后在 Esc 菜单里可查。
-const KEY_HINTS := "左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师   ·   B 回城   ·   T 传送   ·   滚轮 缩放"
+# 原来是一行 76 个字硬塞进 840px（15px 字 + 5px 黑描边），实机直接裁成一串碎片。
+# 现在分成两行、每行只放 4~5 组键位，并且垫一层底板，水面上也读得出来。
+const KEY_HINT_LINES := [
+	"左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师",
+	"B 回城   ·   T 传送   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停",
+]
+const KEY_HINTS := "左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师   ·   B 回城   ·   T 传送   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停"
+
+## 触屏端攻击模式的三个圆按钮。id 与 AttackCluster.MODES 是同一套 attack_mode 值
+## （sim 只认 id），label 缩短到两个字：76px 的圆里三个字会挤成一条。
+const TOUCH_MODE_ENTRIES := [
+	{"id": "default", "label": "普攻"},
+	{"id": "minion", "label": "补刀"},
+	{"id": "tower", "label": "推塔"},
+]
 const HINT_SECONDS := 14.0
+# 小地图那行金币的字号。比旁边的塔数（13）大一档，读起来是「钱」不是「附注」。
+const GOLD_READOUT_SIZE := 18
 var _shop_panel: ShopPanel
 var _shop_button: Button
 var _gold_label: Label
@@ -165,6 +196,11 @@ func _apply_layout() -> void:
 	_place_zone(_hint_box, _layout["hints"])
 	if touch_mode:
 		_place_zone(_joystick, _layout["joystick"])
+		_place_zone(_pause_button, _layout["pause"])
+		_place_zone(_recall_bar, _layout["recall"])
+		_place_touch_skills(viewport)
+		_place_mode_buttons(viewport)
+		_place_utility_buttons(viewport)
 	else:
 		# 键鼠：技能条贴右下，攻击模式条压在它上面（低频率控件不进战场正中）。
 		_place_zone(_attack_cluster, _layout["mode"])
@@ -184,11 +220,53 @@ func _place_zone(node: Control, rect: Rect2) -> void:
 	node.offset_right = rect.end.x
 	node.offset_bottom = rect.end.y
 
+## 触屏端的攻击模式圆按钮：位置全从 TouchLayout 取，跟攻击键、技能弧共享同一套几何。
+func _place_mode_buttons(viewport: Vector2) -> void:
+	var rects := TouchLayout.mode_button_rects(viewport)
+	for i in _mode_buttons.size():
+		if i < rects.size():
+			_place_zone(_mode_buttons[i], rects[i])
+	if _lock_bar != null:
+		_lock_bar.set_viewport_size(viewport)
+
+## 召唤师 / 传送 / 回城：整列排在技能弧左侧（详见 TouchLayout.utility_button_rects）。
+## 以前三颗用的是写死的「右下角 offset」，结果横在技能弧左边、和模式圆混成一片小圆堆。
+func _place_utility_buttons(viewport: Vector2) -> void:
+	var rects := TouchLayout.utility_button_rects(viewport)
+	var nodes := [_summoner_button, _teleport_button, _recall_button]
+	for i in nodes.size():
+		if i < rects.size():
+			_place_zone(nodes[i], rects[i])
+	# 召唤师键是 SkillButton（要显示冷却环），它的 custom_minimum_size 是 128x148，
+	# 摆进 96 的格子里会被最小尺寸顶大 40px —— 实测压住了下面的「传送」。
+	# 其它两颗是 TouchActionButton，没有这个约束。这里按格子收一次。
+	if _summoner_button != null and rects.size() > 0:
+		_summoner_button.custom_minimum_size = rects[0].size
+
 func _build_top_bar() -> void:
 	_score_panel = PanelContainer.new()
 	_score_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_score_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.9), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
 	add_child(_score_panel)
+	if touch_mode:
+		# 手机端照王者那条比分：一列「时间 / 0 vs 0」，不再左右各摆一个
+		# 「蓝方 0」「0 红方」的大字 —— 手机屏幕本来就窄，左右两块队伍名会把中间的
+		# 时间挤成一条缝，而队伍归属靠颜色（蓝 / 红）已经说清楚了。
+		# 波次不进来：80px 高的条装不下三行，硬塞会把「0 vs 0」压成一团糊字。
+		var column := VBoxContainer.new()
+		column.alignment = BoxContainer.ALIGNMENT_CENTER
+		column.add_theme_constant_override("separation", 0)
+		_score_panel.add_child(column)
+		# 字号卡在 20 / 17：Noto 的实际行高比字号大（26 号字占到 36px），
+		# 26+22 两行加 20px 内边距是 87 > SCORE_H(80)，第二行会被 PanelContainer 裁掉。
+		# 20+17 两行约 52px，留得下。
+		_timer_label = _make_label("00:00", 20, GameTheme.TEXT)
+		_timer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		column.add_child(_timer_label)
+		_score_line = _make_label("0  vs  0", 17, GameTheme.TEXT)
+		_score_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		column.add_child(_score_line)
+		return
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 28)
@@ -213,11 +291,18 @@ func _build_top_bar() -> void:
 	row.add_child(_score_red)
 
 # 顶栏常驻的经济差：只回答「现在哪边钱多、多多少」。
-# 明细（每人的等级 / KDA / 装备）在 Tab 计分板里，不占常驻视野。
+# 明细（每人的等级 / KDA / 装备 / 攻防属性）在 Tab 计分板里。
+# 这条本身就是面板的入口 —— 玩家看见「红方领先 658」的第一反应就是想看明细，
+# 让他再去找 Tab 键是多余的。点击即开/关，鼠标和触摸都走 gui_input。
 func _build_econ_strip() -> void:
 	_econ_panel = PanelContainer.new()
-	_econ_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_econ_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_econ_panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	_econ_panel.tooltip_text = "点击查看双方经济与装备"
 	_econ_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.9), Color(0.55, 0.44, 0.24, 0.5), 1, 9))
+	_econ_panel.gui_input.connect(_on_econ_strip_input)
+	_econ_panel.mouse_entered.connect(_on_econ_strip_hover.bind(true))
+	_econ_panel.mouse_exited.connect(_on_econ_strip_hover.bind(false))
 	add_child(_econ_panel)
 	var box := VBoxContainer.new()
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -233,6 +318,27 @@ func _build_econ_strip() -> void:
 	_econ_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_econ_sub.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	box.add_child(_econ_sub)
+
+func _on_econ_strip_input(event: InputEvent) -> void:
+	if _scoreboard == null:
+		return
+	# 只认「按下」：松开时再触发一次会立刻把刚打开的面板关掉。
+	if event is InputEventMouseButton:
+		var click := event as InputEventMouseButton
+		if click.button_index == MOUSE_BUTTON_LEFT and click.pressed:
+			_scoreboard.toggle()
+			accept_event()
+	elif event is InputEventScreenTouch:
+		var touch := event as InputEventScreenTouch
+		if touch.pressed:
+			_scoreboard.toggle()
+			accept_event()
+
+func _on_econ_strip_hover(hovered: bool) -> void:
+	if _econ_panel == null:
+		return
+	var border := Color(0.95, 0.78, 0.38, 0.95) if hovered else Color(0.55, 0.44, 0.24, 0.5)
+	_econ_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.9), border, 1, 9))
 
 func _build_scoreboard() -> void:
 	_scoreboard = Scoreboard.new()
@@ -291,11 +397,27 @@ func _build_minimap() -> void:
 	_minimap.location_dragged.connect(_on_minimap_location_dragged)
 	_minimap.drag_finished.connect(_on_minimap_drag_finished)
 	box.add_child(_minimap)
-	_objective_label = _make_label("防御塔 蓝 0 : 0 红", 12, GameTheme.MUTED)
+	_objective_label = _make_label("防御塔 蓝 0 : 0 红", 13, Color(0.78, 0.72, 0.56))
 	_objective_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	# 操作说明不再常驻两行（长期压着左侧视野），改成悬停提示。
 	_minimap.tooltip_text = "按住地图拖动查看其他区域，松手回到自己"
-	box.add_child(_objective_label)
+	if touch_mode:
+		# 王者的左上角是「小地图 + 一条钱」：手机没有横着的状态卡，
+		# 金币必须在这儿露出来，否则玩家得点开商店才知道自己有多少钱。
+		# 塔数的字更小，靠右；金币靠左、金色、字号大一档，扫一眼就能读到。
+		_map_gold_label = _make_label("71", GOLD_READOUT_SIZE, GameTheme.GOLD_LIGHT)
+		_map_gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		_map_gold_label.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 0.85))
+		_map_gold_label.add_theme_constant_override("outline_size", 4)
+		var meta_row := HBoxContainer.new()
+		meta_row.add_theme_constant_override("separation", 8)
+		box.add_child(meta_row)
+		meta_row.add_child(_map_gold_label)
+		_objective_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		_objective_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		meta_row.add_child(_objective_label)
+	else:
+		box.add_child(_objective_label)
 
 func _on_minimap_location_clicked(world: Vector2) -> void:
 	map_focus_requested.emit(world)
@@ -344,15 +466,31 @@ func _build_announcement() -> void:
 func _build_bottom_panel() -> void:
 	_hero_panel = PanelContainer.new()
 	_hero_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_hero_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.04, 0.055, 0.92), Color(0.55, 0.44, 0.24, 0.7), 1, 12))
+	# 手机端这根柱子只有小地图那么宽（234），内边距和落影都得收着：
+	# 按桌面那套 14px 内边距 + 8px 落影，内容区会被挤到 190 以下，头像和血条并排放不下。
+	var panel_style := GameTheme.style(
+		Color(0.02, 0.04, 0.055, 0.92),
+		Color(0.55, 0.44, 0.24, 0.7),
+		1,
+		12,
+		0 if touch_mode else 8,
+		0.0 if touch_mode else 0.45
+	)
+	if touch_mode:
+		panel_style.content_margin_left = 6
+		panel_style.content_margin_right = 6
+		panel_style.content_margin_top = 6
+		panel_style.content_margin_bottom = 6
+	_hero_panel.add_theme_stylebox_override("panel", panel_style)
 	add_child(_hero_panel)
+	var portrait_size := 56.0 if touch_mode else 104.0
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 16)
+	row.add_theme_constant_override("separation", 8 if touch_mode else 16)
 	_hero_panel.add_child(row)
 
 	var portrait_frame := PanelContainer.new()
-	portrait_frame.custom_minimum_size = Vector2(104, 104)
-	portrait_frame.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.03, 0.045, 1.0), Color(0.72, 0.56, 0.3, 0.8), 2, 8))
+	portrait_frame.custom_minimum_size = Vector2(portrait_size, portrait_size)
+	portrait_frame.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.03, 0.045, 1.0), Color(0.72, 0.56, 0.3, 0.8), 2, 8, 0, 0.0))
 	row.add_child(portrait_frame)
 	_portrait = TextureRect.new()
 	_portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -365,35 +503,43 @@ func _build_bottom_panel() -> void:
 
 	var info := VBoxContainer.new()
 	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	info.add_theme_constant_override("separation", 5)
+	info.add_theme_constant_override("separation", 4 if touch_mode else 5)
 	row.add_child(info)
 	var name_row := HBoxContainer.new()
-	name_row.add_theme_constant_override("separation", 10)
+	name_row.add_theme_constant_override("separation", 6 if touch_mode else 10)
 	info.add_child(name_row)
-	_name_label = _make_label(player_name, 22, GameTheme.TEXT)
+	_name_label = _make_label(player_name, 15 if touch_mode else 22, GameTheme.TEXT)
 	_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_name_label.clip_text = touch_mode
+	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	name_row.add_child(_name_label)
-	_level_label = _make_label("Lv.1", 18, GameTheme.GOLD_LIGHT)
+	_level_label = _make_label("Lv.1", 13 if touch_mode else 18, GameTheme.GOLD_LIGHT)
 	name_row.add_child(_level_label)
+	# 手机端不挂「射手 · 逐星之矢」这行副标题：234 宽的柱子里它只会被省略成半句话，
+	# 而英雄定位在选人界面已经说过了。
 	_role_label = _make_label("", 13, GameTheme.MUTED)
+	_role_label.visible = not touch_mode
 	info.add_child(_role_label)
-	var hp_root := _make_stat_bar(GameTheme.GREEN, 20)
+	var hp_root := _make_stat_bar(GameTheme.GREEN, 14.0 if touch_mode else 20.0)
 	_hp_bar = hp_root.get_meta("bar")
 	_hp_text = hp_root.get_meta("label")
 	_hp_style = _hp_bar.get_theme_stylebox("fill") as StyleBoxFlat
+	# 14px 高的条里塞 11 号数字会裁成半截；血量比例看条，精确值在计分板里。
+	_hp_text.visible = not touch_mode
 	info.add_child(hp_root)
-	var mp_root := _make_stat_bar(GameTheme.MANA, 16)
+	var mp_root := _make_stat_bar(GameTheme.MANA, 10.0 if touch_mode else 16.0)
 	_mp_bar = mp_root.get_meta("bar")
 	_mp_text = mp_root.get_meta("label")
+	_mp_text.visible = not touch_mode
 	info.add_child(mp_root)
 	# 击杀/阵亡和金币并成一行：状态卡少一行就矮 18px，压住战场的面积直接少一截。
 	var meta_row := HBoxContainer.new()
-	meta_row.add_theme_constant_override("separation", 8)
+	meta_row.add_theme_constant_override("separation", 6 if touch_mode else 8)
 	info.add_child(meta_row)
-	_kd_label = _make_label("击杀 0 / 阵亡 0", 13, GameTheme.MUTED)
+	_kd_label = _make_label("击杀 0 / 阵亡 0", 10 if touch_mode else 13, GameTheme.MUTED)
 	_kd_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	meta_row.add_child(_kd_label)
-	_gold_label = _make_label("金币 0", 13, GameTheme.GOLD)
+	_gold_label = _make_label("金币 0", 11 if touch_mode else 13, GameTheme.GOLD)
 	meta_row.add_child(_gold_label)
 
 	if not touch_mode:
@@ -418,6 +564,11 @@ func _create_skill(slot: String, key: String, accent: Color, display_name := "")
 	button.key_text = key
 	button.accent = accent
 	button.touch_mode = touch_mode
+	if slot == "summoner":
+		button.skill_kind = "summoner"
+	else:
+		var skill_def: Dictionary = HeroDefs.get_hero(hero_type).get(slot, {})
+		button.skill_kind = str(skill_def.get("kind", ""))
 	if display_name == "":
 		display_name = str(HeroDefs.get_hero(hero_type).get(slot, {}).get("name", "技能"))
 	button.skill_name = display_name
@@ -521,7 +672,9 @@ func _summoner_name() -> String:
 
 func _make_stat_bar(fill_color: Color, height: float) -> Control:
 	var root := Control.new()
-	root.custom_minimum_size = Vector2(300, height)
+	# 300 是桌面横卡里血条的占位；手机端的状态柱只有 234 宽，按 300 要最小尺寸
+	# 会把整根柱子顶出分区（PanelContainer 只会被内容撑大，不会自己缩）。
+	root.custom_minimum_size = Vector2(120.0 if touch_mode else 300.0, height)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var bar := ProgressBar.new()
 	bar.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -550,6 +703,13 @@ func _make_stat_bar(fill_color: Color, height: float) -> Control:
 	return root
 
 func _build_attack_cluster() -> void:
+	# 触屏端不要把键鼠那条 460x176 的横面板搬上来：真机上它被挤到摇杆正上方，
+	# 跟攻击键隔着半个屏幕，玩家点「补刀」得先横跨整个拇指区。
+	# 触屏改成「攻击键旁三颗圆 + 右上角头像锁定」，见 _build_mode_buttons / _build_lock_bar。
+	if touch_mode:
+		_build_mode_buttons()
+		_build_lock_bar()
+		return
 	_attack_cluster = AttackCluster.new()
 	_attack_cluster.setup(touch_mode)
 	_attack_cluster.mode_changed.connect(func(mode: String): attack_mode_changed.emit(mode))
@@ -557,20 +717,105 @@ func _build_attack_cluster() -> void:
 	# 位置统一由 _apply_layout 从分区表取；这里只建节点。
 	add_child(_attack_cluster)
 
+func _build_mode_buttons() -> void:
+	if not _mode_buttons.is_empty():
+		return
+	for entry in TOUCH_MODE_ENTRIES:
+		var button: Control = AttackModeButton.new()
+		button.name = "AttackMode_%s" % str(entry.id)
+		button.setup(true)
+		button.label = str(entry.label)
+		button.accent = GameTheme.GOLD
+		button.pressed.connect(_on_mode_button_pressed.bind(str(entry.id)))
+		add_child(button)
+		_mode_buttons.append(button)
+	_sync_mode_buttons(_attack_mode_local)
+
+func _build_lock_bar() -> void:
+	if _lock_bar != null:
+		return
+	_lock_bar = LockBar.new()
+	_lock_bar.name = "LockBar"
+	_lock_bar.setup(touch_mode)
+	_lock_bar.lock_changed.connect(_on_lock_bar_changed)
+	add_child(_lock_bar)
+
+func _on_mode_button_pressed(mode: String) -> void:
+	_attack_mode_local = mode
+	_sync_mode_buttons(mode)
+	attack_mode_changed.emit(mode)
+
+func _sync_mode_buttons(mode: String) -> void:
+	for i in _mode_buttons.size():
+		var entry: Dictionary = TOUCH_MODE_ENTRIES[i]
+		_mode_buttons[i].set_active(str(entry.id) == mode)
+
+func _on_lock_bar_changed(target_id: int) -> void:
+	_locked_target_local = target_id
+	lock_changed.emit(target_id)
+
 func set_targeting_state(mode: String, target_id: int) -> void:
+	_attack_mode_local = mode
+	_locked_target_local = target_id
 	if _attack_cluster != null:
 		_attack_cluster.set_targeting_state(mode, target_id)
+	_sync_mode_buttons(mode)
+	if _lock_bar != null:
+		_lock_bar.set_locked(target_id)
+
+## arena 每 20Hz 送一次「敌人 id → 屏幕坐标」。锁定条的线靠它落到人身上。
+func set_enemy_screens(screens: Dictionary) -> void:
+	_enemy_screens = screens
+
+## 把快照里的敌方英雄整理成锁定条要的形状：算距离、带上屏幕坐标。
+## 距离过滤和排序在 LockBar 里做（那是可测的纯逻辑），这里只管取数。
+## 注意快照里的坐标是扁平的 x / y（net_protocol 序列化成那样），不是 sim 内部的 Vector2 pos。
+func _lock_targets(data: Dictionary) -> Array:
+	var hero := _find_local_hero(data)
+	if hero.is_empty():
+		return []
+	var origin := Vector2(float(hero.get("x", 0.0)), float(hero.get("y", 0.0)))
+	var targets: Array = []
+	for entity in data.get("entities", []):
+		if str(entity.get("type", "")) != "hero":
+			continue
+		if str(entity.get("team", "")) == local_team:
+			continue
+		if not bool(entity.get("alive", true)):
+			continue
+		var entity_id := int(entity.get("id", -1))
+		if entity_id <= 0:
+			continue
+		var pos := Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0)))
+		targets.append({
+			"id": entity_id,
+			"hero_type": str(entity.get("hero_type", "blade")),
+			"name": str(entity.get("name", "")),
+			"dist": origin.distance_to(pos),
+			"screen": _enemy_screens.get(entity_id, Vector2(-1.0, -1.0)),
+		})
+	return targets
 
 func _build_hints() -> void:
 	# 手机端不铺常驻键位提示（触屏控件自己会说话）。
 	# 键鼠端也只当新手引导：进场显示十几秒后淡出，之后按 Esc 还能在菜单里查到。
 	if touch_mode:
 		return
-	_hint_box = _make_label(KEY_HINTS, 15, Color(0.86, 0.9, 0.94, 0.95))
+	_hint_box = _make_label("\n".join(KEY_HINT_LINES), 14, Color(0.90, 0.93, 0.96, 0.96))
 	_hint_box.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	# 这行会压在草地、水面、桥面上，背景亮度差得远，描边必须够重才读得清。
-	_hint_box.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-	_hint_box.add_theme_constant_override("outline_size", 5)
+	# 底板替代「粗描边」：描边只能救单字，救不了一行压在亮水面上的小字。
+	# 有底板之后文字可以正常字重，不会糊成一团黑边。
+	# 底板不要投影：投影会往上下各溢出 6px，正好把「和状态卡之间的 16px 间隙」填满，
+	# 两块就又看起来粘在一起了。提示条是贴地的说明，不需要浮起来。
+	# 上下内边距也必须压到 2px：46px 高的框扣掉默认 10+10 只剩 26px，两行字会被裁成碎片。
+	var hint_style := GameTheme.style(Color(0.015, 0.028, 0.04, 0.84), Color(0.42, 0.36, 0.20, 0.34), 1, 8, 0, 0.0)
+	hint_style.content_margin_left = 10
+	hint_style.content_margin_right = 10
+	hint_style.content_margin_top = 2
+	hint_style.content_margin_bottom = 2
+	_hint_box.add_theme_stylebox_override("normal", hint_style)
+	_hint_box.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.65))
+	_hint_box.add_theme_constant_override("outline_size", 2)
 	# 窄窗口下区域会变窄：宁可省略号收尾，也不要溢出到右下角操作簇底下。
 	_hint_box.clip_text = true
 	_hint_box.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -605,9 +850,15 @@ func _build_touch_controls() -> void:
 
 	_attack_button = TouchActionButton.new()
 	_attack_button.touch_mode = true
+	# 手游的普攻键不写字：一把剑 + 金环就够了，键面上放字会把圆挤小。
+	# 用 `attack`（剑）而不是 `slash`（45° 平行四边形）：后者放大到 130px 会把
+	# 整个圆糊成一块褐色方块，看起来像个色卡而不是按键。
+	_attack_button.icon_kind = "attack"
 	_attack_button.label = "攻击"
 	_attack_button.hint = "按住连击"
-	_attack_button.accent = Color(0.95, 0.55, 0.3)
+	# 淡金而不是橘褐：王者的普攻键是「银白剑 + 金环」，橘褐色在绿草地上
+	# 会读成一块土黄的色块，和旁边金环技能键撞车。
+	_attack_button.accent = Color(0.96, 0.82, 0.54)
 	_attack_button.anchor_left = 1.0
 	_attack_button.anchor_top = 1.0
 	_attack_button.anchor_right = 1.0
@@ -622,32 +873,23 @@ func _build_touch_controls() -> void:
 
 	_skill_q = _create_skill("q", "Q", GameTheme.GOLD)
 	add_child(_skill_q)
-	_place_touch_skill(_skill_q, 0)
 	_skill_w = _create_skill("w", "1", Color(0.68, 0.86, 0.58))
 	add_child(_skill_w)
-	_place_touch_skill(_skill_w, 1)
 	_skill_e = _create_skill("e", "E", Color(0.55, 0.75, 1.0))
 	add_child(_skill_e)
-	_place_touch_skill(_skill_e, 2)
 	_skill_r = _create_skill("r", "R", Color(0.95, 0.62, 0.45))
 	add_child(_skill_r)
-	_place_touch_skill(_skill_r, 3)
+	# 位置不在这里定：弧半径和角间距都跟视口有关（见 TouchLayout.skill_arc_radius），
+	# 由 _apply_layout 每次按当前视口重排。
 	_summoner_button = _create_skill("summoner", "F", Color(0.5, 0.86, 0.76), _summoner_name())
 	add_child(_summoner_button)
-	_place_utility_button(_summoner_button, TouchLayout.UTILITY_SUMMONER_RECT)
 
 	_pause_button = TouchActionButton.new()
 	_pause_button.touch_mode = true
 	_pause_button.label = MatchMenu.pause_label(online_mode)
 	_pause_button.accent = Color(0.58, 0.66, 0.72)
-	_pause_button.anchor_left = 1.0
-	_pause_button.anchor_top = 0.0
-	_pause_button.anchor_right = 1.0
-	_pause_button.anchor_bottom = 0.0
-	_pause_button.offset_left = -26.0 - TouchLayout.PAUSE_BUTTON_SIZE.x
-	_pause_button.offset_top = 276.0
-	_pause_button.offset_right = -26.0
-	_pause_button.offset_bottom = 276.0 + TouchLayout.PAUSE_BUTTON_SIZE.y
+	# 位置由 _apply_layout 从分区表取（触屏在小地图正下方）。
+	# 这里曾经写死过 (1854, 276)，正好被锁定头像条的第三格压住 —— 别写回来。
 	_pause_button.pressed.connect(func(): pause_requested.emit())
 	add_child(_pause_button)
 
@@ -658,7 +900,6 @@ func _build_touch_controls() -> void:
 	_recall_button.accent = Color(0.45, 0.78, 0.62)
 	_recall_button.pressed.connect(func(): skill_pressed.emit("recall"))
 	add_child(_recall_button)
-	_place_utility_button(_recall_button, TouchLayout.UTILITY_RECALL_RECT)
 
 	_teleport_button = TouchActionButton.new()
 	_teleport_button.touch_mode = true
@@ -667,34 +908,19 @@ func _build_touch_controls() -> void:
 	_teleport_button.accent = Color(0.42, 0.8, 0.9)
 	_teleport_button.pressed.connect(func(): skill_pressed.emit("teleport"))
 	add_child(_teleport_button)
-	_place_utility_button(_teleport_button, TouchLayout.UTILITY_TELEPORT_RECT)
 
-func _place_utility_button(button: Control, offsets: Rect2) -> void:
-	button.anchor_left = 1.0
-	button.anchor_top = 1.0
-	button.anchor_right = 1.0
-	button.anchor_bottom = 1.0
-	button.offset_left = offsets.position.x
-	button.offset_top = offsets.position.y
-	button.offset_right = offsets.end.x
-	button.offset_bottom = offsets.end.y
+	# 回城条：位置由分区表给（底部正中）。默认隐藏，只有 recall_timer > 0 才出现。
+	_recall_bar = RecallBar.new()
+	add_child(_recall_bar)
 
-func _place_touch_skill(button: Control, arc_index: int) -> void:
-	var angle := deg_to_rad(float(TouchLayout.SKILL_ARC_ANGLES_DEG[arc_index]))
-	var attack_center_offset := Vector2(
-		-TouchLayout.ATTACK_MARGIN.x - TouchLayout.ATTACK_BUTTON_SIZE * 0.5,
-		-TouchLayout.ATTACK_MARGIN.y - TouchLayout.ATTACK_BUTTON_SIZE * 0.5
-	)
-	var center := attack_center_offset + Vector2(cos(angle), sin(angle)) * TouchLayout.SKILL_ARC_RADIUS
+func _place_touch_skills(viewport: Vector2) -> void:
+	var nodes := [_skill_q, _skill_w, _skill_e, _skill_r]
+	var centers := TouchLayout.skill_arc_centers(viewport)
 	var half := TouchLayout.SKILL_TOUCH_SIZE * 0.5
-	button.anchor_left = 1.0
-	button.anchor_top = 1.0
-	button.anchor_right = 1.0
-	button.anchor_bottom = 1.0
-	button.offset_left = center.x - half.x
-	button.offset_top = center.y - half.y
-	button.offset_right = center.x + half.x
-	button.offset_bottom = center.y + half.y
+	for i in nodes.size():
+		if i >= centers.size():
+			break
+		_place_zone(nodes[i], Rect2(centers[i] - half, TouchLayout.SKILL_TOUCH_SIZE))
 
 func _build_death_overlay() -> void:
 	_death_overlay = ColorRect.new()
@@ -882,12 +1108,19 @@ func update_snapshot(data: Dictionary) -> void:
 	var red_score: Dictionary = scores.get("red", {})
 	var blue_kills := int(blue_score.get("kills", 0))
 	var red_kills := int(red_score.get("kills", 0))
-	_score_blue.text = "蓝方  %d" % blue_kills
-	_score_red.text = "%d  红方" % red_kills
+	# 手机端没有左右两块队伍名，比分折进中间那一行；桌面端仍是左右分立。
+	if _score_line != null:
+		_score_line.text = "%d  vs  %d" % [blue_kills, red_kills]
+	if _score_blue != null:
+		_score_blue.text = "蓝方  %d" % blue_kills
+	if _score_red != null:
+		_score_red.text = "%d  红方" % red_kills
 	var board: Dictionary = data.get("board", {})
 	_refresh_economy(board, str(local.get("owner_id", "")))
 	_timer_label.text = _format_time(float(data.get("time", 0.0)))
-	_wave_label.text = "第 %d 波" % int(data.get("wave", 1))
+	# 手机端没有「第 N 波」这一行（80px 的比分条只放得下时间和比分），判空而不是硬写。
+	if _wave_label != null:
+		_wave_label.text = "第 %d 波" % int(data.get("wave", 1))
 	var objectives: Dictionary = data.get("objectives", {})
 	var spawn_timer := float(objectives.get("spawn_timer", 0.0))
 	if spawn_timer > 0.0:
@@ -918,6 +1151,12 @@ func update_snapshot(data: Dictionary) -> void:
 	var gold := int(local.get("gold", 0))
 	if _gold_label != null:
 		_gold_label.text = "金币 %d" % gold
+	# 左上角那行金币：写得短，钱多了折成 15.4k，否则会把塔数挤出去。
+	if _map_gold_label != null:
+		_map_gold_label.text = _short_gold(gold)
+	# 回城引导：手机端的状态柱放不下「[回城中...]」这行字，进度改由底部那条进度条来说。
+	if _recall_bar != null:
+		_recall_bar.set_state(float(local.get("recall_timer", 0.0)), float(local.get("recall_total", 0.0)))
 	if _shop_panel != null:
 		_shop_panel.set_state(gold, local.get("inventory", []), str(local.get("hero_type", hero_type)))
 	var hero_def: Dictionary = HeroDefs.get_hero(str(local.get("hero_type", hero_type)))
@@ -961,6 +1200,8 @@ func update_snapshot(data: Dictionary) -> void:
 
 	if _attack_cluster != null:
 		_attack_cluster.refresh_enemies(data.get("entities", []), local_team)
+	if _lock_bar != null:
+		_lock_bar.set_targets(_lock_targets(data))
 	_minimap.set_snapshot(data, local_owner, local_team)
 	if ended and not result_shown:
 		show_result(str(data.get("winner", "")), local)

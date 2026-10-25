@@ -52,7 +52,6 @@ static func spirit_stats(spot: Dictionary) -> Dictionary:
 		"attack_damage": 70.0,
 		"attack_range": 2.2,
 		"attack_interval": 1.3,
-		"aggro_range": 6.0,
 		"leash_range": 12.0,
 		"move_speed": 3.6,
 		"respawn_time": RESPAWN_TIME,

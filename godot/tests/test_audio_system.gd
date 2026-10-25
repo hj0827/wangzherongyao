@@ -97,6 +97,23 @@ func test_skill_cues_follow_slot_and_hero_type() -> void:
 	eq(_names(_cues(plan, {"type": "skill", "hero": LOCAL_ID, "hero_type": "mage", "slot": "r"}, _ctx())), ["skill_ult"], "大招有专属音")
 	# 不是英雄类型也不能没声音（否则新英雄上线就静音）。
 	eq(_names(_cues(plan, {"type": "skill", "hero": LOCAL_ID, "hero_type": "???", "slot": "q"}, _ctx())), ["skill_mage"], "未知英雄类型回落到默认技能音")
+	eq(_names(_cues(plan, {"type": "skill", "hero": LOCAL_ID, "hero_type": "assassin", "slot": "q"}, _ctx())), ["skill_assassin"], "刺客技能音有独立音色")
+
+# W/R 走 SkillSystem.cast_skill()，事件名是 skill_cast；召唤师技能是 summoner_cast。
+# 这两类事件曾经完全没有 cue 分支 —— 大招和闪现放出去是哑的，而且不报错。
+func test_w_and_r_cast_events_make_sound() -> void:
+	var plan := AudioPlan.new()
+	eq(_names(_cues(plan, {"type": "skill_cast", "caster_id": LOCAL_ID, "hero_type": "blade", "slot": "w"}, _ctx())), ["skill_blade"], "W 有技能音")
+	plan.reset()
+	eq(_names(_cues(plan, {"type": "skill_cast", "caster_id": LOCAL_ID, "hero_type": "mage", "slot": "r"}, _ctx())), ["skill_ult"], "R 有大招音")
+	plan.reset()
+	eq(_names(_cues(plan, {"type": "skill_cast", "caster_id": 99, "hero_type": "archer", "slot": "w", "x": 200.0, "y": 0.0}, _ctx())), [], "远处敌人的 W 被距离丢弃")
+
+func test_summoner_cast_makes_sound() -> void:
+	var plan := AudioPlan.new()
+	eq(_names(_cues(plan, {"type": "summoner_cast", "caster_id": LOCAL_ID, "spell_id": "flash"}, _ctx())), ["summoner_spell"], "召唤师技能有音")
+	plan.reset()
+	eq(_names(_cues(plan, {"type": "summoner_cast", "caster_id": 99, "spell_id": "heal", "x": 200.0, "y": 0.0}, _ctx())), [], "远处的召唤师技能被距离丢弃")
 
 func test_map_and_economy_events_have_cues() -> void:
 	var plan := AudioPlan.new()
@@ -213,6 +230,23 @@ func test_every_planned_cue_can_be_synthesized() -> void:
 		gt(seconds, 0.02, "%s 太短，听不到" % name)
 		lt(seconds, 3.5, "%s 太长，会盖住下一个音" % name)
 	eq(missing, [], "AudioPlan 能发出的每个 cue 都必须有合成实现（漏一个就是静默失效）")
+
+# 反射守卫：每个 CUE_* 常量都必须进 CUES 注册表。
+# skill_assassin 就漏在这 —— 常量在、cues_for 里在用、但没进 CUES，
+# 于是「每个 cue 都能合成」那条测试根本没检查它，刺客技能一直静音。
+func test_every_cue_constant_is_registered() -> void:
+	var constants: Dictionary = AudioPlan.new().get_script().get_script_constant_map()
+	var registered := {}
+	for name in AudioPlan.CUES:
+		registered[str(name)] = true
+	var missing := []
+	for key in constants:
+		var key_name := str(key)
+		if not key_name.begins_with("CUE_"):
+			continue
+		if not registered.has(str(constants[key])):
+			missing.append(key_name)
+	eq(missing, [], "每个 CUE_* 常量都要进 CUES 注册表，否则守卫测试会漏掉它")
 
 func test_cue_registry_matches_plan() -> void:
 	var unknown := []

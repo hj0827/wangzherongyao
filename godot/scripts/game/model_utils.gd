@@ -27,7 +27,7 @@ static func relative_aabb(node: Node, xform: Transform3D = Transform3D.IDENTITY)
 
 static var _scene_box_cache: Dictionary = {}
 
-static func fit_scene(scene: PackedScene, target_height: float, max_width := 0.0) -> Node3D:
+static func fit_scene(scene: PackedScene, target_height: float, max_width := 0.0, girth := 1.0) -> Node3D:
 	var wrapper := Node3D.new()
 	var fit_root := Node3D.new()
 	wrapper.add_child(fit_root)
@@ -48,9 +48,9 @@ static func fit_scene(scene: PackedScene, target_height: float, max_width := 0.0
 		var width := maxf(box.size.x, box.size.z)
 		if width > 0.000001:
 			factor = minf(factor, max_width / width)
-	fit_root.scale = Vector3.ONE * factor
+	fit_root.scale = Vector3(girth, 1.0, girth) * factor
 	var center := box.get_center()
-	fit_root.position = Vector3(-center.x * factor, -box.position.y * factor, -center.z * factor)
+	fit_root.position = Vector3(-center.x * factor * girth, -box.position.y * factor, -center.z * factor * girth)
 	return wrapper
 
 static func tint(root: Node, color: Color, amount: float) -> void:
@@ -64,6 +64,19 @@ static func tint(root: Node, color: Color, amount: float) -> void:
 				var tinted := (material as StandardMaterial3D).duplicate() as StandardMaterial3D
 				tinted.albedo_color = tinted.albedo_color.lerp(color, amount)
 				mesh_instance.set_surface_override_material(surface, tinted)
+
+# 把一份材质强行盖到整棵子树的每个网格面上。
+# 用途：glb 自带材质（比如 Rock.glb 的灰白石头）和程序化石壁贴在一起时，
+# 一眼就能看出是两套东西。共用一份材质才能读成同一块山体。
+static func override_material(root: Node, material: Material) -> void:
+	if material == null:
+		return
+	for node in root.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := node as MeshInstance3D
+		if mesh_instance.mesh == null:
+			continue
+		for surface in mesh_instance.mesh.get_surface_count():
+			mesh_instance.set_surface_override_material(surface, material)
 
 static func enable_shadows(root: Node, cast := true) -> void:
 	for node in root.find_children("*", "MeshInstance3D", true, false):

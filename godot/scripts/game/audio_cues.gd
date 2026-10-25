@@ -130,6 +130,9 @@ const CUE_SKILL_MAGE := "skill_mage"
 const CUE_SKILL_ARCHER := "skill_archer"
 const CUE_SKILL_ASSASSIN := "skill_assassin"
 const CUE_SKILL_ULT := "skill_ult"
+# 召唤师技能（闪现/终结/净化/治疗）共用一个短促的施法音：
+# 它们形态差异大，但「按下 F 生效了」这一层反馈是同一个。
+const CUE_SUMMONER := "summoner_spell"
 const CUE_DEATH_HERO := "death_hero"
 const CUE_DEATH_MINION := "death_minion"
 const CUE_TOWER_DOWN := "tower_down"
@@ -154,6 +157,7 @@ const CUE_UI_ERROR := "ui_error"
 const NAMES := [
 	CUE_ATTACK_SWING, CUE_HIT_HERO, CUE_HIT_MINION, CUE_HIT_STRUCTURE, CUE_CRIT,
 	CUE_SKILL_BLADE, CUE_SKILL_TANK, CUE_SKILL_MAGE, CUE_SKILL_ARCHER, CUE_SKILL_ASSASSIN, CUE_SKILL_ULT,
+	CUE_SUMMONER,
 	CUE_DEATH_HERO, CUE_DEATH_MINION, CUE_TOWER_DOWN, CUE_GUARD_DOWN, CUE_SHIELD_BREAK,
 	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
@@ -184,8 +188,12 @@ static func cue(cue_name: String) -> AudioStreamWAV:
 			return skill_mage()
 		CUE_SKILL_ARCHER:
 			return skill_archer()
+		CUE_SKILL_ASSASSIN:
+			return skill_assassin()
 		CUE_SKILL_ULT:
 			return skill_ult()
+		CUE_SUMMONER:
+			return summoner_spell()
 		CUE_DEATH_HERO:
 			return death_hero()
 		CUE_DEATH_MINION:
@@ -312,6 +320,13 @@ static func skill_assassin() -> AudioStreamWAV:
 static func skill_ult() -> AudioStreamWAV:
 	return _cached(CUE_SKILL_ULT, func() -> AudioStreamWAV:
 		return _synth(0.85, 3011, {"from": 180.0, "to": 1400.0, "curve": 0.6, "harm": [1.0, 0.5, 0.25], "noise": 0.28, "noise_decay": 3.0, "attack": 0.02, "sustain": 0.18, "decay": 1.6, "gain": 0.66})
+	)
+
+# 召唤师技能：短促上挑 + 颤音，比英雄技能更「魔法」、更短。
+# 比引导音（回城/传送）短，因为它是一次性瞬发，不是持续吟唱。
+static func summoner_spell() -> AudioStreamWAV:
+	return _cached(CUE_SUMMONER, func() -> AudioStreamWAV:
+		return _synth(0.34, 3203, {"from": 760.0, "to": 1900.0, "curve": 0.75, "harm": [1.0, 0.45, 0.18], "trem": 30.0, "trem_depth": 0.35, "noise": 0.3, "noise_decay": 16.0, "attack": 0.004, "decay": 2.6, "gain": 0.62})
 	)
 
 # ---------------- 击杀 / 建筑 ----------------

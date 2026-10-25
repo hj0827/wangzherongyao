@@ -59,7 +59,9 @@ func test_skill_buttons_arc_around_the_left_of_attack() -> void:
 	eq(centers.size(), 4, "four skills sit on the arc")
 	for center in centers:
 		near(center.distance_to(attack), TouchLayout.SKILL_ARC_RADIUS, 0.01, "skill center follows the attack arc radius")
-		lt(center.x, attack.x - 40.0, "skills stay on the left side of the attack button")
+		# 「在攻击键左侧」的口径是圆心在攻击键中点左边；R 正好落在正上方偏左
+		# （264°），它的包围盒和攻击键的包围盒在 x 上重叠是必然的，不该按框去卡。
+		lt(center.x, attack.x, "skills stay on the left side of the attack button")
 		lt(center.y, attack.y, "skills stay above the attack button center")
 		var rect := Rect2(center - TouchLayout.SKILL_TOUCH_SIZE * 0.5, TouchLayout.SKILL_TOUCH_SIZE)
 		check(rect.position.x >= 0.0 and rect.position.y >= 0.0, "skill button stays on screen")
@@ -74,27 +76,24 @@ func test_skill_buttons_arc_around_the_left_of_attack() -> void:
 	check(gap >= 12.0, "skill circles clear the attack button")
 
 func test_utility_buttons_do_not_cover_the_skill_arc() -> void:
-	var viewport_size := Vector2(1990.0, 900.0)
-	var attack := TouchLayout.attack_center(viewport_size)
-	var skill_rects: Array[Rect2] = []
-	for center in TouchLayout.skill_arc_centers(viewport_size):
-		skill_rects.append(Rect2(center - TouchLayout.SKILL_TOUCH_SIZE * 0.5, TouchLayout.SKILL_TOUCH_SIZE))
-	var utilities := {
-		"summoner": TouchLayout.UTILITY_SUMMONER_RECT,
-		"teleport": TouchLayout.UTILITY_TELEPORT_RECT,
-		"recall": TouchLayout.UTILITY_RECALL_RECT,
-	}
-	for slot in utilities:
-		var local: Rect2 = utilities[slot]
-		eq(local.size, TouchLayout.UTILITY_BUTTON_SIZE, "%s utility button keeps its touch size" % slot)
-		var rect := Rect2(viewport_size + local.position, local.size)
-		check(rect.position.x >= 0.0 and rect.position.y >= 0.0, "%s utility button stays on screen" % slot)
-		check(rect.end.x <= viewport_size.x and rect.end.y <= viewport_size.y, "%s utility button stays inside the viewport" % slot)
-		check(not rect.has_point(attack), "%s utility button does not cover the attack center" % slot)
-		for i in skill_rects.size():
-			check(not rect.intersects(skill_rects[i]), "%s utility button does not overlap skill %d" % [slot, i])
-	var recall_rect := Rect2(viewport_size + TouchLayout.UTILITY_RECALL_RECT.position, TouchLayout.UTILITY_RECALL_RECT.size)
-	check(skill_rects[0].position.y > recall_rect.end.y, "utility row sits above the Q button")
+	# 回城 / 传送 / 召唤师那一列在技能弧左侧（见 touch_layout.utility_button_rects），
+	# 这条守的是：三颗一律不许压到技能、攻击键、摇杆和回城条上。
+	for viewport_size in [Vector2(1600.0, 900.0), Vector2(2000.0, 900.0), Vector2(2400.0, 1080.0)]:
+		var attack := TouchLayout.attack_center(viewport_size)
+		var attack_rect := Rect2(attack - Vector2(TouchLayout.ATTACK_BUTTON_SIZE, TouchLayout.ATTACK_BUTTON_SIZE) * 0.5, Vector2(TouchLayout.ATTACK_BUTTON_SIZE, TouchLayout.ATTACK_BUTTON_SIZE))
+		var skill_rects: Array[Rect2] = []
+		for center in TouchLayout.skill_arc_centers(viewport_size):
+			skill_rects.append(Rect2(center - TouchLayout.SKILL_TOUCH_SIZE * 0.5, TouchLayout.SKILL_TOUCH_SIZE))
+		var names := ["summoner", "teleport", "recall"]
+		var slots := TouchLayout.utility_button_rects(viewport_size)
+		eq(slots.size(), names.size(), "three utility sockets at %s" % viewport_size)
+		for i in slots.size():
+			var rect: Rect2 = slots[i]
+			check(rect.position.x >= 0.0 and rect.position.y >= 0.0, "%s utility button stays on screen" % names[i])
+			check(rect.end.x <= viewport_size.x and rect.end.y <= viewport_size.y, "%s utility button stays inside the viewport" % names[i])
+			check(not rect.intersects(attack_rect), "%s utility button does not cover the attack key" % names[i])
+			for j in skill_rects.size():
+				check(not rect.intersects(skill_rects[j]), "%s utility button does not overlap skill %d" % [names[i], j])
 
 func test_touch_skill_drag_aims_and_cancels() -> void:
 	var hud := GameHUD.new()
@@ -137,10 +136,10 @@ func test_critical_hit_triggers_hit_stop() -> void:
 	arena.free()
 
 func test_hero_model_is_visibly_larger_than_minions() -> void:
-	check(UnitVisualScript.HERO_HEIGHT >= 2.2, "heroes stand taller than 2.2 m")
+	check(UnitVisualScript.HERO_HEIGHT >= 2.6, "heroes stand taller than 2.6 m")
 	check(UnitVisualScript.MINION_HEIGHT <= 1.6, "minions stay small")
 	var ratio: float = UnitVisualScript.HERO_HEIGHT / UnitVisualScript.MINION_HEIGHT
-	check(ratio >= 1.6, "heroes read at least 1.6x taller than minions")
+	check(ratio >= 2.0, "heroes read at least 2x taller than minions")
 	near(
 		UnitVisualScript.scale_for_height(1.82, UnitVisualScript.HERO_HEIGHT),
 		UnitVisualScript.HERO_HEIGHT / 1.82,
@@ -148,3 +147,58 @@ func test_hero_model_is_visibly_larger_than_minions() -> void:
 		"hero scale is derived from the measured model height"
 	)
 	near(UnitVisualScript.scale_for_height(0.0, 2.4), 1.0, 0.001, "missing bounds keep the authored scale")
+
+# ---------------------------------------------------------------- 攻击模式按钮
+
+func test_attack_mode_buttons_sit_beside_the_attack_key() -> void:
+	# 用户原话：「攻击的形式放在攻击键的附近的，也是攻击键的形式」。
+	# 所以三颗模式按钮必须是紧贴攻击键的一列圆，而不是左下角那条横面板。
+	for viewport in [Vector2(1600.0, 900.0), Vector2(2000.0, 900.0), Vector2(2400.0, 1080.0)]:
+		var rects := TouchLayout.mode_button_rects(viewport)
+		eq(rects.size(), 3, "three attack modes = three buttons at %s" % viewport)
+		var attack := Rect2(
+			TouchLayout.attack_center(viewport) - Vector2(TouchLayout.ATTACK_BUTTON_SIZE, TouchLayout.ATTACK_BUTTON_SIZE) * 0.5,
+			Vector2(TouchLayout.ATTACK_BUTTON_SIZE, TouchLayout.ATTACK_BUTTON_SIZE)
+		)
+		for i in rects.size():
+			var rect: Rect2 = rects[i]
+			near(rect.size.x, rect.size.y, 0.01, "mode button %d is round (square box)" % i)
+			check(rect.position.x >= 0.0 and rect.position.y >= 0.0, "mode button %d stays on screen at %s" % [i, viewport])
+			check(rect.end.x <= viewport.x and rect.end.y <= viewport.y, "mode button %d stays inside the viewport at %s" % [i, viewport])
+			check(not rect.intersects(attack), "mode button %d must not sit on the attack key at %s" % [i, viewport])
+			# 「附近」= 离攻击键不超过一个攻击键半径：看得见、够得着。
+			check(rect.get_center().distance_to(attack.get_center()) <= TouchLayout.ATTACK_BUTTON_SIZE * 2.2, "mode button %d drifts away from the attack key at %s" % [i, viewport])
+			if i > 0:
+				check(not rect.intersects(rects[i - 1]), "mode button %d overlaps its neighbour at %s" % [i, viewport])
+		# 逐个技能比，不用弧的包围盒：Q 和 R 之间那条斜缝是空的，
+		# 用包围盒会把缝里也算成禁区，逼着按钮缩成点不准的小圆。
+		for center in TouchLayout.skill_arc_centers(viewport):
+			var skill := Rect2(center - TouchLayout.SKILL_TOUCH_SIZE * 0.5, TouchLayout.SKILL_TOUCH_SIZE)
+			for i in rects.size():
+				check(not (rects[i] as Rect2).intersects(skill), "mode button %d covers a skill at %s" % [i, viewport])
+
+func test_mobile_hud_builds_round_mode_buttons_instead_of_the_strip() -> void:
+	# 接线检查：真机 HUD 必须建出这三颗按钮，并且不再把横条面板摆在左下角。
+	var hud: Control = GameHUD.new()
+	hud.setup("p1", "blue", "blade", "你", true, false)
+	hud._ready()
+	hud.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	hud.size = Vector2(2000.0, 900.0)
+	hud._apply_layout()
+	eq(hud._mode_buttons.size(), 3, "touch HUD builds three round mode buttons")
+	check(hud._attack_cluster == null, "touch HUD no longer builds the desktop mode strip")
+	eq(hud._lock_bar != null, true, "touch HUD builds the lock bar")
+	var expected := TouchLayout.mode_button_rects(Vector2(2000.0, 900.0))
+	for i in hud._mode_buttons.size():
+		var node: Control = hud._mode_buttons[i]
+		var rect := node.get_rect()
+		near(rect.get_center().x, expected[i].get_center().x, 1.0, "mode button %d is placed from TouchLayout" % i)
+		near(rect.get_center().y, expected[i].get_center().y, 1.0, "mode button %d is placed from TouchLayout" % i)
+	hud.free()
+
+func test_mode_button_source_draws_a_circle_like_the_attack_key() -> void:
+	# 「也是攻击键的形式」：圆。用源码断言挡住「悄悄换成方按钮」。
+	var source := FileAccess.get_file_as_string("res://scripts/ui/attack_mode_button.gd")
+	check(source.contains("draw_circle("), "the mode button must draw a circle like the attack key")
+	check(source.contains("draw_arc("), "the mode button keeps the same ring as the attack key")
+	check(not source.contains("StyleBox"), "no panel style box: the button is drawn, not skinned")

@@ -7,6 +7,7 @@ extends SceneTree
 
 const Arena = preload("res://scripts/game/arena.gd")
 const MapData = preload("res://sim/map_data.gd")
+const MapLayout = preload("res://sim/map/map_layout.gd")
 
 var arena: Node3D
 var viewport: SubViewport
@@ -61,8 +62,11 @@ func _run() -> void:
 	await create_timer(0.4).timeout
 	await _shot("map_river")
 
-	# 3. 野区近景：看植被与岩石
-	_place(Vector3(-34.0, 14.0, -18.0), Vector3(-24.0, 0.0, -30.0), 50.0)
+	# 3. 野区近景：看植被与岩石。机位跟着**当前**的营地走 ——
+	# 营地挪过一次，写死旧坐标的结果是「拍到的空地上什么都没有」，
+	# 上一轮就是靠这张图误判过。这里直接取 MapLayout 的第一座营地。
+	var camp: Vector2 = MapLayout.CAMPS[0].pos
+	_place(Vector3(camp.x + 10.0, 13.0, camp.y + 12.0), Vector3(camp.x, 0.0, camp.y), 50.0)
 	await create_timer(0.4).timeout
 	await _shot("map_jungle")
 
@@ -71,5 +75,17 @@ func _run() -> void:
 	_place(Vector3(base.x - 6.0, 13.0, base.y - 20.0), Vector3(base.x, 2.0, base.y), 50.0)
 	await create_timer(0.4).timeout
 	await _shot("map_base")
+
+	# 5. 首领坑：看坑盘与四根石柱是否整圈落在岸上
+	var pit: Vector2 = MapLayout.OBJECTIVE_PITS[0].pos
+	_place(Vector3(pit.x + 11.0, 12.0, pit.y + 13.0), Vector3(pit.x, 0.0, pit.y), 46.0)
+	await create_timer(0.4).timeout
+	await _shot("map_pit")
+
+	# 6. 传送阵：看阵盘离水多远 —— 这张是「法阵漂在水里」最直接的证据图
+	var pad: Vector2 = MapLayout.TELEPORT_PADS[0].pos
+	_place(Vector3(pad.x + 10.0, 11.0, pad.y + 12.0), Vector3(pad.x, 0.0, pad.y), 46.0)
+	await create_timer(0.4).timeout
+	await _shot("map_pad")
 
 	quit()
