@@ -13,6 +13,11 @@ func test_intel_recognizes_bushes_camps_and_objective_pits() -> void:
 	var camp_region := MapIntel.region_at(MapLayout.CAMPS[0].pos)
 	eq(str(camp_region.kind), "camp", "野区营地有独立类型")
 	check(str(camp_region.note).contains("BUFF") or str(camp_region.name).contains("野"), "营地说明提到增益或野区")
+	var small_camp: Dictionary = MapLayout.CAMPS.filter(func(camp): return str(camp.get("buff", "")) == "")[0]
+	var small_region := MapIntel.region_at(small_camp.pos)
+	eq(str(small_region.kind), "camp", "小野点也是营地类型")
+	check(not str(small_region.note).contains("BUFF"), "小野点不能被情报层误报成红/蓝BUFF")
+	check(str(small_region.note).contains("经验"), "小野点说明只给经验")
 	var pit_region := MapIntel.region_at(MapLayout.OBJECTIVE_PITS[0].pos)
 	eq(str(pit_region.kind), "objective", "首领坑有独立类型")
 	check(str(pit_region.name).contains(str(MapLayout.OBJECTIVE_PITS[0].name)), "首领坑名称正确")

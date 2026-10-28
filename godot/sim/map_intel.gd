@@ -38,7 +38,12 @@ static func region_at(point: Vector2) -> Dictionary:
 		}
 	var camp: Dictionary = MapLayout.camp_at(point)
 	if not camp.is_empty():
-		var buff_desc := "蓝BUFF（技能冷却缩减）" if str(camp.get("buff", "")) == "blue" else "红BUFF（攻击减速与增伤）"
+		var buff := str(camp.get("buff", ""))
+		var buff_desc := "经验"
+		if buff == "blue":
+			buff_desc = "蓝BUFF（技能冷却缩减）"
+		elif buff == "red":
+			buff_desc = "红BUFF（攻击减速与增伤）"
 		return {
 			"name": "%s营地" % str(camp.get("name", "野怪")),
 			"kind": "camp",

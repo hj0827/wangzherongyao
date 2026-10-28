@@ -166,6 +166,10 @@ var _camp_labels: Dictionary = {}
 # 全图石壁共用的一份材质（野区墙 + 边界墙 + 压顶石）。懒建，因为
 # 「建场景」和「渲染」都可能在无材质需求时被单独调用（测试里就是这样）。
 var _stone_material: ShaderMaterial = null
+# 墙石批处理：几百块 Rock.glb 如果逐个节点画，移动端光是 draw call 和
+# 阴影 pass 就会把帧率吃掉。这里先收集实例数据，最后合成 1~2 个 MultiMesh。
+var _rock_batch_specs: Array[Dictionary] = []
+var _rock_mesh_cache: Dictionary = {}
 # 地形实例：布景（山 / 树 / 石头）要靠它取实际地面高度，
 # 否则摆件会悬在坡上或陷进土里。
 var _terrain = null
@@ -1888,7 +1892,13 @@ func _build_ground() -> void:
 	ground.mesh = terrain.build_mesh()
 	ground.material_override = TerrainBuilder.build_material()
 	# 地形必须投影：关掉时山体和丘陵不会落到地面上，远山就是一排贴纸。
-	ground.cast_shadow = ArenaLook.TERRAIN_SHADOW
+	# 手机端例外：地形是整张 5 万三角形的大网格，移动时把它塞进 shadow pass
+	# 的代价远高于山体阴影带来的收益，移动端改由光照明暗表现起伏。
+	ground.cast_shadow = (
+		ArenaLook.TERRAIN_SHADOW
+		if not OS.has_feature("mobile")
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	)
 	_props_root.add_child(ground)
 
 func _build_lanes() -> void:
@@ -2339,80 +2349,77 @@ func _build_map_features() -> void:
 	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
 	var stone := _wall_stone_material()
 
-	for wall in marks.walls:
+	_begin_rock_batch()
+	for wall_index in marks.walls.size():
+		var wall: Dictionary = marks.walls[wall_index]
 		var a: Vector2 = wall.a
 		var b: Vector2 = wall.b
 		var center := (a + b) * 0.5
 		var length := a.distance_to(b)
 		var dir := (b - a) / maxf(length, 0.001)
+		var perp := Vector2(-dir.y, dir.x)
 		var yaw := -atan2(dir.y, dir.x)
+		var wall_id := str(wall.get("id", "jungle"))
+		# 每段墙一个相位：相邻墙的岩脊不会像复制粘贴一样同向摆。
+		var phase := float(wall_index) * 1.63
 		# 尺寸全部取自 sim 层：视觉厚度与碰撞厚度必须一致，否则会出现
 		# 「看着贴得过去、身体却被挡住」的错位（薄渲染 / 厚碰撞）。
+		# 现在这一层只是**基座**：直墙的方盒轮廓会被上面的岩脊打碎，
+		# 但碰撞线仍然由它来封住。
 		var barrier := MeshInstance3D.new()
 		# 名字即接口：遮挡逻辑与测试都靠 wall_<id> 找到某一段石壁。
-		barrier.name = "wall_" + str(wall.get("id", "jungle"))
+		barrier.name = "wall_" + wall_id
 		var box := BoxMesh.new()
-		box.size = Vector3(length, MapLayout.WALL_HEIGHT, MapLayout.WALL_THICKNESS)
+		box.size = Vector3(length, MapLayout.WALL_CORE_HEIGHT, MapLayout.WALL_THICKNESS)
 		barrier.mesh = box
 		barrier.material_override = stone
-		barrier.position = Vector3(center.x, MapLayout.WALL_HEIGHT * 0.5, center.y)
+		barrier.position = Vector3(center.x, MapLayout.WALL_CORE_HEIGHT * 0.5, center.y)
 		barrier.rotation.y = yaw
 		ModelUtils.enable_shadows(barrier, true)
 		_props_root.add_child(barrier)
-		# 压顶石：一条略窄、略低的横带。它比墙身窄，是为了让「墙顶」读成一条山脊，
-		# 而不是一条能走人的宽平台 —— 之前比墙身宽 0.3 米，俯视看过去像墙顶铺了条木栈道。
-		var coping := MeshInstance3D.new()
-		coping.name = "coping_" + str(wall.get("id", "jungle"))
-		var coping_box := BoxMesh.new()
-		coping_box.size = Vector3(
-			length,
-			MapLayout.WALL_COPING_THICK,
-			MapLayout.WALL_THICKNESS + MapLayout.WALL_COPING_OVERHANG * 2.0
-		)
-		coping.mesh = coping_box
-		coping.material_override = stone
-		coping.position = Vector3(center.x, MapLayout.WALL_HEIGHT + MapLayout.WALL_COPING_THICK * 0.5 - 0.02, center.y)
-		coping.rotation.y = yaw
-		ModelUtils.enable_shadows(coping, true)
-		_props_root.add_child(coping)
-		# 壁柱：参考图里的城墙靠它立起节奏 —— 墙面每隔几米一根微凸方柱，
-		# 柱顶一块小方帽，帽顶越出压顶石形成一条起伏线。
-		# 这一格换了三次，别走回头路（细节见 map_layout.gd 的 WALL_BUTTRESS_* 注释）：
-		# ① 墙顶撒随机岩脊 = 塌方的语言，不是砌筑；② 等距等高方柱 = 城垛；
-		# ③ 现在才是砌筑：砖缝在 shader 里，凸出感靠壁柱，起伏靠柱帽。
-		var spans := maxi(2, int(round(length / MapLayout.WALL_BUTTRESS_SPACING)))
-		for i in spans:
-			var t := (float(i) + 0.5) / float(spans)
-			_build_buttress(
-				"buttress_%s_%d" % [str(wall.get("id", "jungle")), i],
-				a.lerp(b, t),
-				yaw,
-				MapLayout.WALL_THICKNESS,
-				MapLayout.WALL_HEIGHT,
-				stone,
-				{"wall_id": str(wall.get("id", "jungle")), "along": length * t}
+
+		# 岩脊：沿墙铺一串高度/宽度/朝向都不同的 Rock.glb。基座顶边是直的，
+		# 俯视一眼就读成方盒；岩脊把它压成一条起伏的山脊线。
+		# 低石左右摆出 S 形、高石仍贴中线：墙面轮廓因此不是一条直线，
+		# 但高石不会伸到英雄贴墙的位置。
+		var ridge_count := maxi(3, int(round(length / MapLayout.WALL_ROCK_SPACING)))
+		for i in ridge_count:
+			var t := (float(i) + 0.5) / float(ridge_count)
+			t = clampf(t + rng.randf_range(-0.22, 0.22) / float(ridge_count), 0.0, 1.0)
+			var p := a.lerp(b, t)
+			var wave := sin(t * PI * 2.4 + phase) * 0.26
+			if i % 2 == 1:
+				wave *= 0.2
+			var lateral := perp * (wave + rng.randf_range(-0.05, 0.05))
+			# 高低交替 + 随机带内抖动：纯随机在只有三块石头的短墙上会抽成一样高，
+			# 俯视又变回一条直顶边。
+			var band := rng.randf_range(0.05, 0.30) if i % 2 == 0 else rng.randf_range(0.70, 0.95)
+			_queue_rock(
+				p + lateral,
+				lerpf(MapLayout.WALL_ROCK_MIN_HEIGHT, MapLayout.WALL_ROCK_MAX_HEIGHT, band),
+				rng.randf_range(MapLayout.WALL_ROCK_WIDTH_MIN, MapLayout.WALL_ROCK_WIDTH_MAX),
+				rng.randf_range(0.0, TAU),
+				{"wall_id": wall_id, "kind": "ridge", "along": length * t}
 			)
-		# 岩石按墙长铺（每 3.2 米一块）：长墙只放三块会露出中间一大片光板，
-		# 短墙硬塞五块又会糊成一坨。
-		# 尺寸必须**低于墙身**（0.9~1.5 米）并贴到墙脚外侧：早先按 1.8~2.6 米
-		# 随机撒在墙轴线上，石头比 2.2 米的墙还高，俯视看过去像墙顶上趴着几块大石头。
-		var rocks := maxi(3, int(round(length / 3.2)))
-		var perp := Vector2(-dir.y, dir.x)
+		# 墙脚乱石：比旧版更密（每 2 米一块），左右两侧交替、位置带抖动。
+		# 这层是**低矮**的 0.8~1.4 米石块，不参与碰撞；它负责把墙脚那条
+		# 数学直线啃成参差的石根，俯视时墙不会像一条摆正的盒子边。
+		var rocks := maxi(4, int(round(length / 2.0)))
 		for i in rocks:
 			var p := a.lerp(b, (float(i) + 0.5) / float(rocks))
 			var side := 1.0 if i % 2 == 0 else -1.0
-			var out := perp * side * rng.randf_range(MapLayout.WALL_THICKNESS * 0.5 + 0.15, MapLayout.WALL_THICKNESS * 0.5 + 0.6)
-			var rock := ModelUtils.fit_scene(rock_scene, rng.randf_range(0.9, 1.5), rng.randf_range(1.4, 2.2))
-			# 名字即接口：墙脚石要能被测试与调试逐个找到。
-			rock.name = "footrock_%s_%d" % [str(wall.get("id", "jungle")), i]
-			rock.position = Vector3(p.x + out.x + rng.randf_range(-0.3, 0.3), 0.0, p.y + out.y + rng.randf_range(-0.3, 0.3))
-			rock.rotation.y = rng.randf_range(0.0, TAU)
-			# glb 自带的灰白材质和石壁贴在一起像「墙脚摆了几颗土豆」，
-			# 换成同一份石壁材质才读成同一块山体塌下来的碎块。
-			ModelUtils.override_material(rock, stone)
-			ModelUtils.enable_shadows(rock, false)
-			_props_root.add_child(rock)
+			var out := perp * side * rng.randf_range(MapLayout.WALL_THICKNESS * 0.5 + 0.15, MapLayout.WALL_THICKNESS * 0.5 + 0.75)
+			_queue_rock(
+				Vector2(p.x + out.x + rng.randf_range(-0.45, 0.45), p.y + out.y + rng.randf_range(-0.45, 0.45)),
+				rng.randf_range(0.8, 1.4),
+				1.0,
+				rng.randf_range(0.0, TAU),
+				{"wall_id": wall_id, "kind": "footrock", "along": length * (float(i) + 0.5) / float(rocks)}
+			)
 
+	# 野区墙石：一批 MultiMesh，阴影关闭。高石/墙脚石都由基座与墙端石提供接地阴影，
+	# 这一批数量最大，单独开阴影会让移动端的 shadow pass 翻倍。
+	_flush_rock_batch("wall_rocks", rock_scene, stone, false)
 	# 墙端露头：BoxMesh 的端面是绝对平的，一段墙看着像被刀切过。
 	# 王者的野区石壁是「山体在两端露头」，所以每个墙端压一块**高过墙顶**的岩体，
 	# 把平整端面吞进石头里。相邻两段墙靠得近时，两块露头自然合成一个山口。
@@ -2480,9 +2487,15 @@ func _build_map_features() -> void:
 	for camp in marks.camps:
 		var buff := str(camp.get("buff", ""))
 		var color := Color(0.95, 0.62, 0.22) if buff == "red" else Color(0.34, 0.58, 0.98)
-		_add_map_disc(camp.pos, MapLayout.CAMP_DISC_RADIUS, Color(color.r, color.g, color.b, 0.2), color)
-		_add_camp_sigil("camp_%s" % str(camp.id), camp.pos, MapLayout.CAMP_DISC_RADIUS, color)
-		_add_map_totem(camp.pos + Vector2(0.0, -2.0), 2.2, color)
+		if buff == "":
+			# 小野点用草绿，和红/蓝 buff 一眼分开；它们没有增益可争夺。
+			color = Color(0.58, 0.78, 0.42)
+		var disc_radius := float(camp.get("disc_radius", MapLayout.CAMP_DISC_RADIUS))
+		_add_map_disc(camp.pos, disc_radius, Color(color.r, color.g, color.b, 0.2), color)
+		_add_camp_sigil("camp_%s" % str(camp.id), camp.pos, disc_radius, color)
+		# 小野点不立图腾柱：12 个野点全立会变成一排彩色柱子，压过野怪本身。
+		if buff != "":
+			_add_map_totem(camp.pos + Vector2(0.0, -2.0), 2.2, color)
 		_add_camp_label(camp, color)
 
 	for pit in marks.objectives:
@@ -2492,7 +2505,7 @@ func _build_map_features() -> void:
 			var angle := TAU * float(i) / 4.0 + PI * 0.25
 			var pillar_pos: Vector2 = pit.pos + Vector2(cos(angle), sin(angle)) * 5.0
 			_add_map_totem(pillar_pos, 3.0, Color(0.62, 0.5, 0.82))
-		_add_camp_label(pit, Color(0.8, 0.58, 1.0))
+		_add_camp_label(pit, Color(0.8, 0.58, 1.0), true)
 
 	for pad in marks.teleports:
 		var pad_color := Color(0.4, 0.82, 0.92)
@@ -2503,70 +2516,116 @@ func _build_map_features() -> void:
 		# —— 阵盘离路缘只有 1.25 米，柱子一探出去就长在柏油上。
 		_add_map_totem(pad.pos + Vector2(0.0, -2.8), 2.6, pad_color)
 
-# 边界：一圈看得见的石 wall + 参差的岩脊。
+# 岩脊单块：fit_scene 先把高度对齐，再在水平方向拉伸成更宽的岩块。
+# 不能直接给 fit_scene 传 max_width：Rock.glb 本身高瘦，按宽度封顶会把它压矮。
+# meta 里带 wall_id / side / kind / along，测试靠它分组、量间距、找岩脊；
+# 不要改成解析节点名：墙 id 自己就带下划线（wall_top_west），拆字符串必崩。
+func _begin_rock_batch() -> void:
+	_rock_batch_specs.clear()
+
+func _queue_rock(point: Vector2, height: float, width_scale: float, yaw: float, meta: Dictionary) -> void:
+	_rock_batch_specs.append({
+		"pos": point,
+		"height": height,
+		"width_scale": width_scale,
+		"yaw": yaw,
+		"meta": meta,
+	})
+
+# Rock.glb 只实例化一次，取出网格与「把原始模型归一化到高 1 米、脚底 y=0」的
+# 基变换。之后每个实例只需要自己的缩放/旋转/位移，不再各自 new 一个场景。
+func _rock_mesh_data(rock_scene: PackedScene) -> Dictionary:
+	var key := rock_scene.resource_path
+	if _rock_mesh_cache.has(key):
+		return _rock_mesh_cache[key]
+	var model: Node3D = rock_scene.instantiate()
+	var mesh_instance: MeshInstance3D = null
+	for node in model.find_children("*", "MeshInstance3D", true, false):
+		var candidate := node as MeshInstance3D
+		if candidate.mesh != null:
+			mesh_instance = candidate
+			break
+	if mesh_instance == null:
+		model.free()
+		return {}
+	var local := Transform3D.IDENTITY
+	var current: Node = mesh_instance
+	while current != null and current != model:
+		if current is Node3D:
+			local = (current as Node3D).transform * local
+		current = current.get_parent()
+	# glb 根节点也可能带变换；fit_scene 的包围盒包含了它，这里必须一起带上。
+	local = model.transform * local
+	var box := ModelUtils.relative_aabb(model)
+	var raw_height := maxf(box.size.y, 0.001)
+	var factor := 1.0 / raw_height
+	var center := box.get_center()
+	var fit := Transform3D(
+		Basis.from_scale(Vector3.ONE * factor),
+		Vector3(-center.x * factor, -box.position.y * factor, -center.z * factor)
+	)
+	var data := {"mesh": mesh_instance.mesh, "base": fit * local}
+	model.free()
+	_rock_mesh_cache[key] = data
+	return data
+
+# 把本批岩块合成一个 MultiMeshInstance3D：几百块石头只占 1 个 draw call，
+# 阴影 pass 也只画一次。每块石头的 height/width/yaw/pos 和元数据仍写进
+# rock_specs，测试与调试可以逐块核对。
+func _flush_rock_batch(node_name: String, rock_scene: PackedScene, stone: Material, shadows: bool) -> MultiMeshInstance3D:
+	if _rock_batch_specs.is_empty():
+		return null
+	var data := _rock_mesh_data(rock_scene)
+	if data.is_empty():
+		_rock_batch_specs.clear()
+		return null
+	var mesh: Mesh = data.mesh
+	var base: Transform3D = data.base
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = _rock_batch_specs.size()
+	var bounds := AABB()
+	var has_bounds := false
+	for i in _rock_batch_specs.size():
+		var spec: Dictionary = _rock_batch_specs[i]
+		var point: Vector2 = spec.pos
+		var height := float(spec.height)
+		var width_scale := float(spec.width_scale)
+		var basis := Basis(Vector3.UP, float(spec.yaw)) \
+			* Basis.from_scale(Vector3(width_scale * height, height, width_scale * height))
+		var xform := Transform3D(basis, Vector3(point.x, 0.0, point.y)) * base
+		multimesh.set_instance_transform(i, xform)
+		spec["transform"] = xform
+		var extra: Dictionary = spec.meta
+		for extra_key in extra:
+			spec[extra_key] = extra[extra_key]
+		var instance_box: AABB = xform * mesh.get_aabb()
+		bounds = instance_box if not has_bounds else bounds.merge(instance_box)
+		has_bounds = true
+	var node := MultiMeshInstance3D.new()
+	node.name = node_name
+	node.multimesh = multimesh
+	node.material_override = stone
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# MultiMesh 的默认 AABB 只按单块网格算；不显式给全图包围盒，镜头一动
+	# 整批石头会被错误剔除，表现为「墙突然消失」。
+	node.custom_aabb = bounds
+	node.set_meta("rock_specs", _rock_batch_specs.duplicate(true))
+	_props_root.add_child(node)
+	_rock_batch_specs = []
+	return node
+
+# 边界：一圈看得见的岩壁。
 # 模拟层靠 collision.clamp_bounds 拦住人，但那是隐形墙 —— 玩家看见草地一直铺到
 # 远处的山，撞上去才知道到边了。这里的墙内表面与 MapData.BOUNDS 重合，
 # 所以「看到的墙」和「走不过去的线」是同一条。
 #
-# 2026-10-25 重做样式：原来是「1 米厚的墙 + 每 9 米一根 5.2 米方柱 + 浅色柱帽」，
-# 俯视看是一排等距**城垛**，整圈边界读成公园围墙。参考图里的边界是**自然的岩脊**：
-# 墙体本身足够厚（1.8 米）能看出进深，顶面被一堆高低不齐的石头打断，
-# 墙脚散着几块塌下来的碎石。于是柱子和柱帽整段删掉，换成岩脊 + 碎石。
-# 壁柱：柱身 + 柱帽。野区墙与边界墙共用同一套几何，只有墙厚 / 墙高不同。
-#
-# meta 里带 wall_id / side / kind / along，测试靠它分组、量间距、找柱帽 ——
-# 不要改成解析节点名：墙 id 自己就带下划线（wall_top_west），拆字符串必崩。
-#
-# 柱帽顶 = 墙高 + RISE + CAP - 0.02，恒等于 WALL_TOP 之下 2 厘米：
-# 相机安全边距（MapData.CAMERA_WALL_MARGIN）是按「最高的东西不能挡住英雄」反解的，
-# 这里一旦超过 WALL_TOP，贴到可走极限的玩家就会把自己藏进石头里。
-func _build_buttress(
-	node_name: String,
-	point: Vector2,
-	yaw: float,
-	wall_thick: float,
-	wall_height: float,
-	stone: Material,
-	meta: Dictionary
-) -> void:
-	var body_height := wall_height + MapLayout.WALL_BUTTRESS_RISE
-	var body := MeshInstance3D.new()
-	body.name = node_name
-	var body_box := BoxMesh.new()
-	body_box.size = Vector3(
-		MapLayout.WALL_BUTTRESS_WIDTH,
-		body_height,
-		wall_thick + MapLayout.WALL_BUTTRESS_DEPTH * 2.0
-	)
-	body.mesh = body_box
-	body.material_override = stone
-	body.position = Vector3(point.x, body_height * 0.5, point.y)
-	body.rotation.y = yaw
-	for key in meta:
-		body.set_meta(key, meta[key])
-	body.set_meta("kind", "body")
-	ModelUtils.enable_shadows(body, true)
-	_props_root.add_child(body)
-
-	var cap_height := MapLayout.WALL_BUTTRESS_CAP
-	var cap := MeshInstance3D.new()
-	cap.name = node_name + "_cap"
-	var cap_box := BoxMesh.new()
-	cap_box.size = Vector3(
-		MapLayout.WALL_BUTTRESS_WIDTH + MapLayout.WALL_BUTTRESS_CAP_SLACK * 2.0,
-		cap_height,
-		wall_thick + (MapLayout.WALL_BUTTRESS_DEPTH + MapLayout.WALL_BUTTRESS_CAP_SLACK) * 2.0
-	)
-	cap.mesh = cap_box
-	cap.material_override = stone
-	cap.position = Vector3(point.x, body_height + cap_height * 0.5 - 0.02, point.y)
-	cap.rotation.y = yaw
-	for key in meta:
-		cap.set_meta(key, meta[key])
-	cap.set_meta("kind", "cap")
-	ModelUtils.enable_shadows(cap, true)
-	_props_root.add_child(cap)
-
+# 2026-10-28 重做：旧版是「直方盒墙身 + 外挑压顶 + 等距壁柱」，俯视是一圈
+# 规整的城墙，四个直角非常明显。王者峡谷的边界是自然山体，岩面有进有退。
+# 现在保留 2 米高的砌石基座封住边界，上面铺一条前后错落、高度不一的岩脊；
+# 四个角再压一簇更大的岩体，把直角吞掉。岩脊可以往非走区探 1.2 米，
+# 但前缘始终留在玩家身体之外（可走极限 54.2，岩体前缘 ≥ 55）。
 func _build_boundary_walls() -> void:
 	# 边界墙与野区墙是同一块石头：两套材质会出现「远处木板、近处石壁」的割裂，
 	# 而且玩家读不出这两者是同一种地形。
@@ -2574,6 +2633,7 @@ func _build_boundary_walls() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20481
 	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
+	_begin_rock_batch()
 
 	for wall in MapLayout.boundary_walls():
 		var a: Vector2 = wall.a
@@ -2584,46 +2644,33 @@ func _build_boundary_walls() -> void:
 		var perp := Vector2(-dir.y, dir.x)
 		var yaw := -atan2(dir.y, dir.x)
 		var side := str(wall.get("id", "boundary")).trim_prefix("boundary_")
-		# 这一段的全部网格都挂到同一条遮挡记录上：淡出时整段一起变，
-		# 只淡墙身不淡压顶石 / 岩脊会留下「悬空的顶线」，比不淡还怪。
+		var inward := perp * (1.0 if center.dot(perp) < 0.0 else -1.0)
 		var barrier := MeshInstance3D.new()
 		barrier.name = str(wall.get("id", "boundary"))
 		var box := BoxMesh.new()
-		box.size = Vector3(length, MapLayout.BOUNDARY_HEIGHT, MapLayout.BOUNDARY_THICK)
+		box.size = Vector3(length, MapLayout.BOUNDARY_CORE_HEIGHT, MapLayout.BOUNDARY_THICK)
 		barrier.mesh = box
 		barrier.material_override = stone
-		barrier.position = Vector3(center.x, MapLayout.BOUNDARY_HEIGHT * 0.5, center.y)
+		barrier.position = Vector3(center.x, MapLayout.BOUNDARY_CORE_HEIGHT * 0.5, center.y)
 		barrier.rotation.y = yaw
 		ModelUtils.enable_shadows(barrier, true)
 		_props_root.add_child(barrier)
 
-		# 压顶石：略宽的横带，让墙在远处也有一条清楚的顶线，
-		# 不然 3.4m 的石墙在 40m 外会糊成一条灰边。
-		var coping := MeshInstance3D.new()
-		coping.name = "coping_boundary_" + side
-		var cap_box := BoxMesh.new()
-		cap_box.size = Vector3(length, MapLayout.WALL_COPING_THICK,
-			MapLayout.BOUNDARY_THICK + MapLayout.BOUNDARY_COPING_OVERHANG * 2.0)
-		coping.mesh = cap_box
-		coping.material_override = stone
-		coping.position = Vector3(center.x, MapLayout.BOUNDARY_HEIGHT + MapLayout.WALL_COPING_THICK * 0.5 - 0.02, center.y)
-		coping.rotation.y = yaw
-		ModelUtils.enable_shadows(coping, true)
-		_props_root.add_child(coping)
-
-		# 壁柱：四面墙用同一套砌筑语言。间距比野区（3.6）略宽一档 ——
-		# 边界墙一跑就是 118 米，按 3.6 铺要立 33 根，纯属烧节点。
-		var spans := maxi(2, int(round(length / MapLayout.BOUNDARY_BUTTRESS_SPACING)))
-		for i in spans:
-			var t := (float(i) + 0.5) / float(spans)
-			_build_buttress(
-				"buttress_boundary_%s_%d" % [side, i],
-				a.lerp(b, t),
-				yaw,
-				MapLayout.BOUNDARY_THICK,
-				MapLayout.BOUNDARY_HEIGHT,
-				stone,
-				{"side": side, "along": length * t}
+		# 岩脊：每块石头的进深、高度、水平拉伸都不同，连续的直顶线被打散成山脊。
+		var ridge_count := maxi(6, int(round(length / MapLayout.BOUNDARY_ROCK_SPACING)))
+		for i in ridge_count:
+			var t := (float(i) + 0.5) / float(ridge_count)
+			t = clampf(t + rng.randf_range(-0.2, 0.2) / float(ridge_count), 0.0, 1.0)
+			var p := a.lerp(b, t)
+			# 负值往外退、正值往可玩区探：同一侧墙的岩面因此有进有退。
+			p += inward * rng.randf_range(-MapLayout.BOUNDARY_ROCK_OUTWARD, MapLayout.BOUNDARY_ROCK_INTRUDE)
+			var band := rng.randf_range(0.05, 0.35) if i % 2 == 0 else rng.randf_range(0.65, 0.95)
+			_queue_rock(
+				p,
+				lerpf(MapLayout.BOUNDARY_ROCK_MIN_HEIGHT, MapLayout.BOUNDARY_ROCK_MAX_HEIGHT, band),
+				rng.randf_range(MapLayout.BOUNDARY_ROCK_WIDTH_MIN, MapLayout.BOUNDARY_ROCK_WIDTH_MAX),
+				rng.randf_range(0.0, TAU),
+				{"side": side, "kind": "ridge", "along": length * t}
 			)
 
 		# 墙脚碎石：让墙和草地之间不是一条数学直线。
@@ -2631,15 +2678,38 @@ func _build_boundary_walls() -> void:
 		var rubble := maxi(2, int(round(length / 6.5)))
 		for i in rubble:
 			var p := a.lerp(b, (float(i) + 0.5) / float(rubble) + rng.randf_range(-0.2, 0.2) / maxf(length, 0.001))
-			var inward := perp * (1.0 if center.dot(perp) < 0.0 else -1.0)
 			var out := inward * rng.randf_range(MapLayout.BOUNDARY_THICK * 0.5 + 0.1, MapLayout.BOUNDARY_THICK * 0.5 + 0.9)
-			var chunk := ModelUtils.fit_scene(rock_scene, rng.randf_range(0.35, 0.65), rng.randf_range(0.7, 1.3))
-			chunk.name = "rubble_boundary_%s_%d" % [side, i]
-			chunk.position = Vector3(p.x + out.x, 0.0, p.y + out.y)
-			chunk.rotation.y = rng.randf_range(0.0, TAU)
-			ModelUtils.override_material(chunk, stone)
-			ModelUtils.enable_shadows(chunk, false)
-			_props_root.add_child(chunk)
+			_queue_rock(
+				Vector2(p.x + out.x, p.y + out.y),
+				rng.randf_range(0.35, 0.65),
+				1.0,
+				rng.randf_range(0.0, TAU),
+				{"side": side, "kind": "rubble", "along": length * (float(i) + 0.5) / float(rubble)}
+			)
+
+	# 四角岩簇：两段直墙在角点硬碰硬，是最明显的「方盒子」信号。
+	# 每个角压三块大岩，前两块往外包、第三块往内收，把直角吞进山体里。
+	var c := MapLayout.BOUNDARY_CENTER
+	var corners := [Vector2(-c, -c), Vector2(c, -c), Vector2(c, c), Vector2(-c, c)]
+	for ci in corners.size():
+		var corner: Vector2 = corners[ci]
+		var outward := corner.normalized()
+		for j in 3:
+			var p := corner + outward * rng.randf_range(0.5, 1.8)
+			if j == 2:
+				p = corner - outward * rng.randf_range(0.1, 0.4)
+			p += Vector2(rng.randf_range(-0.6, 0.6), rng.randf_range(-0.6, 0.6))
+			_queue_rock(
+				p,
+				rng.randf_range(3.05, 3.6),
+				rng.randf_range(1.5, 1.75),
+				rng.randf_range(0.0, TAU),
+				{"side": "corner", "kind": "ridge", "corner": ci}
+			)
+
+	# 边界岩脊与角岩合成一批：桌面保留阴影（边界轮廓更立体）；
+	# 移动端关掉，边界基座和墙端石仍会投影，足够接地。
+	_flush_rock_batch("boundary_rocks", rock_scene, stone, not OS.has_feature("mobile"))
 
 func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> void:
 	var disc_material := StandardMaterial3D.new()
@@ -2728,7 +2798,7 @@ func _set_camp_sigil_active(key: String, active: bool) -> void:
 
 # 营地重生牌：怪物活着时隐藏，死亡后原地显示「名称 + 剩余秒数」。
 # 不用 UnitVisual 的头顶名牌，因为怪物死亡后视图会被回收，而倒计时必须留在营地上。
-func _add_camp_label(region: Dictionary, color: Color) -> void:
+func _add_camp_label(region: Dictionary, color: Color, pit := false) -> void:
 	var label := Label3D.new()
 	var region_id := str(region.get("id", ""))
 	label.name = "camp_timer_" + region_id
@@ -2741,9 +2811,9 @@ func _add_camp_label(region: Dictionary, color: Color) -> void:
 	label.modulate = color
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.no_depth_test = false
-	# 首领坑的怪高 2.4 米，牌要抬到头顶之上；小营地 2.1 米就够。
-	var is_pit := str(region.get("buff", "")) == ""
-	label.position = Vector3(float(region.pos.x), 3.4 if is_pit else 2.2, float(region.pos.y))
+	# 首领坑的怪高 2.4 米，牌要抬到头顶之上；小营地/小野点 2.1 米就够。
+	# 不能再用「buff 为空」判断首领：小野点的 buff 也是空的。
+	label.position = Vector3(float(region.pos.x), 3.4 if pit else 2.2, float(region.pos.y))
 	label.visible = false
 	label.set_meta("region_id", region_id)
 	label.set_meta("display_name", str(region.get("name", "野怪")))
@@ -2846,7 +2916,10 @@ func _build_grass_tufts() -> void:
 	_grass_noise.frequency = 0.045
 	_grass_noise.fractal_octaves = 2
 	_grass_bushes = MapView.map_marks().bushes
-	var tufts := GrassField.scatter(12000, _can_grow_grass, _terrain_height, rng)
+	# 手机端把草簇从 12000 降到 6000：草是半透明小片的 fill-rate 大头，
+	# 镜头移动时满屏草叶的 overdraw 会直接吃掉帧率；密度减半后远看仍是草甸。
+	var tuft_count := 6000 if OS.has_feature("mobile") else 12000
+	var tufts := GrassField.scatter(tuft_count, _can_grow_grass, _terrain_height, rng)
 	_props_root.add_child(tufts)
 
 func _build_scenery() -> void:

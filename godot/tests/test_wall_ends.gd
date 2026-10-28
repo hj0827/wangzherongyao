@@ -141,7 +141,7 @@ func test_end_rocks_stay_below_the_wall_top_so_they_never_hide_the_hero() -> voi
 		if node == null:
 			continue
 		var height: float = float(node.get_meta("end_height", 0.0))
-		lt(height, float(MapLayout.WALL_HEIGHT) - 0.15, "露头石高过墙顶会挡住贴墙站的英雄，当前 %.2f" % height)
+		lt(height, float(MapLayout.WALL_TOP) - 0.15, "露头石高过墙顶会挡住贴墙站的英雄，当前 %.2f" % height)
 		gt(height, 1.2, "露头石低于 1.2 米只是一块墙脚碎石，收不了端面，当前 %.2f" % height)
 		heights.append(height)
 	gt(float(heights.size()), 0.0, "至少要有一块露头石")

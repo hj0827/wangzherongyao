@@ -1289,16 +1289,22 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 				"y": float(target.pos.y),
 			})
 		else:
+			var buff_type := str(target.get("buff_type", ""))
+			var xp_gain := float(target.get("xp", 45.0))
 			if not source.is_empty() and str(source.get("type", "")) == "hero":
-				Jungle.apply_buff(source, str(target.get("buff_type", "")))
-				_add_xp(source, 45.0)
-			_emit("buff_taken", {
-				"team": str(source.get("team", "")),
-				"buff": str(target.get("buff_type", "")),
-				"name": str(target.get("name", "野怪")),
-				"x": float(target.pos.x),
-				"y": float(target.pos.y),
-			})
+				# 小野点没有增益，不能发 buff_taken：事件白名单里 buff 为空时
+				# 播报层会把它误读成红 BUFF。
+				if buff_type != "":
+					Jungle.apply_buff(source, buff_type)
+				_add_xp(source, xp_gain)
+			if buff_type != "":
+				_emit("buff_taken", {
+					"team": str(source.get("team", "")),
+					"buff": buff_type,
+					"name": str(target.get("name", "野怪")),
+					"x": float(target.pos.x),
+					"y": float(target.pos.y),
+				})
 		_emit("death", {
 			"entity_type": "monster",
 			"team": "neutral",

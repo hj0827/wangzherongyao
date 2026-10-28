@@ -9,6 +9,7 @@ extends "res://tests/test_base.gd"
 const MatchSim = preload("res://sim/match_sim.gd")
 const Arena = preload("res://scripts/game/arena.gd")
 const DebugPanel = preload("res://scripts/ui/debug_panel.gd")
+const HudLayout = preload("res://scripts/ui/hud_layout.gd")
 
 func _human(id: String, team: String, hero_type := "blade") -> Dictionary:
 	return {"id": id, "name": id, "team": team, "hero_type": hero_type}
@@ -168,3 +169,34 @@ func test_debug_panel_builds_and_disables_cheats_on_guests() -> void:
 		check(control.disabled, "客机必须禁用所有作弊控件")
 	panel.free()
 	arena.free()
+
+func test_debug_panel_has_a_touch_entry_for_real_devices() -> void:
+	# 真机没有 F3：入口必须是屏幕上的键，而且 CanvasLayer 不能跟着面板一起 hidden。
+	var arena := Arena.new()
+	arena.touch_mode = true
+	var panel = DebugPanel.new()
+	panel.setup(arena)
+	check(panel.visible, "CanvasLayer 必须常驻，否则关掉面板后入口也消失")
+	check(panel._toggle != null, "调试构建必须有可点的 DEV 入口")
+	check(not panel.root.visible, "面板默认收起")
+	if panel._toggle != null:
+		eq(panel._toggle.label, "DEV", "收起时按钮写 DEV")
+		check(panel._toggle.visible, "触屏设备上 DEV 入口必须真的显示")
+		panel._toggle.pressed.emit()
+		check(panel.root.visible, "点 DEV 能打开面板")
+		eq(panel._toggle.label, "关闭", "打开后同一个键变成关闭")
+		panel._toggle.pressed.emit()
+		check(not panel.root.visible, "再点一次收起面板")
+		var rect := Rect2(panel._toggle.position, panel._toggle.size)
+		var zones := HudLayout.zones(Vector2(1600.0, 900.0), true)
+		check(not rect.intersects(zones["pause"]), "DEV 入口不能压住暂停键")
+		check(not rect.intersects(zones["hero"]), "DEV 入口不能压住状态卡")
+	panel.free()
+	arena.free()
+
+	var desktop_arena := Arena.new()
+	var desktop_panel = DebugPanel.new()
+	desktop_panel.setup(desktop_arena)
+	check(not desktop_panel._toggle.visible, "键鼠模式不显示 DEV 键，F3 已经够用")
+	desktop_panel.free()
+	desktop_arena.free()

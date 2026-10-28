@@ -30,4 +30,6 @@ renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0.03, 0.05, 0.08, 1)
-scaling_3d/scale.mobile=0.82
+; 手机端 3D 渲染分辨率：0.72 × 屏幕像素。地表 shader 铺满整屏，
+; 0.82 时移动镜头仍会掉到 20 多 fps；0.72 约少 23% 像素，UI 仍是原生分辨率。
+scaling_3d/scale.mobile=0.72

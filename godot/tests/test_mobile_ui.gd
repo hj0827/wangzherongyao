@@ -75,16 +75,17 @@ func test_skill_buttons_arc_around_the_left_of_attack() -> void:
 	var gap := TouchLayout.SKILL_ARC_RADIUS - TouchLayout.ATTACK_BUTTON_SIZE * 0.5 - TouchLayout.SKILL_TOUCH_SIZE.x * 0.5
 	check(gap >= 12.0, "skill circles clear the attack button")
 
-func test_utility_buttons_do_not_cover_the_skill_arc() -> void:
-	# 回城 / 传送 / 召唤师那一列在技能弧左侧（见 touch_layout.utility_button_rects），
-	# 这条守的是：三颗一律不许压到技能、攻击键、摇杆和回城条上。
+func test_utility_buttons_form_a_bottom_row_like_honor_of_kings() -> void:
+	# 王者常规布局：攻击键在最右，技能弧在左上，召唤师/传送/回城在技能弧左侧
+	# 沿底部排成一行（召唤师离技能最近）。这条守的是位置、顺序，以及不许压到
+	# 技能、攻击键和屏幕外。
 	for viewport_size in [Vector2(1600.0, 900.0), Vector2(2000.0, 900.0), Vector2(2400.0, 1080.0)]:
 		var attack := TouchLayout.attack_center(viewport_size)
 		var attack_rect := Rect2(attack - Vector2(TouchLayout.ATTACK_BUTTON_SIZE, TouchLayout.ATTACK_BUTTON_SIZE) * 0.5, Vector2(TouchLayout.ATTACK_BUTTON_SIZE, TouchLayout.ATTACK_BUTTON_SIZE))
 		var skill_rects: Array[Rect2] = []
 		for center in TouchLayout.skill_arc_centers(viewport_size):
 			skill_rects.append(Rect2(center - TouchLayout.SKILL_TOUCH_SIZE * 0.5, TouchLayout.SKILL_TOUCH_SIZE))
-		var names := ["summoner", "teleport", "recall"]
+		var names := ["recall", "teleport", "summoner"]
 		var slots := TouchLayout.utility_button_rects(viewport_size)
 		eq(slots.size(), names.size(), "three utility sockets at %s" % viewport_size)
 		for i in slots.size():
@@ -94,6 +95,14 @@ func test_utility_buttons_do_not_cover_the_skill_arc() -> void:
 			check(not rect.intersects(attack_rect), "%s utility button does not cover the attack key" % names[i])
 			for j in skill_rects.size():
 				check(not rect.intersects(skill_rects[j]), "%s utility button does not overlap skill %d" % [names[i], j])
+			if i > 0:
+				# 同一底边、横向排开：不是旧版的竖列。
+				near(rect.position.y, slots[0].position.y, 0.001, "utility buttons share one bottom row")
+				gt(rect.position.x, slots[i - 1].end.x, "utility buttons advance left to right")
+		# 召唤师必须紧贴技能弧，回城离技能最远。
+		var arc := TouchLayout.skill_arc_centers(viewport_size)
+		var q_left := arc[0].x - TouchLayout.SKILL_TOUCH_SIZE.x * 0.5
+		near(slots[2].end.x, q_left - TouchLayout.UTILITY_SKILL_GAP, 0.001, "summoner sits next to the skill arc")
 
 func test_touch_skill_drag_aims_and_cancels() -> void:
 	var hud := GameHUD.new()

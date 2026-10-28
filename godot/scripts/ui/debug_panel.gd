@@ -5,15 +5,20 @@ extends CanvasLayer
 # 原则：**只改本地主机**。客机没有 sim，所有作弊按钮在客机上直接禁用，
 # 面板仍可打开看 FPS / 实体数 / 缓冲深度 —— 排查网络卡顿时这些数字比作弊有用。
 #
-# 入口：F3。构建条件见 Arena._debug_enabled()（debug build / --dev / config.debug_panel）。
-# 面板不参与游戏输入分发：控件自己吃掉鼠标事件，键盘只认 F3。
+# 入口：F3（键鼠）或左上角的 DEV 触控键（真机没有 F3）。
+# 构建条件见 Arena._debug_enabled()（debug build / --dev / config.debug_panel）。
+# 面板不参与游戏输入分发：控件自己吃掉鼠标/触摸事件，键盘只认 F3。
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
+const HudLayout = preload("res://scripts/ui/hud_layout.gd")
+const TouchActionButton = preload("res://scripts/ui/touch_action_button.gd")
 
 const TIME_SCALES := [0.25, 0.5, 1.0, 2.0, 4.0]
 
 var arena: Object = null
 var root: PanelContainer
+# 常驻的触控入口：手机上没有 F3，没有它调试面板在真机上等于不存在。
+var _toggle = null
 var _status: Label
 var _network: Label
 var _refresh := 0.0
@@ -22,18 +27,32 @@ var _cheat_controls: Array[Control] = []
 func setup(target: Object) -> void:
 	arena = target
 	layer = 20
-	visible = false
+	# CanvasLayer 本身必须一直可见：收起只隐藏 root，否则入口会跟着一起消失。
+	visible = true
 	_build()
+	root.visible = false
+	_layout_toggle()
 	_refresh = 0.0
 
+func _ready() -> void:
+	var vp := get_viewport()
+	if vp != null and not vp.size_changed.is_connected(_layout_toggle):
+		vp.size_changed.connect(_layout_toggle)
+	_layout_toggle()
+
 func toggle() -> void:
-	set_open(not visible)
+	set_open(not root.visible)
 
 func set_open(value: bool) -> void:
-	visible = value
+	if root == null:
+		return
+	root.visible = value
+	if _toggle != null:
+		_toggle.label = "关闭" if value else "DEV"
 	if value:
 		_refresh = 0.0
 		_refresh_status()
+
 
 func _build() -> void:
 	root = PanelContainer.new()
@@ -59,6 +78,19 @@ func _build() -> void:
 	add_child(host)
 	host.add_child(root)
 
+	# 触控入口挂在同一个宿主上，和面板互不遮挡。按钮只在调试构建里存在；
+	# 没有它，真机安装调试包后只能看到面板却永远打不开。
+	_toggle = TouchActionButton.new()
+	_toggle.name = "DebugToggle"
+	_toggle.label = "DEV"
+	_toggle.hint = "" if _is_touch() else "F3"
+	_toggle.accent = Color(0.84, 0.66, 0.34)
+	_toggle.touch_mode = _is_touch()
+	# 键鼠端有 F3，不必在画面里多挂一颗常驻键；真机才是没有它打不开。
+	_toggle.visible = _is_touch()
+	_toggle.pressed.connect(toggle)
+	host.add_child(_toggle)
+
 	var column := VBoxContainer.new()
 	column.add_theme_constant_override("separation", 6)
 	root.add_child(column)
@@ -69,7 +101,12 @@ func _build() -> void:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_row.add_child(spacer)
-	title_row.add_child(_make_label("F3 关闭", 12, GameTheme.MUTED))
+	var close_button := Button.new()
+	close_button.text = "关闭"
+	close_button.custom_minimum_size = Vector2(64, 32)
+	close_button.add_theme_font_size_override("font_size", 13)
+	close_button.pressed.connect(func() -> void: set_open(false))
+	title_row.add_child(close_button)
 
 	_status = _make_label("", 13, GameTheme.TEXT)
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -205,8 +242,34 @@ func _call(method: String, args: Array) -> void:
 		return
 	arena.callv(method, args)
 
+func _is_touch() -> bool:
+	if arena == null or not is_instance_valid(arena):
+		return false
+	return bool(arena.get("touch_mode"))
+
+# 入口位置只从 HudLayout 的分区表推导：触屏贴在暂停键下方，
+# 键鼠贴在小地图下方。不要手写 anchor/offset，否则换了分辨率就会压住 HUD。
+func _layout_toggle() -> void:
+	if _toggle == null:
+		return
+	var viewport := Vector2(1600.0, 900.0)
+	var vp := get_viewport()
+	if vp != null:
+		var size := vp.get_visible_rect().size
+		if size.x > 1.0 and size.y > 1.0:
+			viewport = size
+	var touch := _is_touch()
+	var zones := HudLayout.zones(viewport, touch)
+	var anchor_rect: Rect2 = zones.get("pause" if touch else "minimap", Rect2())
+	var extent := 96.0 if touch else 64.0
+	var pos := Vector2(anchor_rect.position.x, anchor_rect.end.y + 8.0)
+	pos.x = clampf(pos.x, HudLayout.MARGIN, viewport.x - extent - HudLayout.MARGIN)
+	pos.y = clampf(pos.y, HudLayout.MARGIN, viewport.y - extent - HudLayout.MARGIN)
+	_toggle.position = pos
+	_toggle.size = Vector2(extent, extent)
+
 func _process(delta: float) -> void:
-	if not visible:
+	if root == null or not root.visible:
 		return
 	_refresh -= delta
 	if _refresh > 0.0:

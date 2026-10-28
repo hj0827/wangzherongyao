@@ -56,12 +56,16 @@ static func feature_shapes() -> Array:
 			"color": Color(0.16, 0.26, 0.17, 0.5),
 		})
 	for camp in MapLayout.CAMPS:
+		var buff := str(camp.get("buff", ""))
+		var camp_color := Color(0.93, 0.6, 0.24, 0.85) if buff == "red" else Color(0.32, 0.56, 0.98, 0.9)
+		if buff == "":
+			camp_color = Color(0.5, 0.72, 0.38, 0.85)
 		shapes.append({
 			"kind": "camp",
 			"id": str(camp.id),
 			"pos": camp.pos,
-			"radius": 2.8,
-			"color": Color(0.93, 0.6, 0.24, 0.85) if str(camp.get("buff", "")) == "red" else Color(0.32, 0.56, 0.98, 0.9),
+			"radius": 2.8 if buff != "" else 2.0,
+			"color": camp_color,
 		})
 	for pit in MapLayout.OBJECTIVE_PITS:
 		shapes.append({
@@ -107,7 +111,14 @@ static func camp_timer_marks(entities: Array) -> Array:
 				if str(camp.id) != camp_id:
 					continue
 				region = camp
-				color = Color(0.93, 0.6, 0.24, 0.9) if str(camp.get("buff", "")) == "red" else Color(0.4, 0.66, 1.0, 0.95)
+				var buff := str(camp.get("buff", ""))
+				if buff == "red":
+					color = Color(0.93, 0.6, 0.24, 0.9)
+				elif buff == "blue":
+					color = Color(0.4, 0.66, 1.0, 0.95)
+				else:
+					color = Color(0.56, 0.76, 0.42, 0.9)
+				total = float(camp.get("respawn_time", Jungle.RESPAWN_TIME))
 				break
 		else:
 			for pit in MapLayout.OBJECTIVE_PITS:

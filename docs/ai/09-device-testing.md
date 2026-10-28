@@ -56,6 +56,10 @@ python tools/device_checks.py
 
 `device_checks.py` 用 ADB + 截图 + 像素差 + logcat 做黑盒验证，不改游戏代码。退出码 `0` = 无 FAIL；`1` = 有 FAIL；`2` = 静态检查就失败。
 
+> 调试面板入口：真机没有 F3。调试包进入对局后，点 HUD 左上角（触屏时在暂停键下方）的 `DEV` 键打开；面板标题栏的「关闭」或同一个 `DEV` 键都能收起。键鼠端仍按 `F3`。
+>
+> 移动端画质（2026-10-28）：3D 渲染分辨率 `0.72`、草簇 `6000`、地表 shader 只保留 1 层草 + 1 层泥土、阴影距离 `36 m`、地形/边界岩脊批次不投影。用 DEV 面板的 FPS 指标在「移动英雄时」采样；如果仍低于 30，先看 `PERF` 再动其他地图内容。
+
 ---
 
 ## 3. 自动化用例
@@ -184,6 +188,8 @@ python tools/device_checks.py
 - `tests/test_mobile_ui.gd` 新增 `test_utility_buttons_do_not_cover_the_skill_arc`，headless 即可拦截回归。
 - `tools/device_checks.py` 的 `UI-01` 同步校验；`HUD-04`、`SKILL-01/02`、`SAFE-01` 的旧坐标也改为从 `SKILL_RECTS` 推导。
 
+> 2026-10-28 再次调整触控键位：技能弧半径改为 380，回城/传送/召唤师从上方三连块改为**底部横排**（回城 → 传送 → 召唤师）。`device_checks.py` 的 `RECALL_RECT / TELEPORT_RECT / SUMMONER_RECT` 已按同一套几何重算；旧截图里的坐标只适用于旧版。
+
 另外修正了自动化脚本自身的几处误判：
 
 - 商店关闭改用面板右上角"关闭"按钮（打开商店时全屏遮罩会挡住顶部商店按钮）。
@@ -205,6 +211,7 @@ python tools/device_checks.py
 | 2026-10-23 17:24 | 0.1.7 (code 8) | 无（USB 掉线） | 静态阶段首轮：`BUILD-05` FAIL，导出漏打 `themed_icon.xml`；其余静态项全绿 | — |
 | 2026-10-23 17:33 | 0.1.7 (code 8，已跑 `fix_apk_theme_icon.py`) | 无（USB 掉线） | 静态阶段 PASS=7 FAIL=1 WARN=1 SKIP=10；唯一 FAIL 为 `ENV-01` 设备不在线，属预期 | `godot/shots/device_checks/20261023_173310/report.json` |
 | 2026-10-23 17:57 | 0.1.7 (code 8) | vivo V2220A (10AC9J0VZA0011K) | **真机全局全流程完整跑通**：PASS=78, WARN=3, SKIP=13, INFO=2；成功覆盖启动、窗口、OGV硬解双视频、UI导航栈、硬件BACK键、1v1对局、7大HUD、战局情报、商店面板与快捷购买、攻击模式切换、拖拽瞄准与取消施法、召唤师技能、回城与传送响应、全技能Q/W/E/R施法响应、5v5十英雄AI团战、SurfaceFlinger真实帧率采样、局域网建房大厅与开赛、GLES3 Shader编译与音频子系统 | `godot/shots/device_checks/20261023_174953/report.json` |
+| 2026-10-28 17:15 | 0.1.7 (code 8) | vivo V2220A (10AC9J0VZA0011K) | 新地图/触控布局冒烟：主菜单 → 1v1 选人 → 加载 → 对局；野外边界可见岩脊石壁，底部功能横排（回城→传送→召唤师）与攻击/技能弧正常；logcat 无 Godot 脚本错误 | `godot/shots/device_checks/20261028_smoke/` |
 
 ---
 

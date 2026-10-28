@@ -42,7 +42,7 @@ func test_wall_inner_surface_is_the_walkable_edge() -> void:
 	near(MapLayout.boundary_inner(), MapData.BOUNDS, EPS, "墙内表面必须与底盘边界重合")
 	gt(MapLayout.BOUNDARY_CENTER, MapData.BOUNDS, "墙心在可走边界之外，不能把墙修在地图里")
 	gt(float(MapLayout.BOUNDARY_THICK), 0.0, "墙必须有厚度，否则侧面看是一条纸片")
-	gt(float(MapLayout.BOUNDARY_HEIGHT), 1.6, "墙要明显高于角色视线里的地面起伏")
+	gt(float(MapLayout.BOUNDARY_TOP), 1.6, "岩脊要明显高于角色视线里的地面起伏")
 
 func test_walkable_area_never_reaches_into_the_wall() -> void:
 	# 人能走到的极限是 BOUNDS - radius - 相机安全边距；必须还在墙内侧。
@@ -71,53 +71,67 @@ func test_visual_wall_is_not_in_the_collision_list() -> void:
 	near(clamped.x, limit, EPS, "越界点必须被夹回可走极限 x")
 	near(clamped.y, limit, EPS, "越界点必须被夹回可走极限 y")
 
-func test_boundary_wall_is_masonry_with_rising_buttress_caps() -> void:
-	# 旧版每 9 米立一根 5.2 米等距方柱 + 浅色柱帽，俯视就是一圈**城垛**。
-	# 中间那版改成墙顶撒随机岩脊，那是「塌方」的语言，而参考图是一道**砌筑**的城墙。
-	# 契约（对照参考图）：压顶石外挑 + 内侧等距壁柱 + 柱帽越出压顶一起伏线。
+func test_boundary_wall_is_a_rock_cliff_not_a_square_rampart() -> void:
+	# 旧版是「直方盒墙 + 外挑压顶 + 等距壁柱」，俯视一圈规整城墙，四个直角特别方。
+	# 现在改成：2 米砌石基座 + 前后错落的岩脊 + 四角大岩簇。
 	var data_source := FileAccess.get_file_as_string("res://sim/map/map_layout.gd")
 	check(not data_source.contains("BOUNDARY_POST_SPACING"), "边界墙不该再有等距塔柱的间距常量")
-	check(not data_source.contains("BOUNDARY_POST_HEIGHT"), "边界墙不该再有塔柱高度常量")
-	check(not data_source.contains("BOUNDARY_CREST_"), "边界墙不该再靠随机岩脊破平顶，改用壁柱帽")
+	check(not data_source.contains("BOUNDARY_CREST_"), "边界墙不该再靠随机岩脊破平顶")
 	var build_source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
-	check(not build_source.contains("post_cap"), "柱帽那套部件应当整段删掉")
-
-	# 压顶石必须**外挑**：参考图里顶面比墙面探出一条，那是城墙最清楚的横向线。
-	gt(float(MapLayout.BOUNDARY_COPING_OVERHANG), 0.05, "压顶石要探出墙面，齐平就只是一块厚板")
-	lt(float(MapLayout.BOUNDARY_COPING_OVERHANG), 0.6, "压顶探出太多会变成一条檐廊")
+	check(not build_source.contains("buttress_boundary_"), "边界墙不该再有等距壁柱")
+	check(not build_source.contains("coping_boundary_"), "边界墙不该再有直压顶")
 
 	var arena: Node3D = Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena.call("_build_boundary_walls")
-	var sides := {}
-	var tops := {}
+	var stone: ShaderMaterial = arena._wall_stone_material()
+	var cores := {}
 	for child in arena._props_root.get_children():
-		if not str(child.name).begins_with("buttress_boundary_"):
-			continue
-		var side := str((child as Node).get_meta("side", ""))
-		if side == "":
-			continue
-		sides[side] = int(sides.get(side, 0)) + 1
-		if str((child as Node).get_meta("kind", "")) != "body":
+		var node_name := str((child as Node).name)
+		if node_name not in ["boundary_north", "boundary_south", "boundary_east", "boundary_west"]:
 			continue
 		var box: BoxMesh = ((child as MeshInstance3D).mesh) as BoxMesh
-		if box == null:
+		check(box != null, "边界基座应当是 BoxMesh：%s" % node_name)
+		if box != null:
+			near(box.size.y, MapLayout.BOUNDARY_CORE_HEIGHT, 0.001, "边界基座高度必须是低矮的封边层")
+			near(box.size.z, MapLayout.BOUNDARY_THICK, 0.001, "边界基座厚度必须等于碰撞厚度")
+		cores[node_name] = true
+	eq(cores.size(), 4, "四面边界基座都要建出来")
+	var batch := arena._props_root.get_node_or_null("boundary_rocks") as MultiMeshInstance3D
+	check(batch != null, "边界岩脊必须合成一个 MultiMesh 批次")
+	if batch == null:
+		arena.free()
+		return
+	eq(batch.material_override, stone, "边界岩脊必须与基座同材质")
+	var mesh: Mesh = batch.multimesh.mesh
+	var ridge_count := 0
+	var corner_count := 0
+	var shortest := INF
+	var tallest := -INF
+	for spec in batch.get_meta("rock_specs", []):
+		var height := float(spec.get("height", 0.0))
+		if str(spec.get("side", "")) == "corner":
+			corner_count += 1
 			continue
-		gt(box.size.z, MapLayout.BOUNDARY_THICK + 0.1, "边界壁柱要外挑出墙面：%s" % str(child.name))
-		if not tops.has(side):
-			tops[side] = []
-		(tops[side] as Array).append((child as Node3D).position.y + box.size.y * 0.5)
+		if str(spec.get("kind", "")) != "ridge":
+			continue
+		ridge_count += 1
+		shortest = minf(shortest, height)
+		tallest = maxf(tallest, height)
+		lt(height, MapLayout.BOUNDARY_TOP + 0.001, "边界岩脊高出了遮挡预算")
+		gt(height, MapLayout.BOUNDARY_ROCK_MIN_HEIGHT - 0.001, "边界岩脊太矮，盖不住基座")
+		# 岩体只能碰非走区：把实例 AABB 变换到世界后，离原点最近的点必须越过
+		# 玩家身体极限（58 - 3.8 - 0.65 = 53.55 的中心 + 0.65 身体 = 54.2）。
+		var xform: Transform3D = spec.transform
+		var world_box: AABB = xform * mesh.get_aabb()
+		var closest_x := clampf(0.0, world_box.position.x, world_box.position.x + world_box.size.x)
+		var closest_z := clampf(0.0, world_box.position.z, world_box.position.z + world_box.size.z)
+		gt(maxf(absf(closest_x), absf(closest_z)), 54.1, "边界岩体伸进了可走区")
+	gt(float(ridge_count), 60.0, "边界岩脊要连续铺满四面墙，不能只放几块石头")
+	gt(tallest - shortest, 0.5, "边界岩脊高低要有明显起伏，否则还是平顶")
+	eq(corner_count, 12, "四个角各三块大岩，把直角吞掉")
 	arena.free()
-	eq(sides.size(), 4, "四面墙都要有壁柱，只做一面等于没做")
-	for side in sides:
-		gt(float(sides[side]), 5.0, "%s 这面墙的壁柱太少（%d 根），节奏断了" % [side, int(sides[side])])
-	# 最高点必须留在 BOUNDARY_TOP 预算内：相机的安全边距是按它反解的。
-	for side in tops:
-		var list: Array = tops[side]
-		if list.is_empty():
-			continue
-		lt(float(list.max()), MapLayout.BOUNDARY_TOP + 0.001, "%s 的壁柱高出了遮挡预算" % side)
 
 func test_boundary_wall_has_real_depth() -> void:
 	# 1 米厚在 51° 俯视下只剩一条石板边；加厚之后墙顶才有进深。
@@ -148,18 +162,20 @@ func test_walking_into_the_wall_stops_cleanly() -> void:
 	near(corner.y, limit, 0.05, "角落 y 停在可走极限")
 
 func test_arena_actually_builds_the_boundary() -> void:
-	# "文件在 + 数据对" ≠ "墙真的建出来了"。真跑一次构建函数，数节点。
+	# "文件在 + 数据对" ≠ "墙真的建出来了"。真跑一次构建函数，数基座与岩脊实例。
 	var arena = Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena.call("_build_boundary_walls")
 	var named := 0
 	for child in arena._props_root.get_children():
-		if str(child.name).begins_with("boundary_"):
+		if str(child.name) in ["boundary_north", "boundary_south", "boundary_east", "boundary_west"]:
 			named += 1
-	eq(named, 4, "四面边界墙必须各自作为独立节点建出来")
-	# 墙 + 压顶 + 塔柱 + 柱帽，总量应该远超四面墙本身。
-	gt(float(arena._props_root.get_child_count()), 30.0, "边界墙除了墙体还应该有压顶与塔柱")
+	eq(named, 4, "四面边界墙必须各自作为独立基座节点建出来")
+	var batch := arena._props_root.get_node_or_null("boundary_rocks") as MultiMeshInstance3D
+	check(batch != null, "边界岩脊与碎石必须合成一个 MultiMesh")
+	if batch != null:
+		gt(float(batch.multimesh.instance_count), 30.0, "边界岩脊与碎石实例数不能只剩几块")
 	arena.free()
 
 func test_minimap_draws_the_boundary_frame() -> void:

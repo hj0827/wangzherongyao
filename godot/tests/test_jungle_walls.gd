@@ -200,8 +200,8 @@ func test_walls_do_not_cross_each_other() -> void:
 
 func test_walls_are_tall_enough_to_read_as_a_rock_face() -> void:
 	# 1.7 米的墙在 51° 俯视下只剩一条石坎，读不出「这是墙」。
-	gt(float(MapLayout.WALL_HEIGHT), 2.0, "野区墙体必须高过英雄，才读得出是石壁")
-	gt(float(MapLayout.WALL_HEIGHT), float(MapLayout.WALL_THICKNESS), "墙高必须大于墙厚，否则是个石墩")
+	gt(float(MapLayout.WALL_TOP), 2.0, "野区石壁必须高过英雄，才读得出是石壁")
+	gt(float(MapLayout.WALL_TOP), float(MapLayout.WALL_THICKNESS), "石壁高度必须大于墙厚，否则是个石墩")
 
 func test_base_decor_buildings_are_gone() -> void:
 	# 用户 2026-10-25：基地左右两边的房子和摊子（神庙 / 集市 / 兵营 / 木箱木桶）全部删除，红方同样。

@@ -90,9 +90,15 @@ func test_camp_sigils_and_respawn_labels_follow_monster_state() -> void:
 			arena._props_root.get_node_or_null(NodePath("camp_sigil_" + key)) != null,
 			"符阵必须作为独立节点挂在地面上：" + key
 		)
+		var camp_label: Label3D = arena._camp_labels.get(str(camp.id), null)
+		if camp_label != null:
+			near(camp_label.position.y, 2.2, 0.001, "小野点/营地重生牌不能抬到首领高度：" + str(camp.id))
 	for pit in MapLayout.OBJECTIVE_PITS:
 		check(arena._camp_sigils.has("pit_" + str(pit.id)), "首领坑也要有符阵：" + str(pit.id))
 		check(arena._camp_labels.has(str(pit.id)), "首领坑也要有重生牌：" + str(pit.id))
+		var pit_label: Label3D = arena._camp_labels.get(str(pit.id), null)
+		if pit_label != null:
+			near(pit_label.position.y, 3.4, 0.001, "首领坑重生牌要抬到首领头顶：" + str(pit.id))
 
 	var camp: Dictionary = MapLayout.CAMPS[0]
 	var label: Label3D = arena._camp_labels.get(str(camp.id), null)

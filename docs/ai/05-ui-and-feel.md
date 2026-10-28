@@ -20,7 +20,7 @@
 | `scripts/game/arena.gd` | 3D 表现：相机、特效、飘字、震屏、指示环、输入 | 3921 行 |
 | `scripts/game/unit_visual.gd` | 单位装配、骨骼动画、头顶血条、野怪名牌、草丛斜划眼 | 917 行 |
 | `scripts/game/bush_eye.gd` | 进草「不可见」标记：96px 斜划眼，逐像素生成 + 静态缓存 | 74 行 |
-| `scripts/ui/debug_panel.gd` | 开发者调试面板（F3）：时间倍率/暂停/作弊开关/运行指标 | 245 行 |
+| `scripts/ui/debug_panel.gd` | 开发者调试面板（F3 / 触控 DEV）：时间倍率/暂停/作弊开关/运行指标 | 304 行 |
 
 ---
 
@@ -175,6 +175,18 @@ godot --path godot --script res://tools/mobile_shot.gd
 
 否则 60FPS 下 16ms 的一次点击可能刚好落在两次采样之间，被整帧吞掉——玩家看到的就是"我明明点了却没出手"。新增即时键时，除了加进 `net_protocol.EMPTY_INPUT` 白名单与 §6 的强制发送条件，还要按同样方式锁存。
 
+### 5.2 触控键位：王者常规布局
+
+右手拇指区的三组键从右到左：
+
+| 区域 | 内容 |
+| --- | --- |
+| 最右 | 普攻大键（152），上方/左侧是 Q/W/E/R 四技能弧（半径 380，角度 186°~264°） |
+| 技能弧左侧 | **底部横排** 回城 → 传送 → 召唤师（96/颗，间隔 12，召唤师紧贴 Q） |
+| 普攻键左侧 | 普攻/补刀/推塔三颗模式圆（88/颗，纵向排列） |
+
+左下是摇杆，底部正中是回城读取条，左上角是小地图与状态卡。**不要**再把回城/传送/召唤师竖成一列：那是旧版布局，实战里和技能弧挤成一小摞圆点。所有坐标来自 `TouchLayout.utility_button_rects()` / `skill_arc_centers()`；`tools/device_checks.py` 里的 `RECALL_RECT / TELEPORT_RECT / SUMMONER_RECT` 必须同步，否则真机自动点击会点到空处。
+
 ---
 
 ## 6. 技能键的现状与扩展点
@@ -267,7 +279,7 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 
 ---
 
-## 10. 开发者调试面板（F3）
+## 10. 开发者调试面板（F3 / 触控 DEV）
 
 入口：`Arena._build_debug_panel()`，只有以下任一条件成立才会创建：
 
@@ -276,6 +288,8 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 - 比赛配置显式 `debug_panel = true`。
 
 正式包默认没有面板，F3 也不响应。
+
+**打开方式**：键鼠按 `F3`；真机没有键盘，点 HUD 左上角的 `DEV` 触控键（仅触屏模式显示，贴在暂停键下方；键鼠模式不显示，避免常驻开发者控件污染画面）。`CanvasLayer` 常驻、只切换 `root.visible`，否则收起面板会把入口一起隐藏；面板标题栏和 DEV 键都能关闭。
 
 **所有权**：作弊全部落在 `sim` 的本地英雄实体上（`debug_god` / `debug_infinite_mana` / `debug_no_cooldown`），
 `MatchSim._damage()` 与 `_update_hero_timers()` 读取这些键。它们**不进快照白名单**，客机拿不到 sim，天然无效。
@@ -294,3 +308,50 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 | 网络 | 只读：FPS / 实体数 / tick 耗时 / 快照耗时 / 缓冲深度 / 主机或客机 |
 
 注意：时间倍率只作用于主机模拟，表现层永远按真实时间走；客机上所有作弊控件会被禁用。
+
+---
+
+## 11. 地图地形与野区分布（2026-10-28）
+
+**野区 12 个野点**：每半场 2 个 buff 营地 + 4 个小野点，对齐王者峡谷结构：
+
+| 野区 | buff | 小野点 |
+| --- | --- | --- |
+| 蓝方蓝区 / 红方蓝区 | 蓝BUFF | 双狼、蜥蜴 |
+| 蓝方红区 / 红方红区 | 红BUFF | 三猪、红鸟 |
+
+- `MapLayout.CAMPS` 是唯一数据源；小野点 `radius = 1.5`、`disc_radius = 2.4`，没有 `buff` 字段。
+- `Jungle.monster_stats()` 读取营地可选的 `hp / damage / xp / respawn_time`：buff 怪保持 720/780 血、70 秒刷新；小野点 420~500 血、60 秒刷新、只给经验。
+- 击杀小野点**不发 `buff_taken`**：空 `buff` 会被播报层误读成红BUFF。只加经验，死亡事件仍然发。
+- 小地图用草绿色标记小野点；buff 营地保留红/蓝标记与重生倒计时，小野点倒计时按各自 `respawn_time` 走。
+
+**墙体视觉**：`WALLS` 的碰撞数据**没有变**，变的只是渲染语言：
+
+- 每段墙先铺一条低砌石基座（野区 `WALL_CORE_HEIGHT = 1.25`、边界 `BOUNDARY_CORE_HEIGHT = 2.0`），砖缝仍在 `rock_wall.gdshader`；
+- 基座上方沿墙铺 `Rock.glb` 岩脊，高度/宽度/朝向随机，野区岩脊高低交替；**低石沿墙左右摆出 S 形**（`sin` 相位每段不同），高石仍贴中线，保证墙面轮廓不是直线又不穿进英雄贴墙位置；
+- 墙脚每 2 米一块低矮乱石，左右交替、位置抖动，把墙脚那条数学直线啃成参差石根；
+- 边界岩脊进深在 `-0.5 ~ +0.8` 米之间摆动，四角各压三块大岩，把直角吞掉；不再有等距壁柱和外挑压顶（`test_wall_look` 会拦住它们回来）。
+- 高度预算：野区 `WALL_TOP = 2.45`、边界 `BOUNDARY_TOP = 3.7`，相机安全边距按这两个值反解。
+- 野区岩脊按**真实顶点**校验：到墙心距离不超过 `0.8 + 0.55 + 0.06` 米，避免玩家穿进石头；边界岩脊最内缘留在 54.3 米外。
+
+---
+
+## 12. 移动端性能（2026-10-28）
+
+**症状**：手机移动英雄、镜头扫过地图时卡顿。离屏探针 `tools/perf_check.gd` 在 1600×900 5v5 下约 34 FPS；自转镜头约 20~27 FPS，静态和移动差 10+ FPS，说明瓶颈在**像素填充/阴影**，不是模拟 tick。
+
+**实测大头**（`_probe_perf_move.gd` 离线探针，已删除）：
+- 整屏地表 shader：6 次纹理采样，移动镜头时铺满屏幕；
+- 阴影 pass：关闭太阳阴影 FPS +7 左右，且墙体 Rock 曾全部逐块投射；
+- 墙石数百个独立 draw call；
+- 草簇 12000 个 MultiMesh 实例。
+
+**移动端已做的降级**（桌面不受影响）：
+- `project.godot`：`scaling_3d/scale.mobile = 0.72`（原 0.82）；
+- 地表 shader 只保留 1 层草 + 1 层泥土，去掉第二层草与法线采样（`TerrainBuilder.build_material(true)` 可单测）；
+- 草簇 12000 → 6000；
+- 太阳阴影距离 48 → 36 米，边界岩脊/角岩批次不投影，地形不投影；
+- 墙石（岩脊、墙脚石、边界角岩、碎石）合并成 `wall_rocks` / `boundary_rocks` 两个 MultiMesh，每个 1 个 draw call；逐块数据在 `rock_specs` meta 里，测试仍逐块校验。
+
+改墙石时不要退回「每块一个 MeshInstance」：移动端最先炸的就是 draw call 和 shadow pass。桌面全量画质仍走完整 shader 和 48 米阴影，不要拿移动端帧率反推桌面参数。
+

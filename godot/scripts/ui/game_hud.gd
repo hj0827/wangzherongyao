@@ -229,19 +229,18 @@ func _place_mode_buttons(viewport: Vector2) -> void:
 	if _lock_bar != null:
 		_lock_bar.set_viewport_size(viewport)
 
-## 召唤师 / 传送 / 回城：整列排在技能弧左侧（详见 TouchLayout.utility_button_rects）。
-## 以前三颗用的是写死的「右下角 offset」，结果横在技能弧左边、和模式圆混成一片小圆堆。
+## 回城 / 传送 / 召唤师：底部横排，紧贴技能弧左侧（详见 TouchLayout.utility_button_rects）。
+## 顺序从远到近是 回城 → 传送 → 召唤师，召唤师离技能最近。
 func _place_utility_buttons(viewport: Vector2) -> void:
 	var rects := TouchLayout.utility_button_rects(viewport)
-	var nodes := [_summoner_button, _teleport_button, _recall_button]
+	var nodes := [_recall_button, _teleport_button, _summoner_button]
 	for i in nodes.size():
 		if i < rects.size():
 			_place_zone(nodes[i], rects[i])
 	# 召唤师键是 SkillButton（要显示冷却环），它的 custom_minimum_size 是 128x148，
-	# 摆进 96 的格子里会被最小尺寸顶大 40px —— 实测压住了下面的「传送」。
-	# 其它两颗是 TouchActionButton，没有这个约束。这里按格子收一次。
+	# 摆进 96 的格子里会被最小尺寸顶大 40px。这里按格子收一次。
 	if _summoner_button != null and rects.size() > 0:
-		_summoner_button.custom_minimum_size = rects[0].size
+		_summoner_button.custom_minimum_size = rects[rects.size() - 1].size
 
 func _build_top_bar() -> void:
 	_score_panel = PanelContainer.new()

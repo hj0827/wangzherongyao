@@ -88,7 +88,10 @@ func test_walls_bushes_camps_and_pits_are_mirrored() -> void:
 			if str(other.id) == str(camp.id):
 				continue
 			nearest = minf(nearest, (other.pos as Vector2).distance_to(turned))
-		lt(nearest, 8.0, "营地要有 180° 附近的对家，最近的是 %.1f 米：%s" % [nearest, str(camp.id)])
+		# buff 怪必须严格成对；小野点受石壁限制只能近似对称（最近 11.9 米），
+		# 但仍在同一个野区象限，保证双方打野路线长度接近。
+		var tolerance := 8.0 if str(camp.get("buff", "")) != "" else 12.5
+		lt(nearest, tolerance, "营地要有 180° 附近的对家，最近的是 %.1f 米：%s" % [nearest, str(camp.id)])
 	for pit in MapLayout.OBJECTIVE_PITS:
 		lt((MapLayout.objective_at(-(pit.pos as Vector2)).get("pos", Vector2(999.0, 999.0)) as Vector2).distance_to(-(pit.pos as Vector2)), 0.01, "首领坑必须精确 180° 对称：" + str(pit.id))
 
@@ -136,13 +139,18 @@ func test_ground_marks_claim_their_discs() -> void:
 	# 草丛那边干脆没抄，于是「树避开了、草没避开」。
 	# 契约：占位判定只有一份，布景与草丛都读它。
 	for camp in MapLayout.CAMPS:
+		var disc_radius := float(camp.get("disc_radius", MapLayout.CAMP_DISC_RADIUS))
 		check(MapLayout.on_ground_mark(camp.pos as Vector2), "营地圆盘要占位：%s" % str(camp.id))
-		check(
-			not MapLayout.on_ground_mark(
-				(camp.pos as Vector2) + Vector2(0.0, MapLayout.CAMP_DISC_RADIUS + 4.0)
-			),
-			"营地圆盘外面不该占位：%s" % str(camp.id)
-		)
+		# 小野点贴着首领坑或 buff 区，不能假设某个固定方向一定空。
+		# 在圆盘外 0.5 米绕一圈，只要有一个方向不再占位，就说明占位范围有边界。
+		var outside := false
+		for i in 12:
+			var angle := TAU * float(i) / 12.0
+			var probe: Vector2 = camp.pos + Vector2(cos(angle), sin(angle)) * (disc_radius + 0.5)
+			if not MapLayout.on_ground_mark(probe):
+				outside = true
+				break
+		check(outside, "营地圆盘外面不该占位：%s" % str(camp.id))
 	for pit in MapLayout.OBJECTIVE_PITS:
 		check(MapLayout.on_ground_mark(pit.pos as Vector2), "首领坑圆盘要占位：%s" % str(pit.id))
 	for pad in MapLayout.TELEPORT_PADS:

@@ -94,10 +94,10 @@ func test_every_jungle_wall_gets_a_named_barrier_with_sim_dimensions() -> void:
 		if node == null:
 			continue
 		var box := (node as MeshInstance3D).mesh as BoxMesh
-		check(box != null, "墙体网格应当是 BoxMesh")
+		check(box != null, "墙体基座应当是 BoxMesh")
 		if box == null:
 			continue
-		near(box.size.y, MapLayout.WALL_HEIGHT, 0.001, "墙高必须等于 sim 常量：%s" % str(wall.id))
+		near(box.size.y, MapLayout.WALL_CORE_HEIGHT, 0.001, "基座高度必须等于 sim 常量：%s" % str(wall.id))
 		near(box.size.z, MapLayout.WALL_THICKNESS, 0.001, "可视化厚度必须等于碰撞厚度：%s" % str(wall.id))
 		near(box.size.x, (wall.a as Vector2).distance_to(wall.b), 0.01, "墙长必须等于两个端点距离")
 	arena.free()
@@ -129,125 +129,151 @@ func test_shader_lays_staggered_masonry_courses() -> void:
 	check(code.contains("brick_course"), "shader 必须真的用上砖层高度")
 	check(code.contains("fract"), "错缝靠取小数部分实现，缺了它砖缝会连成一条直线")
 
-# ---------------------------------------------------------------- 壁柱
-func test_every_jungle_wall_gets_buttresses_that_rise_above_the_coping() -> void:
-	# 参考图上最显眼的节奏是**壁柱**：墙面每隔几米一根微凸方柱，
-	# 柱顶一块小方帽，帽顶越出压顶石一条线。
-	# 这不是「顶脊碎石」——碎石是自然岩体塌下来的样子，壁柱才是「人砌的城墙」。
+# ---------------------------------------------------------------- 岩脊
+func _rock_batch(arena: Node3D, node_name: String) -> MultiMeshInstance3D:
+	return arena._props_root.get_node_or_null(NodePath(node_name)) as MultiMeshInstance3D
+
+func _rock_specs(arena: Node3D, node_name: String) -> Array:
+	var batch := _rock_batch(arena, node_name)
+	if batch == null:
+		return []
+	return batch.get_meta("rock_specs", [])
+
+func test_every_jungle_wall_gets_an_irregular_rock_ridge() -> void:
+	# 直方盒墙身 + 等距壁柱在俯视下是「一圈规整城墙」，四角尤其方。
+	# 现在的识别特征是基座上方那条高低错落、朝向随机的岩脊。
+	# 岩脊与墙脚石合并在 wall_rocks 一个 MultiMesh 里，逐个实例的元数据在 rock_specs。
 	var arena: Node3D = Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena._build_map_features()
 	var stone: ShaderMaterial = arena._wall_stone_material()
+	var batch := _rock_batch(arena, "wall_rocks")
+	check(batch != null, "野区岩脊必须合成一个 MultiMesh 批次，不能再逐块建节点")
+	if batch == null:
+		arena.free()
+		return
+	eq(batch.material_override, stone, "整批岩脊必须与基座同材质")
+	eq(batch.cast_shadow, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF, "移动端最重的这批墙石不参与阴影 pass")
+	var mesh: Mesh = batch.multimesh.mesh
 	var groups := {}
-	for child in arena._props_root.get_children():
-		if not str(child.name).begins_with("buttress_"):
+	for spec in _rock_specs(arena, "wall_rocks"):
+		if str(spec.get("kind", "")) != "ridge":
 			continue
-		var id := str((child as Node).get_meta("wall_id", ""))
+		var id := str(spec.get("wall_id", ""))
 		if id == "":
 			continue
 		if not groups.has(id):
 			groups[id] = []
-		(groups[id] as Array).append(child)
+		(groups[id] as Array).append(spec)
 	for wall in MapLayout.WALLS:
 		var id := str(wall.id)
-		check(groups.has(id), "缺壁柱，这段墙读成一块水泥板：%s" % id)
+		check(groups.has(id), "缺岩脊，这段墙又会读成一块方盒：%s" % id)
 		if not groups.has(id):
 			continue
 		var list: Array = groups[id]
-		gt(float(list.size()), 1.0, "壁柱至少两根，一根读不出节奏：%s" % id)
-		var body: MeshInstance3D = list[0] as MeshInstance3D
-		var box: BoxMesh = body.mesh as BoxMesh
-		check(box != null, "壁柱应当是 BoxMesh：%s" % id)
-		if box == null:
-			continue
-		# 外挑：与墙面齐平的柱子等于不存在。
-		gt(box.size.z, MapLayout.WALL_THICKNESS + 0.1, "壁柱没有外挑出墙面：%s" % id)
-		lt(box.size.z, MapLayout.WALL_THICKNESS + 1.2, "壁柱外挑过多会变成一排墩子：%s" % id)
-		# 柱身必须**越出墙顶**：那条起伏线才是城墙的识别特征。
-		var body_top: float = body.position.y + box.size.y * 0.5
-		gt(body_top, MapLayout.WALL_HEIGHT + 0.05, "柱身没有高过墙身：%s" % id)
-		# 柱帽：压在最上面、比柱身更宽的一块薄板。
-		var bodies := 0
-		var caps := 0
-		for node in list:
-			var cap_box: BoxMesh = ((node as MeshInstance3D).mesh) as BoxMesh
-			if cap_box == null:
-				continue
-			var kind := str((node as Node).get_meta("kind", ""))
-			if kind == "cap":
-				caps += 1
-				gt(cap_box.size.x, box.size.x, "柱帽要比柱身宽，才读得出「压顶」")
-				var cap_top: float = (node as Node3D).position.y + cap_box.size.y * 0.5
-				lt(cap_top, MapLayout.WALL_TOP + 0.001, "柱帽高出了遮挡预算：%s" % id)
-			elif kind == "body":
-				bodies += 1
-		eq(caps, bodies, "每根壁柱正好一块柱帽：%s" % id)
-		# 壁柱和墙身是同一块料 —— 不同材质会变成「墙上贴了一排柱子」。
-		for node in list:
-			eq((node as MeshInstance3D).material_override, stone, "壁柱必须与墙身同材质：%s" % id)
+		gt(float(list.size()), 2.0, "岩脊至少三块，一块盖不住直顶边：%s" % id)
+		var shortest := INF
+		var tallest := -INF
+		for spec in list:
+			var height := float(spec.get("height", 0.0))
+			var world_box: AABB = (spec.transform as Transform3D) * mesh.get_aabb()
+			near(world_box.size.y, height, 0.05, "MultiMesh 实例的实际高度必须等于 spec 高度：%s" % id)
+			gt(height, float(MapLayout.WALL_CORE_HEIGHT) + 0.1, "岩脊要高出基座：%s" % id)
+			lt(height, MapLayout.WALL_TOP + 0.001, "岩脊高出了遮挡预算：%s" % id)
+			shortest = minf(shortest, height)
+			tallest = maxf(tallest, height)
+		gt(tallest - shortest, 0.25, "岩脊高低必须有变化，等高的石头会读成一排齿：%s" % id)
 	arena.free()
 
-func test_buttress_spacing_is_even_because_it_is_masonry_not_scatter() -> void:
-	# 跟「顶脊要抖」正好相反：壁柱是砌筑出来的，**等距才是对的**。
-	# 抖动的壁柱读成「塌了一段」，等距的壁柱读成「一段城墙」。
+func test_wall_ridge_rocks_stay_inside_the_collision_footprint() -> void:
+	# 岩脊只是视觉，不能比碰撞体宽出一大截：玩家会看到自己「走进石头里」。
+	# 墙体碰撞半厚 0.8，英雄半径 0.55 → 人最多贴到离墙心 1.35 米。
+	# 这里按 MultiMesh 每块实例的**真实顶点**算到墙线的最大距离。
+	var walls := {}
+	for wall in MapLayout.WALLS:
+		walls[str(wall.id)] = wall
 	var arena: Node3D = Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena._build_map_features()
-	for wall in MapLayout.WALLS:
-		var id := str(wall.id)
-		var offsets: Array = []
-		for child in arena._props_root.get_children():
-			if not str(child.name).begins_with("buttress_"):
-				continue
-			if str((child as Node).get_meta("wall_id", "")) != id:
-				continue
-			if str((child as Node).get_meta("kind", "")) != "body":
-				continue
-			offsets.append(float((child as Node).get_meta("along", 0.0)))
-		if offsets.size() < 3:
+	var batch := _rock_batch(arena, "wall_rocks")
+	if batch == null:
+		check(false, "野区岩脊批次必须存在")
+		arena.free()
+		return
+	var mesh: Mesh = batch.multimesh.mesh
+	var limit := MapLayout.WALL_THICKNESS * 0.5 + 0.55 + 0.06
+	for spec in _rock_specs(arena, "wall_rocks"):
+		if str(spec.get("kind", "")) != "ridge":
 			continue
-		offsets.sort()
-		var gaps: Array = []
-		for i in range(1, offsets.size()):
-			gaps.append(float(offsets[i]) - float(offsets[i - 1]))
-		var ratio: float = float(gaps.max()) / maxf(float(gaps.min()), 0.001)
-		lt(ratio, 1.35, "壁柱间距要基本等距（最长/最短 = %.2f）：%s" % [ratio, id])
-		# 而且不能密到变成一圈齿：间距必须大于 1.6 米。
-		gt(float(gaps.min()), 1.6, "壁柱间距太小，会读成一排齿：%s" % id)
+		var wall: Dictionary = walls.get(str(spec.get("wall_id", "")), {})
+		if wall.is_empty():
+			continue
+		var xform: Transform3D = spec.transform
+		var furthest := 0.0
+		for surface in mesh.get_surface_count():
+			var arrays := mesh.surface_get_arrays(surface)
+			var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			for vertex in vertices:
+				var world: Vector3 = xform * vertex
+				var distance := MapLayout.point_to_segment_distance(Vector2(world.x, world.z), wall.a, wall.b)
+				furthest = maxf(furthest, distance)
+		lt(furthest, limit, "岩脊伸进了英雄贴墙的位置：%s_%d（%.2f 米）" % [str(wall.id), int(spec.get("along", 0.0)), furthest])
 	arena.free()
 
-func test_nothing_is_scattered_on_the_wall_crest() -> void:
-	# 「墙顶撒碎石」是上一版用来破「水泥平顶」的办法，但那和参考图的
-	# 砌石城墙是两套语言：一处是塌方，一处是砌筑。
-	# 顶边现在由**压顶石 + 柱帽**负责，不再需要随机岩石。
+func test_jungle_walls_no_longer_build_buttresses_or_coping() -> void:
+	# 等距壁柱 / 外挑压顶是上一版「砌筑城墙」的语言；用户反馈仍然太方。
+	# 现在这些部件全部删掉，只保留低基座 + 岩脊，防止以后又被加回来。
 	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
-	check(not source.contains("\"ridge_"), "墙顶不该再撒碎石，顶边改由壁柱帽负责")
-	check(not source.contains("\"crest_boundary_"), "边界墙顶不该再撒碎石")
+	check(not source.contains("\"buttress_"), "野区墙不该再有等距壁柱")
+	check(not source.contains("\"coping_"), "野区墙/边界墙不该再有直压顶")
+	check(not source.contains("_build_buttress"), "壁柱构建函数应当整段移除")
 
 func test_wall_foot_rocks_use_the_same_stone_material() -> void:
 	# 墙脚那几块 Rock.glb 原本用 glb 自带的灰白材质，和石壁贴在一起像
 	# 「石墙脚下摆了几颗土豆」。同材质才能读成同一块山体塌下来的碎块。
+	# 同时守住「每段墙至少 4 块、左右两侧都有」：这是把直墙脚啃成参差石根的关键。
 	var arena: Node3D = Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena._build_map_features()
 	var stone: ShaderMaterial = arena._wall_stone_material()
-	var found := 0
+	var batch := _rock_batch(arena, "wall_rocks")
+	if batch == null:
+		check(false, "墙脚石必须并入 wall_rocks 批次")
+		arena.free()
+		return
+	eq(batch.material_override, stone, "墙脚石必须与墙身同材质")
+	var groups := {}
+	for spec in _rock_specs(arena, "wall_rocks"):
+		if str(spec.get("kind", "")) != "footrock":
+			continue
+		var id := str(spec.get("wall_id", ""))
+		if id == "":
+			continue
+		if not groups.has(id):
+			groups[id] = []
+		(groups[id] as Array).append(spec)
 	for wall in MapLayout.WALLS:
-		for i in 16:
-			var rock: Node3D = arena._props_root.get_node_or_null(NodePath("footrock_%s_%d" % [str(wall.id), i]))
-			if rock == null:
-				continue
-			found += 1
-			for node in rock.find_children("*", "MeshInstance3D", true, false):
-				var mesh_instance := node as MeshInstance3D
-				if mesh_instance.mesh == null:
-					continue
-				for surface in mesh_instance.mesh.get_surface_count():
-					eq(mesh_instance.get_surface_override_material(surface), stone, "墙脚石必须与墙身同材质")
-	gt(float(found), 20.0, "墙脚石要逐块命名为 footrock_<id>_<i>，遮挡与测试都靠名字找人")
+		var id := str(wall.id)
+		check(groups.has(id), "每段墙都要有墙脚石：%s" % id)
+		if not groups.has(id):
+			continue
+		var list: Array = groups[id]
+		gt(float(list.size()), 3.0, "每段墙至少 4 块墙脚石：%s" % id)
+		var plus := 0
+		var minus := 0
+		var axis: Vector2 = (wall.b as Vector2) - (wall.a as Vector2)
+		var perp := Vector2(-axis.y, axis.x).normalized()
+		for spec in list:
+			var side: float = ((spec.pos as Vector2) - (wall.a as Vector2)).dot(perp)
+			if side >= 0.0:
+				plus += 1
+			else:
+				minus += 1
+		gt(float(plus), 0.0, "墙脚石必须左右两侧都有（右）：%s" % id)
+		gt(float(minus), 0.0, "墙脚石必须左右两侧都有（左）：%s" % id)
 	arena.free()
 
 func test_jungle_and_boundary_walls_share_one_material() -> void:
@@ -261,12 +287,16 @@ func test_jungle_and_boundary_walls_share_one_material() -> void:
 	var stone_ids := {}
 	var barrier_count := 0
 	for child in arena._props_root.get_children():
-		if not (child is MeshInstance3D):
+		if not (child is MeshInstance3D or child is MultiMeshInstance3D):
 			continue
 		var node_name := str(child.name)
 		if not _is_stone_part(node_name):
 			continue
-		var material := (child as MeshInstance3D).material_override
+		var material: Material = null
+		if child is MultiMeshInstance3D:
+			material = (child as MultiMeshInstance3D).material_override
+		else:
+			material = (child as MeshInstance3D).material_override
 		if material is ShaderMaterial:
 			stone_ids[material.get_instance_id()] = true
 			if node_name.begins_with("wall_") and not node_name.begins_with("wall_end_"):
@@ -275,9 +305,9 @@ func test_jungle_and_boundary_walls_share_one_material() -> void:
 	eq(stone_ids.size(), 1, "全图石壁只能有一份材质：混用会变成一处石头一处木板")
 	arena.free()
 
-# 墙体名下的所有部件：墙身 / 压顶石 / 壁柱与柱帽 / 墙脚石 / 墙端露头。
+# 墙体名下的所有部件：基座 / 岩脊批次 / 墙端露头 / 边界角岩。
 func _is_stone_part(node_name: String) -> bool:
-	for prefix in ["wall_end_", "wall_", "coping_", "buttress_", "footrock_"]:
+	for prefix in ["wall_end_", "wall_", "wall_rocks", "boundary_rocks", "ridge_", "corner_rock_", "footrock_", "rubble_"]:
 		if node_name.begins_with(prefix):
 			return true
 	return false

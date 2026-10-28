@@ -14,9 +14,9 @@ const TOWER_LABELS := {"outer": "外塔", "inner": "内塔", "high": "高地塔"
 # 从己方基地沿兵线量起的推进比例。外塔靠近中线，高地塔守在基地门前。
 const TOWER_PROGRESS := {"outer": 0.36, "inner": 0.24, "high": 0.18}
 const WALL_THICKNESS := 1.6
-# 野区墙体高度。1.7 米在 51° 俯视下只剩一条石坎，读不出「这是石壁」；
-# 再高就会在英雄贴墙时把自己的脚盖住（机位 21 米、俯角 51°，2.2 米是上限附近的值）。
-const WALL_HEIGHT := 2.2
+# 石壁不是一块等高的墙：低基座 + 岩脊。基座高度在下面 WALL_CORE_HEIGHT，
+# 岩脊最高点受 WALL_TOP 约束。机位 21 米、俯角 51°，2.45 米的岩脊
+# 已经能读成「石壁」，再高会在英雄贴墙时把脚盖住。
 
 const BUSHES := [
 	{"id": "bush_blue_mid", "pos": Vector2(-18.0, -18.0), "radius": 4.2},
@@ -73,26 +73,20 @@ const WALLS := [
 	{"id": "wall_bottom_east", "a": Vector2(8.0, 20.0), "b": Vector2(-2.0, 28.0)},
 ]
 
-# 四座营地：**每个半场各一个红、一个蓝**。
+# 野区：**每个半场 6 个野点**，对齐王者峡谷的野怪分布。
 #
-# 上一版全部用 `mirror()`（轴 = 中路 y = -x）配对，而 mirror **保持 a 不变**
-# —— a = x - y 是「离河道多远」，也就是「在哪一队的半场」。于是镜像出来的营地
-# 跟原营地同队：蓝方半场两个都是蓝 buff、红方半场两个都是红 buff，
-# 任何一队在自己野区里永远见不到另一种增益。首领坑犯的是同一个错，
-# 暴君与主宰双双落在蓝方半场，红方野区一个首领都没有。
+# 上一版只有 4 座 buff 营地：两队各一个红、一个蓝，野区其余位置全是空地。
+# 王者峡谷每个半场是「红蓝 BUFF 各一 + 蓝区双狼/蜥蜴 + 红区三猪/红鸟」，
+# 小野点负责给打野补经验、也让入侵路线有东西可抢。这里保留这个结构：
+#   - 蓝 buff 所在野区（b 与 buff 同侧）配 双狼 + 蜥蜴；
+#   - 红 buff 所在野区配 三猪 + 红鸟；
+#   - 小野点不带增益，血量和经验都低于 buff 怪，只作为野区节奏点。
 #
-# 现在改成「每半场各一套」，红方那两座是蓝方的 180° 近似点对称（容差 8 米）。
-# 为什么只是"近似"：两半场的石壁形状本来就不是同一个图形 ——
-# 红方野区的墙贴着中路（a ≈ -18 ~ -30），蓝方的墙在野区深处（a ≈ +18 ~ +44）。
-# 硬要精确旋转，红方那座就会正好压在石壁上（实测被压 1.6 米）。
-# 精确旋转是以后重做红方野区地形时才该做的事，不是靠挪野怪能凑出来的。
-#
-# 位置口径（全部用 a / b 想，别用裸 x,y）：
-# - a = x - y：离河道中心线 |a| * 0.7071 米。地面法阵圆盘半径 3.4，
-#   所以 |a| >= 17.5 才能保证整块圆盘在水面之外。
-# - b = x + y：离中路中心线 |b| * 0.7071 米。
-# 所有点位都过了三关才落笔：离石壁 ≥ 1 米（墙有碰撞）、从泉水走得到（网格 BFS）、
-# 和别的营地 / 首领坑 / 传送阵互不重叠。探针 tools/probe_camp_sites.gd 会把这些数打出来。
+# 小野点的半径（碰撞/选点）是 1.5，地面阵盘单独用 SMALL_CAMP_DISC_RADIUS；
+# buff 营地仍用 CAMP_DISC_RADIUS。所有点位都过了「离墙 / 草丛 / 河道 / 兵线
+# 不重叠 + 从泉水走得到」的探针，位置不是按格子摆的。
+const SMALL_CAMP_DISC_RADIUS := 2.4
+
 # --- 地面圆盘（法阵）半径 -------------------------------------------------
 # 这三块圆盘画在地上，同时被「随机布景避让」和「选点探针」当成占位面积。
 # 以前渲染层写 3.4 / 5.6 / 3.0、探针里再抄一遍、避让清单里干脆漏掉传送阵 ——
@@ -106,12 +100,20 @@ const PAD_DISC_RADIUS := 3.0
 const PAD_CANOPY_CLEARANCE := 3.0
 
 const CAMPS := [
-	# 蓝方半场：蓝 buff 在上野（b<0），红 buff 在下野（b>0）。
+	# --- 蓝方半场（a > 0）：上野是蓝区，下野是红区 -------------------------
 	{"id": "blue_buff_blue_side", "pos": Vector2(-1.0, -23.0), "buff": "blue", "monster_type": "wolf", "name": "霜狼", "radius": 2.2},
+	{"id": "blue_wolf_blue_side", "pos": Vector2(-10.0, -33.7), "monster_type": "wolf", "name": "双狼", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 460.0, "damage": 34.0, "xp": 30.0, "respawn_time": 60.0},
+	{"id": "blue_lizard_blue_side", "pos": Vector2(5.9, -27.0), "monster_type": "wolf", "name": "蜥蜴", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 420.0, "damage": 32.0, "xp": 28.0, "respawn_time": 60.0},
 	{"id": "red_buff_blue_side", "pos": Vector2(23.0, 1.0), "buff": "red", "monster_type": "wolf", "name": "赤狼", "radius": 2.2},
-	# 红方半场：同样一个蓝（上野）一个红（下野）。
+	{"id": "red_pig_blue_side", "pos": Vector2(27.0, -5.9), "monster_type": "wolf", "name": "三猪", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 500.0, "damage": 36.0, "xp": 32.0, "respawn_time": 60.0},
+	{"id": "red_bird_blue_side", "pos": Vector2(35.1, 8.0), "monster_type": "wolf", "name": "红鸟", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 420.0, "damage": 32.0, "xp": 28.0, "respawn_time": 60.0},
+	# --- 红方半场（a < 0）：下野是蓝区，上野是红区 -------------------------
 	{"id": "blue_buff_red_side", "pos": Vector2(6.0, 27.0), "buff": "blue", "monster_type": "wolf", "name": "霜狼", "radius": 2.2},
+	{"id": "blue_wolf_red_side", "pos": Vector2(12.1, 30.5), "monster_type": "wolf", "name": "双狼", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 460.0, "damage": 34.0, "xp": 30.0, "respawn_time": 60.0},
+	{"id": "blue_lizard_red_side", "pos": Vector2(-3.0, 37.7), "monster_type": "wolf", "name": "蜥蜴", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 420.0, "damage": 32.0, "xp": 28.0, "respawn_time": 60.0},
 	{"id": "red_buff_red_side", "pos": Vector2(-27.0, -6.0), "buff": "red", "monster_type": "wolf", "name": "赤狼", "radius": 2.2},
+	{"id": "red_pig_red_side", "pos": Vector2(-35.5, -14.5), "monster_type": "wolf", "name": "三猪", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 500.0, "damage": 36.0, "xp": 32.0, "respawn_time": 60.0},
+	{"id": "red_bird_red_side", "pos": Vector2(-43.0, -11.8), "monster_type": "wolf", "name": "红鸟", "radius": 1.5, "disc_radius": SMALL_CAMP_DISC_RADIUS, "hp": 420.0, "damage": 32.0, "xp": 28.0, "respawn_time": 60.0},
 ]
 
 # 两个首领坑分处两个半场，并且是精确的 180° 点对称（(-17,-39) ↔ (17,39)）。
@@ -154,32 +156,37 @@ const BOUNDARY_CENTER := 58.9      # 墙心线到地图中心的距离
 # 加厚到 1.8 之后墙顶才有一条能看出进深的平台，立面才有重量。
 # 内表面仍然正好贴在 MapData.BOUNDS 上：58.9 - 1.8/2 = 58.0。
 const BOUNDARY_THICK := 1.8
-# 高度取 3.4：相机是 21m 高、约 51° 俯视，2.2m 的墙在屏幕上只剩一条矮石坎，
-# 读不出"这是墙"。3.4m 大约两个身位，立面才立得起来。
-const BOUNDARY_HEIGHT := 3.4
-# --- 城墙范式：压顶石 + 壁柱（2026-10-25 第三次改）------------------------
-# 演进史，别再走回头路：
-#   ① 每 9 米一根 5.2 米方柱 + 石帽 → 俯视是一圈**城垛**；
-#   ② 墙顶撒参差岩脊 → 那是「塌方」的语言，而参考图是一道**砌筑**的城墙；
-#   ③ 现在是砌石城墙的三件套：墙面砖缝（在 rock_wall.gdshader 里铺）、
-#      **外挑**的压顶石、等距的**壁柱 + 柱帽**（柱帽越出压顶一条起伏线）。
-# 砖缝在 shader 里，不需要额外网格；这里只给壁柱与压顶的尺寸。
-#
-# 壁柱间距 3.6 米是「20 米机位下每屏 5~6 根」算出来的：小于 2.6 米读成一排齿，
-# 大于 5 米一段墙只剩一根，就没有节奏了。
-const WALL_BUTTRESS_SPACING := 3.6
-const WALL_BUTTRESS_WIDTH := 0.92      # 沿墙方向的宽度
-const WALL_BUTTRESS_DEPTH := 0.36      # 每侧外挑出墙面的厚度（两侧对称，四面都看得见）
-const WALL_BUTTRESS_RISE := 0.24       # 柱身高出墙顶多少
-const WALL_BUTTRESS_CAP := 0.20        # 柱帽厚度
-const WALL_BUTTRESS_CAP_SLACK := 0.10  # 柱帽比柱身宽出多少（每侧）
-const WALL_COPING_OVERHANG := 0.16     # 压顶石每侧外挑
-const WALL_COPING_THICK := 0.22
-# 最高部件 = 墙顶 + 柱帽上沿。相机安全边距按这个数反解，改大要回头验遮挡。
-const WALL_TOP := WALL_HEIGHT + WALL_BUTTRESS_RISE + WALL_BUTTRESS_CAP
-const BOUNDARY_COPING_OVERHANG := 0.18
-const BOUNDARY_BUTTRESS_SPACING := 4.2
-const BOUNDARY_TOP := BOUNDARY_HEIGHT + WALL_BUTTRESS_RISE + WALL_BUTTRESS_CAP
+# 边界基座的高度。真正的轮廓由上面的岩脊负责，基座只负责封边和进深。
+const BOUNDARY_CORE_HEIGHT := 2.0
+# --- 石壁范式：砌石基座 + 自然岩脊（2026-10-28）--------------------------
+# 旧版是「直方盒墙身 + 外挑压顶 + 等距壁柱」，俯视是一圈规整的城墙/城垛，
+# 和王者峡谷的野区石壁（自然岩脊、起伏不定）差得太远。现在改成：
+#   - 低矮的砌石基座负责封住碰撞线，砖缝仍在 rock_wall.gdshader 里；
+#   - 基座上沿墙铺一条高低错落、左右轻微摆动的 Rock.glb 岩脊，压掉直顶边；
+#   - 两端与边界转角用更大的岩体收口，不再有等距壁柱的机械节奏。
+# 基座高度必须低于岩脊最低点；岩脊最高点受 WALL_TOP / BOUNDARY_TOP 约束，
+# 相机安全边距按这两个值反解，改大要回头验遮挡。
+const WALL_CORE_HEIGHT := 1.25
+const WALL_ROCK_MIN_HEIGHT := 1.55
+const WALL_ROCK_MAX_HEIGHT := 2.45
+const WALL_ROCK_SPACING := 1.75
+# 野区岩脊只允许「贴着碰撞线长」：玩家最近能站到离墙心 0.8 + 0.55 = 1.35 米，
+# 岩块旋转后的 AABB 角点也不能越过这条线，否则会出现人穿进石头。
+# Rock.glb 高宽比约 1:0.79，宽度系数超过 0.95 时最高那块的对角半宽就会超标。
+const WALL_ROCK_WIDTH_MIN := 0.85
+const WALL_ROCK_WIDTH_MAX := 0.95
+const WALL_TOP := WALL_ROCK_MAX_HEIGHT
+const BOUNDARY_ROCK_MIN_HEIGHT := 2.65
+const BOUNDARY_ROCK_MAX_HEIGHT := 3.7
+const BOUNDARY_ROCK_SPACING := 4.0
+const BOUNDARY_ROCK_WIDTH_MIN := 1.5
+const BOUNDARY_ROCK_WIDTH_MAX := 1.7
+# 边界岩脊可以往可玩区探一点：玩家最近只能走到 BOUNDS - 相机边距 = 54.2 米，
+# 岩体前缘留在 54.3 米以外，既能看到凹凸岩壁，又不会穿进英雄身体。
+# 上限 0.8 是按「最大岩块旋转后的对角半宽」反解的，别只按正面宽度算。
+const BOUNDARY_ROCK_INTRUDE := 0.8
+const BOUNDARY_ROCK_OUTWARD := 0.5
+const BOUNDARY_TOP := BOUNDARY_ROCK_MAX_HEIGHT
 
 # 四面墙首尾相连围成闭合方框（端点用 BOUNDARY_CENTER，四角落在一起）。
 static func boundary_walls() -> Array:
@@ -208,7 +215,7 @@ static func near_boundary(point: Vector2, margin := 2.5) -> bool:
 # 传送阵还要多算 PAD_CANOPY_CLEARANCE：树干避开不等于树冠避开。
 static func on_ground_mark(point: Vector2, margin := 0.0) -> bool:
 	for camp in CAMPS:
-		if point.distance_to(camp.pos) < CAMP_DISC_RADIUS + margin:
+		if point.distance_to(camp.pos) < float(camp.get("disc_radius", CAMP_DISC_RADIUS)) + margin:
 			return true
 	for pit in OBJECTIVE_PITS:
 		if point.distance_to(pit.pos) < PIT_DISC_RADIUS + margin:
