@@ -101,6 +101,18 @@ func test_terrain_shader_receives_the_faction_colours() -> void:
 	if gain != null:
 		near((gain as Vector3).y, ArenaLook.GRASS_GAIN.y, 0.001, "grass gain is wired from ArenaLook")
 
+func test_mobile_terrain_drops_two_fullscreen_texture_samples() -> void:
+	# 地表 shader 铺满整屏。手机端保留 1 层草 + 1 层泥土，去掉第二层草与法线，
+	# 否则移动镜头时 fill-rate 会把帧率直接压到 20 多。
+	var mobile := TerrainBuilder.build_material(true)
+	var mobile_code := mobile.shader.code
+	check(not mobile_code.contains("__TERRAIN"), "地形 shader 不能残留未替换的采样占位符")
+	check(mobile_code.contains("vec3 g3 = g1;"), "手机端不应再采样第二层草")
+	check(mobile_code.contains("NORMAL_MAP = vec3(0.5, 0.5, 1.0);"), "手机端不采样地表法线")
+	var desktop := TerrainBuilder.build_material(false)
+	check(desktop.shader.code.contains("vec3 g3 = texture(grass_tex"), "桌面端保留第二层草")
+	check(desktop.shader.code.contains("NORMAL_MAP = texture(grass_nor"), "桌面端保留法线贴图")
+
 func test_arena_builds_the_environment_through_arena_look() -> void:
 	# 防「参数表写好了但 arena 还在用旧的硬编码」——这正是本仓库踩过的坑。
 	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")

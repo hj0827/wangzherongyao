@@ -32,7 +32,10 @@ const HitStopManager = preload("res://scripts/view/hit_stop_manager.gd")
 const CameraFocus = preload("res://scripts/game/camera_focus.gd")
 const CameraEdge = preload("res://scripts/game/camera_edge.gd")
 const ClientPrediction = preload("res://net/client_prediction.gd")
+const BushEye = preload("res://scripts/game/bush_eye.gd")
+const DebugPanelScript = preload("res://scripts/ui/debug_panel.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
+const CAMP_SIGIL_SHADER := "res://shaders/camp_sigil.gdshader"
 
 const ENV_DIR := "res://assets/environment/"
 # 桥体尺寸。三路各一座：中路在河心（地图中心），上下路各在自己 L 形的拐角处跨河。
@@ -137,6 +140,9 @@ var session = null
 var sim: Object = null
 
 var current_snapshot: Dictionary = {}
+# 主机每 tick 构建的完整世界快照。10Hz 广播直接复用它再按队伍过滤，
+# 不再为广播单独重建一份（30Hz 本地 + 10Hz 广播 = 每秒 40 次全量构建）。
+var _last_world_shot: Dictionary = {}
 var _views: Dictionary = {}
 var _structure_views: Dictionary = {}
 var _units_root: Node3D
@@ -151,9 +157,19 @@ var particle_bursts := 0
 # 池空时抢占旧簇的次数（抢占是有意的：掐掉快消失的那簇，保住刚放的那簇）。
 var particle_steals := 0
 var _props_root: Node3D
+# 营地/首领坑地面的符阵材质，按 camp / pit id 索引；野怪死亡时把它们调暗。
+var _sigil_shader: Shader = null
+var _camp_sigils: Dictionary = {}
+var _camp_sigil_active: Dictionary = {}
+# 营地地面重生牌：野怪死亡后显示「名称 + 剩余秒数」，活着时隐藏。
+var _camp_labels: Dictionary = {}
 # 全图石壁共用的一份材质（野区墙 + 边界墙 + 压顶石）。懒建，因为
 # 「建场景」和「渲染」都可能在无材质需求时被单独调用（测试里就是这样）。
 var _stone_material: ShaderMaterial = null
+# 墙石批处理：几百块 Rock.glb 如果逐个节点画，移动端光是 draw call 和
+# 阴影 pass 就会把帧率吃掉。这里先收集实例数据，最后合成 1~2 个 MultiMesh。
+var _rock_batch_specs: Array[Dictionary] = []
+var _rock_mesh_cache: Dictionary = {}
 # 地形实例：布景（山 / 树 / 石头）要靠它取实际地面高度，
 # 否则摆件会悬在坡上或陷进土里。
 var _terrain = null
@@ -193,6 +209,15 @@ var _snapshot_timer := 0.0
 var _input_timer := 0.0
 var _pending_events: Array = []
 var _paused := false
+# 开发者调试（F3）。时间倍率只作用于主机模拟，表现层仍按真实时间走。
+var _debug_panel = null
+var _debug_time_scale := 1.0
+var _debug_paused := false
+var _debug_reveal := false
+var _debug_no_hit_stop := false
+var _debug_no_shake := false
+var _debug_tick_ms := 0.0
+var _debug_snapshot_ms := 0.0
 var _local_id := -1
 var _local_entity_id := -1
 var _hit_stop := HitStopManager.new()
@@ -246,6 +271,9 @@ var _queued_r := false
 var _queued_summoner := false
 var _queued_recall := false
 var _queued_teleport := false
+# 普攻也要锁存：联机输入 20Hz 上报，一次 30ms 的点击可能整段落在两次上报之间，
+# 只按「当前是否按住」采样就会静默吞掉这一下（技能早已是锁存语义）。
+var _queued_attack := false
 var _pending_purchases: Array[Dictionary] = []
 var _input_seq := 0
 var _local_input := {
@@ -275,6 +303,8 @@ const MINION_POOL_LIMIT := 40
 var _minion_pool_blue: Array[UnitVisual] = []
 var _minion_pool_red: Array[UnitVisual] = []
 var _damage_labels_pool: Array[Label3D] = []
+# 正在飘的伤害数字，队首最老 —— 池空时抢占，绝不在战斗中 new Label3D。
+var _damage_labels_active: Array[Label3D] = []
 var _hit_particles_pool: Array[GPUParticles3D] = []
 # 正在播放的粒子节点，队首最老 —— 池空时从这头抢。
 var _hit_particles_active: Array[GPUParticles3D] = []
@@ -284,6 +314,10 @@ var _tracer_pool: Array[MeshInstance3D] = []
 var _tracer_active: Array[MeshInstance3D] = []
 var _lance_pool: Array[MeshInstance3D] = []
 var _lance_active: Array[MeshInstance3D] = []
+# 命中/技能范围环：以前每次 new TorusMesh + StandardMaterial3D + queue_free，
+# 团战里一秒十几次就是十几次材质创建。池化后只改颜色和缩放。
+var _ring_pool: Array[MeshInstance3D] = []
+var _ring_active: Array[MeshInstance3D] = []
 var build_complete := false
 
 func configure(options: Dictionary) -> void:
@@ -366,6 +400,7 @@ func _build_staged() -> void:
 
 	_emit_build(0.72, "装配战斗界面")
 	_build_hud()
+	_build_debug_panel()
 	_update_camera(1.0, true)
 	if current_snapshot.is_empty():
 		hud.update_snapshot({})
@@ -451,6 +486,138 @@ func _build_hud() -> void:
 	hud.map_focus_released.connect(release_camera_focus)
 	layer.add_child(hud)
 
+func _debug_enabled() -> bool:
+	# 正式包默认不开；调试构建、`--dev` 启动参数、或配置显式打开时才有 F3。
+	if OS.is_debug_build():
+		return true
+	if OS.get_cmdline_args().has("--dev"):
+		return true
+	return bool(config.get("debug_panel", false))
+
+func _build_debug_panel() -> void:
+	if not _debug_enabled():
+		return
+	_debug_panel = DebugPanelScript.new()
+	_debug_panel.name = "DebugPanel"
+	add_child(_debug_panel)
+	_debug_panel.setup(self)
+
+# --- 调试面板接口 -----------------------------------------------------------
+# 面板只负责发命令，所有校验都在这里：客机没有 sim，一律静默忽略。
+
+func debug_metrics() -> Dictionary:
+	var online: bool = session != null and session.has_method("is_online") and session.is_online()
+	var mode_text := "单机"
+	if online:
+		mode_text = "主机" if authoritative else "客机"
+	var entities: Array = current_snapshot.get("entities", [])
+	return {
+		"mode": mode_text,
+		"time": float(current_snapshot.get("time", 0.0)),
+		"fps": Engine.get_frames_per_second(),
+		"entities": entities.size(),
+		"tick_ms": _debug_tick_ms,
+		"snapshot_ms": _debug_snapshot_ms,
+		"network": "在线" if online else "本地",
+		"buffer": _snapshot_buffer.size(),
+		"authoritative": authoritative,
+		"time_scale": _debug_time_scale,
+		"paused": _paused or _debug_paused,
+	}
+
+func debug_set_time_scale(value: float) -> void:
+	_debug_time_scale = clampf(value, 0.1, 8.0)
+
+func debug_set_paused(value: bool) -> void:
+	_debug_paused = value
+	if value:
+		_accumulator = 0.0
+
+func debug_step() -> void:
+	if not authoritative or sim == null or sim.ended:
+		return
+	var events: Array = []
+	sim.tick(TICK)
+	events.append_array(sim.consume_events())
+	_accumulator = 0.0
+	_last_world_shot = sim.snapshot()
+	current_snapshot = _last_world_shot if _debug_reveal else sim.snapshot_for(local_team, null, _last_world_shot)
+	_process_events(events)
+	if session != null and session.has_method("is_online") and session.is_online():
+		_pending_events.append_array(events)
+
+func debug_set_god(value: bool) -> void:
+	_debug_set_local_flag("debug_god", value)
+
+func debug_set_infinite_mana(value: bool) -> void:
+	_debug_set_local_flag("debug_infinite_mana", value)
+
+func debug_set_no_cooldown(value: bool) -> void:
+	_debug_set_local_flag("debug_no_cooldown", value)
+
+func debug_add_gold(amount: int) -> void:
+	if sim != null and authoritative:
+		sim.debug_add_gold(local_owner, amount)
+
+func debug_level_up() -> void:
+	if sim != null and authoritative:
+		sim.debug_level_up(local_owner)
+
+func debug_heal() -> void:
+	if sim != null and authoritative:
+		sim.debug_heal(local_owner)
+
+func debug_teleport_to_cursor() -> void:
+	if sim == null or not authoritative:
+		return
+	var target := _touch_aim if touch_mode and _touch_aim_valid else _mouse_ground
+	if not touch_mode and not _mouse_valid:
+		return
+	sim.debug_teleport_hero(local_owner, target)
+
+func debug_clear_minions() -> void:
+	if sim != null and authoritative:
+		sim.debug_clear_minions()
+
+func debug_respawn_camps() -> void:
+	if sim != null and authoritative:
+		sim.debug_respawn_monsters()
+
+func debug_set_reveal(value: bool) -> void:
+	if sim == null or not authoritative:
+		_debug_reveal = false
+		return
+	_debug_reveal = value
+	if value:
+		if _last_world_shot.is_empty():
+			_last_world_shot = sim.snapshot()
+		current_snapshot = _last_world_shot
+	else:
+		current_snapshot = sim.snapshot_for(local_team, null, _last_world_shot if not _last_world_shot.is_empty() else null)
+
+func debug_set_no_hit_stop(value: bool) -> void:
+	_debug_no_hit_stop = value
+
+func debug_set_no_shake(value: bool) -> void:
+	_debug_no_shake = value
+
+func _debug_local_hero() -> Dictionary:
+	if not authoritative or sim == null:
+		return {}
+	return sim.get_hero_by_player(local_owner)
+
+func _debug_set_local_flag(key: String, value: bool) -> void:
+	var hero := _debug_local_hero()
+	if hero.is_empty():
+		return
+	hero[key] = value
+
+# 所有顿帧都从这里走：关闭顿帧时连触发都不该发生，否则冻结计时器仍会拦下一帧的视觉同步。
+func _trigger_hit_stop(freeze_duration: float, shake_strength: float = 0.3) -> void:
+	if _debug_no_hit_stop:
+		return
+	_hit_stop.trigger_hit_stop(freeze_duration, shake_strength)
+
 func _on_skill_button(slot: String) -> void:
 	# 按了但放不出来（CD / 蓝不够）必须有声音反馈：手机上玩家看不到 CD 数字时，
 	# 「按了没反应」是最容易让人以为游戏卡住的状态。
@@ -505,6 +672,8 @@ func _on_touch_move(value: Vector2) -> void:
 
 func _on_touch_attack(value: bool) -> void:
 	_touch_attack = value
+	if value:
+		_queued_attack = true
 
 func _on_leave_requested() -> void:
 	_exit_game()
@@ -528,6 +697,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			zoom = maxf(14.0, zoom - 2.0)
 		elif mouse.pressed and mouse.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			zoom = minf(34.0, zoom + 2.0)
+		elif mouse.pressed and mouse.button_index == MOUSE_BUTTON_RIGHT:
+			# 右键按下即锁存一次普攻：即使松手发生在下一次 20Hz 上报之前也不丢。
+			_queued_attack = true
 		elif mouse.pressed and not touch_mode and mouse.button_index == MOUSE_BUTTON_LEFT:
 			# 左键点地 = 走到那个点。用事件自带的坐标而不是缓存的 _mouse_ground，
 			# 否则「先点、鼠标同一帧还在上一帧位置」时点偏一点点。
@@ -535,8 +707,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				_set_move_target(_mouse_ground)
 	if event is InputEventKey:
 		var key := event as InputEventKey
-		if key.pressed and not key.echo and key.keycode == KEY_ESCAPE:
+		if key.pressed and not key.echo and key.keycode == KEY_F3:
+			if _debug_panel != null:
+				_debug_panel.toggle()
+				get_viewport().set_input_as_handled()
+		elif key.pressed and not key.echo and key.keycode == KEY_ESCAPE:
 			_toggle_pause()
+		elif key.pressed and not key.echo and key.keycode == KEY_SPACE:
+			_queued_attack = true
 
 func _handle_touch_event(event: InputEvent) -> bool:
 	if event is InputEventScreenTouch:
@@ -645,10 +823,10 @@ func _process(delta: float) -> void:
 	if _paused:
 		return
 	_hit_stop.tick(delta)
-	if _hit_stop.is_frozen():
-		# 击杀/破塔的短促顿帧只冻结表现层：模拟与网络照常推进，避免联机卡顿。
-		_update_camera(delta, false)
-		return
+	# 顿帧只冻结表现层。以前这里直接 return，把 sim.tick 和 10Hz 快照广播一起停掉：
+	# 一次击杀 90ms 的顿帧刚好抽掉一格快照，客机 jitter buffer 欠载就会「回拉」。
+	# 现在还照常推进模拟、消费输入、发送网络包，只在最后跳过视觉同步。
+	var frozen := _hit_stop.is_frozen()
 	if touch_mode:
 		if _touch_aim_valid:
 			if _touch_points.is_empty():
@@ -663,23 +841,34 @@ func _process(delta: float) -> void:
 		_gather_input()
 		if not sim.ended:
 			sim.set_input(local_owner, _local_input)
-		var ticked := false
 		# 事件必须逐 tick 取走。两个理由：
 		# ① 一帧可能补跑多个 tick（卡顿后追帧），只在循环外读一次快照会漏掉前面 tick 的
 		#    击杀 / 结算事件，表现静默丢失；
 		# ② 对局结束后 tick 不再推进、也不再清空 state.events，不取走的话 match_end 会留在
 		#    那里被每帧重放（顿帧常驻 + 震屏每帧重算），结算界面就一直在抖。
 		var frame_events: Array = []
-		_accumulator += minf(delta, 0.1)
+		# 调试暂停只停模拟，不改输入采集与网络收发：单步之后立即能看到下一 tick 的画面。
+		if not _debug_paused:
+			_accumulator += minf(delta, 0.1) * _debug_time_scale
 		var guard := 0
+		var tick_count := 0
+		var tick_started := Time.get_ticks_usec()
 		while _accumulator >= TICK and guard < 5:
 			sim.tick(TICK)
 			frame_events.append_array(sim.consume_events())
 			_accumulator -= TICK
 			guard += 1
-			ticked = true
-		if ticked:
-			current_snapshot = sim.snapshot_for(local_team)
+			tick_count += 1
+		if tick_count > 0:
+			_debug_tick_ms = float(Time.get_ticks_usec() - tick_started) / 1000.0 / float(tick_count)
+			var snapshot_started := Time.get_ticks_usec()
+			_last_world_shot = sim.snapshot()
+			# 全图视野是纯本机作弊：只换本地这份快照，广播仍按队伍过滤。
+			if _debug_reveal:
+				current_snapshot = _last_world_shot
+			else:
+				current_snapshot = sim.snapshot_for(local_team, null, _last_world_shot)
+			_debug_snapshot_ms = float(Time.get_ticks_usec() - snapshot_started) / 1000.0
 			_process_events(frame_events)
 			# 输入只在真正被模拟消费后清空；否则高帧率下会吞掉刚按下的技能。
 			_consume_skill_queue()
@@ -699,8 +888,11 @@ func _process(delta: float) -> void:
 				# 视野过滤必须按队伍分别下发，否则客机能看到全图敌人。
 				# 状态与事件分两路：状态走不可靠（丢了下一格覆盖），
 				# 事件走可靠（丢了就永远没有播报/结算曲/特效）。
+				# 世界快照只构建一次，两个队伍复用同一份再各自过滤：5v5 下这是每 10Hz
+				# 最大的一笔分配，按队伍重建等于白跑一遍全实体 + 经济面板 + 河道。
+				var world_shot: Dictionary = _last_world_shot if not _last_world_shot.is_empty() else sim.snapshot()
 				session.broadcast_team_snapshots(func(team: String) -> Dictionary:
-					return sim.snapshot_for(team)
+					return sim.snapshot_for(team, null, world_shot)
 				)
 				session.broadcast_team_events(
 					func(team: String) -> Array:
@@ -711,7 +903,7 @@ func _process(delta: float) -> void:
 		_gather_input()
 		_update_local_prediction(delta)
 		_input_timer += delta
-		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0:
+		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.attack or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0:
 			_input_timer = 0.0
 			session.submit_input(_local_input.duplicate())
 			# 每个发出的输入都占一个序列号，服务端逐条确认，预测记录用同一个号。
@@ -722,6 +914,11 @@ func _process(delta: float) -> void:
 	else:
 		_gather_input()
 		_consume_skill_queue()
+
+	if frozen:
+		# 模拟、输入与网络包已经在本帧推进，这里只冻结画面（位置/动画/HUD）。
+		_update_camera(delta, false)
+		return
 
 	if authoritative:
 		_sync_units(current_snapshot, delta)
@@ -826,7 +1023,7 @@ func _gather_input() -> void:
 	if _mouse_valid:
 		_local_input.aim = _mouse_ground
 	# 左键已经让给「走到那」，普攻改到右键 / 空格。
-	_local_input.attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or Input.is_key_pressed(KEY_SPACE)
+	_local_input.attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or Input.is_key_pressed(KEY_SPACE) or _queued_attack
 	_local_input.recall = Input.is_key_pressed(KEY_B) or _queued_recall
 	_local_input.teleport = Input.is_key_pressed(KEY_T) or _queued_teleport
 	_local_input.attack_mode = _attack_mode
@@ -910,7 +1107,7 @@ func _gather_touch_input() -> void:
 		_local_input.teleport = true
 	_local_input.move = InputAssist.camera_relative_move(_touch_move, _camera_forward_2d())
 	_local_input.aim = _resolve_touch_aim()
-	_local_input.attack = _touch_attack
+	_local_input.attack = _touch_attack or _queued_attack
 	_local_input.attack_mode = _attack_mode
 	_local_input.locked_target = _locked_target
 	_apply_pending_purchase()
@@ -994,6 +1191,7 @@ func _consume_skill_queue(advance_seq: bool = true) -> void:
 	_queued_summoner = false
 	_queued_recall = false
 	_queued_teleport = false
+	_queued_attack = false
 	if _local_input.buy_item != "" or _local_input.sell_slot >= 0:
 		if not _pending_purchases.is_empty():
 			_pending_purchases.pop_front()
@@ -1066,11 +1264,12 @@ func _project_ground(screen_pos: Vector2) -> bool:
 
 func receive_snapshot(data: Dictionary) -> void:
 	current_snapshot = data
-	# 入队供 jitter buffer 回放。深拷贝是必要的：同一份 Dictionary 后续会被复用。
+	# 入队供 jitter buffer 回放。data 是 NetProtocol.decode + sanitize 现场构出来的新字典，
+	# 没有任何地方改写它，这里不再整份深拷贝 —— 5v5 每 100ms 一次，纯属白烧 CPU。
 	_snapshot_buffer.append({
 		"at": float(Time.get_ticks_msec()) / 1000.0,
 		"st": float(data.get("time", 0.0)),
-		"snapshot": data.duplicate(true),
+		"snapshot": data,
 	})
 	while _snapshot_buffer.size() > NET_BUFFER_LIMIT:
 		_snapshot_buffer.pop_front()
@@ -1214,12 +1413,16 @@ func _update_camera(delta: float, instant: bool) -> void:
 	# 抖动只加在机位上、不改朝向 —— 否则震屏会连带把地平线拧歪。
 	var eye := placement.origin
 	_cam_initialized = true
-	if _camera_shake > 0.0:
-		_camera_shake = maxf(0.0, _camera_shake - delta * 1.8)
-		eye += Vector3(randf_range(-_camera_shake, _camera_shake), randf_range(-_camera_shake, _camera_shake) * 0.4, 0.0)
-	var stop_shake := _hit_stop.get_shake_offset()
-	if stop_shake.length_squared() > 0.0:
-		eye += Vector3(stop_shake.x, stop_shake.y * 0.4, 0.0)
+	if _debug_no_shake:
+		# 关掉震屏时把存量也清干净：否则重新打开会先抖一下残留的旧震幅。
+		_camera_shake = 0.0
+	else:
+		if _camera_shake > 0.0:
+			_camera_shake = maxf(0.0, _camera_shake - delta * 1.8)
+			eye += Vector3(randf_range(-_camera_shake, _camera_shake), randf_range(-_camera_shake, _camera_shake) * 0.4, 0.0)
+		var stop_shake := _hit_stop.get_shake_offset()
+		if stop_shake.length_squared() > 0.0:
+			eye += Vector3(stop_shake.x, stop_shake.y * 0.4, 0.0)
 	camera.transform = Transform3D(placement.basis, eye)
 
 # --- 小地图定位 -----------------------------------------------------------
@@ -1407,6 +1610,9 @@ func _bush_feedback_step(point: Vector2) -> String:
 	_camera_fov_target = _bush_feedback.target_fov(BASE_FOV)
 	if hud != null:
 		hud.set_bush_hidden(_bush_hidden)
+	_set_local_bush_eye(_bush_hidden)
+	if transition == "enter":
+		_play_bush_enter_ring()
 	if _bush_audio != null:
 		var cue := _bush_cue_for(transition)
 		if cue != null:
@@ -1430,6 +1636,33 @@ func _clear_bush_feedback() -> void:
 	_camera_fov_target = BASE_FOV
 	if hud != null:
 		hud.set_bush_hidden(false)
+	_set_local_bush_eye(false)
+
+# 头顶斜划眼只属于本地英雄：敌人进草不该在本地画面里冒标记（那就成透视了）。
+func _set_local_bush_eye(value: bool) -> void:
+	if _local_entity_id < 0:
+		return
+	var view: UnitVisual = _views.get(_local_entity_id)
+	if view != null and view.kind == "hero":
+		view.set_bush_hidden(value)
+
+# 进草瞬间在草丛中心放一圈绿色扩散环：HUD 的文字在屏幕下方，
+# 玩家视线还在人身上，这一圈是「你确实进草了」的第一反馈。
+func _play_bush_enter_ring() -> void:
+	var bush_id := str(_bush_feedback.bush_id)
+	for bush in MapLayout.BUSHES:
+		if str(bush.id) != bush_id:
+			continue
+		var radius := float(bush.radius)
+		_spawn_ring(
+			Vector3(float(bush.pos.x), 0.0, float(bush.pos.y)),
+			Color(0.42, 0.96, 0.58),
+			radius * 0.9,
+			radius * 2.0,
+			0.55,
+			0.5
+		)
+		break
 
 func _update_aim_marker() -> void:
 	if aim_marker == null:
@@ -1659,7 +1892,13 @@ func _build_ground() -> void:
 	ground.mesh = terrain.build_mesh()
 	ground.material_override = TerrainBuilder.build_material()
 	# 地形必须投影：关掉时山体和丘陵不会落到地面上，远山就是一排贴纸。
-	ground.cast_shadow = ArenaLook.TERRAIN_SHADOW
+	# 手机端例外：地形是整张 5 万三角形的大网格，移动时把它塞进 shadow pass
+	# 的代价远高于山体阴影带来的收益，移动端改由光照明暗表现起伏。
+	ground.cast_shadow = (
+		ArenaLook.TERRAIN_SHADOW
+		if not OS.has_feature("mobile")
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	)
 	_props_root.add_child(ground)
 
 func _build_lanes() -> void:
@@ -2110,80 +2349,77 @@ func _build_map_features() -> void:
 	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
 	var stone := _wall_stone_material()
 
-	for wall in marks.walls:
+	_begin_rock_batch()
+	for wall_index in marks.walls.size():
+		var wall: Dictionary = marks.walls[wall_index]
 		var a: Vector2 = wall.a
 		var b: Vector2 = wall.b
 		var center := (a + b) * 0.5
 		var length := a.distance_to(b)
 		var dir := (b - a) / maxf(length, 0.001)
+		var perp := Vector2(-dir.y, dir.x)
 		var yaw := -atan2(dir.y, dir.x)
+		var wall_id := str(wall.get("id", "jungle"))
+		# 每段墙一个相位：相邻墙的岩脊不会像复制粘贴一样同向摆。
+		var phase := float(wall_index) * 1.63
 		# 尺寸全部取自 sim 层：视觉厚度与碰撞厚度必须一致，否则会出现
 		# 「看着贴得过去、身体却被挡住」的错位（薄渲染 / 厚碰撞）。
+		# 现在这一层只是**基座**：直墙的方盒轮廓会被上面的岩脊打碎，
+		# 但碰撞线仍然由它来封住。
 		var barrier := MeshInstance3D.new()
 		# 名字即接口：遮挡逻辑与测试都靠 wall_<id> 找到某一段石壁。
-		barrier.name = "wall_" + str(wall.get("id", "jungle"))
+		barrier.name = "wall_" + wall_id
 		var box := BoxMesh.new()
-		box.size = Vector3(length, MapLayout.WALL_HEIGHT, MapLayout.WALL_THICKNESS)
+		box.size = Vector3(length, MapLayout.WALL_CORE_HEIGHT, MapLayout.WALL_THICKNESS)
 		barrier.mesh = box
 		barrier.material_override = stone
-		barrier.position = Vector3(center.x, MapLayout.WALL_HEIGHT * 0.5, center.y)
+		barrier.position = Vector3(center.x, MapLayout.WALL_CORE_HEIGHT * 0.5, center.y)
 		barrier.rotation.y = yaw
 		ModelUtils.enable_shadows(barrier, true)
 		_props_root.add_child(barrier)
-		# 压顶石：一条略窄、略低的横带。它比墙身窄，是为了让「墙顶」读成一条山脊，
-		# 而不是一条能走人的宽平台 —— 之前比墙身宽 0.3 米，俯视看过去像墙顶铺了条木栈道。
-		var coping := MeshInstance3D.new()
-		coping.name = "coping_" + str(wall.get("id", "jungle"))
-		var coping_box := BoxMesh.new()
-		coping_box.size = Vector3(
-			length,
-			MapLayout.WALL_COPING_THICK,
-			MapLayout.WALL_THICKNESS + MapLayout.WALL_COPING_OVERHANG * 2.0
-		)
-		coping.mesh = coping_box
-		coping.material_override = stone
-		coping.position = Vector3(center.x, MapLayout.WALL_HEIGHT + MapLayout.WALL_COPING_THICK * 0.5 - 0.02, center.y)
-		coping.rotation.y = yaw
-		ModelUtils.enable_shadows(coping, true)
-		_props_root.add_child(coping)
-		# 壁柱：参考图里的城墙靠它立起节奏 —— 墙面每隔几米一根微凸方柱，
-		# 柱顶一块小方帽，帽顶越出压顶石形成一条起伏线。
-		# 这一格换了三次，别走回头路（细节见 map_layout.gd 的 WALL_BUTTRESS_* 注释）：
-		# ① 墙顶撒随机岩脊 = 塌方的语言，不是砌筑；② 等距等高方柱 = 城垛；
-		# ③ 现在才是砌筑：砖缝在 shader 里，凸出感靠壁柱，起伏靠柱帽。
-		var spans := maxi(2, int(round(length / MapLayout.WALL_BUTTRESS_SPACING)))
-		for i in spans:
-			var t := (float(i) + 0.5) / float(spans)
-			_build_buttress(
-				"buttress_%s_%d" % [str(wall.get("id", "jungle")), i],
-				a.lerp(b, t),
-				yaw,
-				MapLayout.WALL_THICKNESS,
-				MapLayout.WALL_HEIGHT,
-				stone,
-				{"wall_id": str(wall.get("id", "jungle")), "along": length * t}
+
+		# 岩脊：沿墙铺一串高度/宽度/朝向都不同的 Rock.glb。基座顶边是直的，
+		# 俯视一眼就读成方盒；岩脊把它压成一条起伏的山脊线。
+		# 低石左右摆出 S 形、高石仍贴中线：墙面轮廓因此不是一条直线，
+		# 但高石不会伸到英雄贴墙的位置。
+		var ridge_count := maxi(3, int(round(length / MapLayout.WALL_ROCK_SPACING)))
+		for i in ridge_count:
+			var t := (float(i) + 0.5) / float(ridge_count)
+			t = clampf(t + rng.randf_range(-0.22, 0.22) / float(ridge_count), 0.0, 1.0)
+			var p := a.lerp(b, t)
+			var wave := sin(t * PI * 2.4 + phase) * 0.26
+			if i % 2 == 1:
+				wave *= 0.2
+			var lateral := perp * (wave + rng.randf_range(-0.05, 0.05))
+			# 高低交替 + 随机带内抖动：纯随机在只有三块石头的短墙上会抽成一样高，
+			# 俯视又变回一条直顶边。
+			var band := rng.randf_range(0.05, 0.30) if i % 2 == 0 else rng.randf_range(0.70, 0.95)
+			_queue_rock(
+				p + lateral,
+				lerpf(MapLayout.WALL_ROCK_MIN_HEIGHT, MapLayout.WALL_ROCK_MAX_HEIGHT, band),
+				rng.randf_range(MapLayout.WALL_ROCK_WIDTH_MIN, MapLayout.WALL_ROCK_WIDTH_MAX),
+				rng.randf_range(0.0, TAU),
+				{"wall_id": wall_id, "kind": "ridge", "along": length * t}
 			)
-		# 岩石按墙长铺（每 3.2 米一块）：长墙只放三块会露出中间一大片光板，
-		# 短墙硬塞五块又会糊成一坨。
-		# 尺寸必须**低于墙身**（0.9~1.5 米）并贴到墙脚外侧：早先按 1.8~2.6 米
-		# 随机撒在墙轴线上，石头比 2.2 米的墙还高，俯视看过去像墙顶上趴着几块大石头。
-		var rocks := maxi(3, int(round(length / 3.2)))
-		var perp := Vector2(-dir.y, dir.x)
+		# 墙脚乱石：比旧版更密（每 2 米一块），左右两侧交替、位置带抖动。
+		# 这层是**低矮**的 0.8~1.4 米石块，不参与碰撞；它负责把墙脚那条
+		# 数学直线啃成参差的石根，俯视时墙不会像一条摆正的盒子边。
+		var rocks := maxi(4, int(round(length / 2.0)))
 		for i in rocks:
 			var p := a.lerp(b, (float(i) + 0.5) / float(rocks))
 			var side := 1.0 if i % 2 == 0 else -1.0
-			var out := perp * side * rng.randf_range(MapLayout.WALL_THICKNESS * 0.5 + 0.15, MapLayout.WALL_THICKNESS * 0.5 + 0.6)
-			var rock := ModelUtils.fit_scene(rock_scene, rng.randf_range(0.9, 1.5), rng.randf_range(1.4, 2.2))
-			# 名字即接口：墙脚石要能被测试与调试逐个找到。
-			rock.name = "footrock_%s_%d" % [str(wall.get("id", "jungle")), i]
-			rock.position = Vector3(p.x + out.x + rng.randf_range(-0.3, 0.3), 0.0, p.y + out.y + rng.randf_range(-0.3, 0.3))
-			rock.rotation.y = rng.randf_range(0.0, TAU)
-			# glb 自带的灰白材质和石壁贴在一起像「墙脚摆了几颗土豆」，
-			# 换成同一份石壁材质才读成同一块山体塌下来的碎块。
-			ModelUtils.override_material(rock, stone)
-			ModelUtils.enable_shadows(rock, false)
-			_props_root.add_child(rock)
+			var out := perp * side * rng.randf_range(MapLayout.WALL_THICKNESS * 0.5 + 0.15, MapLayout.WALL_THICKNESS * 0.5 + 0.75)
+			_queue_rock(
+				Vector2(p.x + out.x + rng.randf_range(-0.45, 0.45), p.y + out.y + rng.randf_range(-0.45, 0.45)),
+				rng.randf_range(0.8, 1.4),
+				1.0,
+				rng.randf_range(0.0, TAU),
+				{"wall_id": wall_id, "kind": "footrock", "along": length * (float(i) + 0.5) / float(rocks)}
+			)
 
+	# 野区墙石：一批 MultiMesh，阴影关闭。高石/墙脚石都由基座与墙端石提供接地阴影，
+	# 这一批数量最大，单独开阴影会让移动端的 shadow pass 翻倍。
+	_flush_rock_batch("wall_rocks", rock_scene, stone, false)
 	# 墙端露头：BoxMesh 的端面是绝对平的，一段墙看着像被刀切过。
 	# 王者的野区石壁是「山体在两端露头」，所以每个墙端压一块**高过墙顶**的岩体，
 	# 把平整端面吞进石头里。相邻两段墙靠得近时，两块露头自然合成一个山口。
@@ -2251,15 +2487,25 @@ func _build_map_features() -> void:
 	for camp in marks.camps:
 		var buff := str(camp.get("buff", ""))
 		var color := Color(0.95, 0.62, 0.22) if buff == "red" else Color(0.34, 0.58, 0.98)
-		_add_map_disc(camp.pos, MapLayout.CAMP_DISC_RADIUS, Color(color.r, color.g, color.b, 0.2), color)
-		_add_map_totem(camp.pos + Vector2(0.0, -2.0), 2.2, color)
+		if buff == "":
+			# 小野点用草绿，和红/蓝 buff 一眼分开；它们没有增益可争夺。
+			color = Color(0.58, 0.78, 0.42)
+		var disc_radius := float(camp.get("disc_radius", MapLayout.CAMP_DISC_RADIUS))
+		_add_map_disc(camp.pos, disc_radius, Color(color.r, color.g, color.b, 0.2), color)
+		_add_camp_sigil("camp_%s" % str(camp.id), camp.pos, disc_radius, color)
+		# 小野点不立图腾柱：12 个野点全立会变成一排彩色柱子，压过野怪本身。
+		if buff != "":
+			_add_map_totem(camp.pos + Vector2(0.0, -2.0), 2.2, color)
+		_add_camp_label(camp, color)
 
 	for pit in marks.objectives:
 		_add_map_disc(pit.pos, MapLayout.PIT_DISC_RADIUS, Color(0.35, 0.2, 0.5, 0.26), Color(0.72, 0.5, 0.92))
+		_add_camp_sigil("pit_%s" % str(pit.id), pit.pos, MapLayout.PIT_DISC_RADIUS, Color(0.72, 0.5, 0.92))
 		for i in 4:
 			var angle := TAU * float(i) / 4.0 + PI * 0.25
 			var pillar_pos: Vector2 = pit.pos + Vector2(cos(angle), sin(angle)) * 5.0
 			_add_map_totem(pillar_pos, 3.0, Color(0.62, 0.5, 0.82))
+		_add_camp_label(pit, Color(0.8, 0.58, 1.0), true)
 
 	for pad in marks.teleports:
 		var pad_color := Color(0.4, 0.82, 0.92)
@@ -2270,70 +2516,116 @@ func _build_map_features() -> void:
 		# —— 阵盘离路缘只有 1.25 米，柱子一探出去就长在柏油上。
 		_add_map_totem(pad.pos + Vector2(0.0, -2.8), 2.6, pad_color)
 
-# 边界：一圈看得见的石 wall + 参差的岩脊。
+# 岩脊单块：fit_scene 先把高度对齐，再在水平方向拉伸成更宽的岩块。
+# 不能直接给 fit_scene 传 max_width：Rock.glb 本身高瘦，按宽度封顶会把它压矮。
+# meta 里带 wall_id / side / kind / along，测试靠它分组、量间距、找岩脊；
+# 不要改成解析节点名：墙 id 自己就带下划线（wall_top_west），拆字符串必崩。
+func _begin_rock_batch() -> void:
+	_rock_batch_specs.clear()
+
+func _queue_rock(point: Vector2, height: float, width_scale: float, yaw: float, meta: Dictionary) -> void:
+	_rock_batch_specs.append({
+		"pos": point,
+		"height": height,
+		"width_scale": width_scale,
+		"yaw": yaw,
+		"meta": meta,
+	})
+
+# Rock.glb 只实例化一次，取出网格与「把原始模型归一化到高 1 米、脚底 y=0」的
+# 基变换。之后每个实例只需要自己的缩放/旋转/位移，不再各自 new 一个场景。
+func _rock_mesh_data(rock_scene: PackedScene) -> Dictionary:
+	var key := rock_scene.resource_path
+	if _rock_mesh_cache.has(key):
+		return _rock_mesh_cache[key]
+	var model: Node3D = rock_scene.instantiate()
+	var mesh_instance: MeshInstance3D = null
+	for node in model.find_children("*", "MeshInstance3D", true, false):
+		var candidate := node as MeshInstance3D
+		if candidate.mesh != null:
+			mesh_instance = candidate
+			break
+	if mesh_instance == null:
+		model.free()
+		return {}
+	var local := Transform3D.IDENTITY
+	var current: Node = mesh_instance
+	while current != null and current != model:
+		if current is Node3D:
+			local = (current as Node3D).transform * local
+		current = current.get_parent()
+	# glb 根节点也可能带变换；fit_scene 的包围盒包含了它，这里必须一起带上。
+	local = model.transform * local
+	var box := ModelUtils.relative_aabb(model)
+	var raw_height := maxf(box.size.y, 0.001)
+	var factor := 1.0 / raw_height
+	var center := box.get_center()
+	var fit := Transform3D(
+		Basis.from_scale(Vector3.ONE * factor),
+		Vector3(-center.x * factor, -box.position.y * factor, -center.z * factor)
+	)
+	var data := {"mesh": mesh_instance.mesh, "base": fit * local}
+	model.free()
+	_rock_mesh_cache[key] = data
+	return data
+
+# 把本批岩块合成一个 MultiMeshInstance3D：几百块石头只占 1 个 draw call，
+# 阴影 pass 也只画一次。每块石头的 height/width/yaw/pos 和元数据仍写进
+# rock_specs，测试与调试可以逐块核对。
+func _flush_rock_batch(node_name: String, rock_scene: PackedScene, stone: Material, shadows: bool) -> MultiMeshInstance3D:
+	if _rock_batch_specs.is_empty():
+		return null
+	var data := _rock_mesh_data(rock_scene)
+	if data.is_empty():
+		_rock_batch_specs.clear()
+		return null
+	var mesh: Mesh = data.mesh
+	var base: Transform3D = data.base
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = _rock_batch_specs.size()
+	var bounds := AABB()
+	var has_bounds := false
+	for i in _rock_batch_specs.size():
+		var spec: Dictionary = _rock_batch_specs[i]
+		var point: Vector2 = spec.pos
+		var height := float(spec.height)
+		var width_scale := float(spec.width_scale)
+		var basis := Basis(Vector3.UP, float(spec.yaw)) \
+			* Basis.from_scale(Vector3(width_scale * height, height, width_scale * height))
+		var xform := Transform3D(basis, Vector3(point.x, 0.0, point.y)) * base
+		multimesh.set_instance_transform(i, xform)
+		spec["transform"] = xform
+		var extra: Dictionary = spec.meta
+		for extra_key in extra:
+			spec[extra_key] = extra[extra_key]
+		var instance_box: AABB = xform * mesh.get_aabb()
+		bounds = instance_box if not has_bounds else bounds.merge(instance_box)
+		has_bounds = true
+	var node := MultiMeshInstance3D.new()
+	node.name = node_name
+	node.multimesh = multimesh
+	node.material_override = stone
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# MultiMesh 的默认 AABB 只按单块网格算；不显式给全图包围盒，镜头一动
+	# 整批石头会被错误剔除，表现为「墙突然消失」。
+	node.custom_aabb = bounds
+	node.set_meta("rock_specs", _rock_batch_specs.duplicate(true))
+	_props_root.add_child(node)
+	_rock_batch_specs = []
+	return node
+
+# 边界：一圈看得见的岩壁。
 # 模拟层靠 collision.clamp_bounds 拦住人，但那是隐形墙 —— 玩家看见草地一直铺到
 # 远处的山，撞上去才知道到边了。这里的墙内表面与 MapData.BOUNDS 重合，
 # 所以「看到的墙」和「走不过去的线」是同一条。
 #
-# 2026-10-25 重做样式：原来是「1 米厚的墙 + 每 9 米一根 5.2 米方柱 + 浅色柱帽」，
-# 俯视看是一排等距**城垛**，整圈边界读成公园围墙。参考图里的边界是**自然的岩脊**：
-# 墙体本身足够厚（1.8 米）能看出进深，顶面被一堆高低不齐的石头打断，
-# 墙脚散着几块塌下来的碎石。于是柱子和柱帽整段删掉，换成岩脊 + 碎石。
-# 壁柱：柱身 + 柱帽。野区墙与边界墙共用同一套几何，只有墙厚 / 墙高不同。
-#
-# meta 里带 wall_id / side / kind / along，测试靠它分组、量间距、找柱帽 ——
-# 不要改成解析节点名：墙 id 自己就带下划线（wall_top_west），拆字符串必崩。
-#
-# 柱帽顶 = 墙高 + RISE + CAP - 0.02，恒等于 WALL_TOP 之下 2 厘米：
-# 相机安全边距（MapData.CAMERA_WALL_MARGIN）是按「最高的东西不能挡住英雄」反解的，
-# 这里一旦超过 WALL_TOP，贴到可走极限的玩家就会把自己藏进石头里。
-func _build_buttress(
-	node_name: String,
-	point: Vector2,
-	yaw: float,
-	wall_thick: float,
-	wall_height: float,
-	stone: Material,
-	meta: Dictionary
-) -> void:
-	var body_height := wall_height + MapLayout.WALL_BUTTRESS_RISE
-	var body := MeshInstance3D.new()
-	body.name = node_name
-	var body_box := BoxMesh.new()
-	body_box.size = Vector3(
-		MapLayout.WALL_BUTTRESS_WIDTH,
-		body_height,
-		wall_thick + MapLayout.WALL_BUTTRESS_DEPTH * 2.0
-	)
-	body.mesh = body_box
-	body.material_override = stone
-	body.position = Vector3(point.x, body_height * 0.5, point.y)
-	body.rotation.y = yaw
-	for key in meta:
-		body.set_meta(key, meta[key])
-	body.set_meta("kind", "body")
-	ModelUtils.enable_shadows(body, true)
-	_props_root.add_child(body)
-
-	var cap_height := MapLayout.WALL_BUTTRESS_CAP
-	var cap := MeshInstance3D.new()
-	cap.name = node_name + "_cap"
-	var cap_box := BoxMesh.new()
-	cap_box.size = Vector3(
-		MapLayout.WALL_BUTTRESS_WIDTH + MapLayout.WALL_BUTTRESS_CAP_SLACK * 2.0,
-		cap_height,
-		wall_thick + (MapLayout.WALL_BUTTRESS_DEPTH + MapLayout.WALL_BUTTRESS_CAP_SLACK) * 2.0
-	)
-	cap.mesh = cap_box
-	cap.material_override = stone
-	cap.position = Vector3(point.x, body_height + cap_height * 0.5 - 0.02, point.y)
-	cap.rotation.y = yaw
-	for key in meta:
-		cap.set_meta(key, meta[key])
-	cap.set_meta("kind", "cap")
-	ModelUtils.enable_shadows(cap, true)
-	_props_root.add_child(cap)
-
+# 2026-10-28 重做：旧版是「直方盒墙身 + 外挑压顶 + 等距壁柱」，俯视是一圈
+# 规整的城墙，四个直角非常明显。王者峡谷的边界是自然山体，岩面有进有退。
+# 现在保留 2 米高的砌石基座封住边界，上面铺一条前后错落、高度不一的岩脊；
+# 四个角再压一簇更大的岩体，把直角吞掉。岩脊可以往非走区探 1.2 米，
+# 但前缘始终留在玩家身体之外（可走极限 54.2，岩体前缘 ≥ 55）。
 func _build_boundary_walls() -> void:
 	# 边界墙与野区墙是同一块石头：两套材质会出现「远处木板、近处石壁」的割裂，
 	# 而且玩家读不出这两者是同一种地形。
@@ -2341,6 +2633,7 @@ func _build_boundary_walls() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20481
 	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
+	_begin_rock_batch()
 
 	for wall in MapLayout.boundary_walls():
 		var a: Vector2 = wall.a
@@ -2351,46 +2644,33 @@ func _build_boundary_walls() -> void:
 		var perp := Vector2(-dir.y, dir.x)
 		var yaw := -atan2(dir.y, dir.x)
 		var side := str(wall.get("id", "boundary")).trim_prefix("boundary_")
-		# 这一段的全部网格都挂到同一条遮挡记录上：淡出时整段一起变，
-		# 只淡墙身不淡压顶石 / 岩脊会留下「悬空的顶线」，比不淡还怪。
+		var inward := perp * (1.0 if center.dot(perp) < 0.0 else -1.0)
 		var barrier := MeshInstance3D.new()
 		barrier.name = str(wall.get("id", "boundary"))
 		var box := BoxMesh.new()
-		box.size = Vector3(length, MapLayout.BOUNDARY_HEIGHT, MapLayout.BOUNDARY_THICK)
+		box.size = Vector3(length, MapLayout.BOUNDARY_CORE_HEIGHT, MapLayout.BOUNDARY_THICK)
 		barrier.mesh = box
 		barrier.material_override = stone
-		barrier.position = Vector3(center.x, MapLayout.BOUNDARY_HEIGHT * 0.5, center.y)
+		barrier.position = Vector3(center.x, MapLayout.BOUNDARY_CORE_HEIGHT * 0.5, center.y)
 		barrier.rotation.y = yaw
 		ModelUtils.enable_shadows(barrier, true)
 		_props_root.add_child(barrier)
 
-		# 压顶石：略宽的横带，让墙在远处也有一条清楚的顶线，
-		# 不然 3.4m 的石墙在 40m 外会糊成一条灰边。
-		var coping := MeshInstance3D.new()
-		coping.name = "coping_boundary_" + side
-		var cap_box := BoxMesh.new()
-		cap_box.size = Vector3(length, MapLayout.WALL_COPING_THICK,
-			MapLayout.BOUNDARY_THICK + MapLayout.BOUNDARY_COPING_OVERHANG * 2.0)
-		coping.mesh = cap_box
-		coping.material_override = stone
-		coping.position = Vector3(center.x, MapLayout.BOUNDARY_HEIGHT + MapLayout.WALL_COPING_THICK * 0.5 - 0.02, center.y)
-		coping.rotation.y = yaw
-		ModelUtils.enable_shadows(coping, true)
-		_props_root.add_child(coping)
-
-		# 壁柱：四面墙用同一套砌筑语言。间距比野区（3.6）略宽一档 ——
-		# 边界墙一跑就是 118 米，按 3.6 铺要立 33 根，纯属烧节点。
-		var spans := maxi(2, int(round(length / MapLayout.BOUNDARY_BUTTRESS_SPACING)))
-		for i in spans:
-			var t := (float(i) + 0.5) / float(spans)
-			_build_buttress(
-				"buttress_boundary_%s_%d" % [side, i],
-				a.lerp(b, t),
-				yaw,
-				MapLayout.BOUNDARY_THICK,
-				MapLayout.BOUNDARY_HEIGHT,
-				stone,
-				{"side": side, "along": length * t}
+		# 岩脊：每块石头的进深、高度、水平拉伸都不同，连续的直顶线被打散成山脊。
+		var ridge_count := maxi(6, int(round(length / MapLayout.BOUNDARY_ROCK_SPACING)))
+		for i in ridge_count:
+			var t := (float(i) + 0.5) / float(ridge_count)
+			t = clampf(t + rng.randf_range(-0.2, 0.2) / float(ridge_count), 0.0, 1.0)
+			var p := a.lerp(b, t)
+			# 负值往外退、正值往可玩区探：同一侧墙的岩面因此有进有退。
+			p += inward * rng.randf_range(-MapLayout.BOUNDARY_ROCK_OUTWARD, MapLayout.BOUNDARY_ROCK_INTRUDE)
+			var band := rng.randf_range(0.05, 0.35) if i % 2 == 0 else rng.randf_range(0.65, 0.95)
+			_queue_rock(
+				p,
+				lerpf(MapLayout.BOUNDARY_ROCK_MIN_HEIGHT, MapLayout.BOUNDARY_ROCK_MAX_HEIGHT, band),
+				rng.randf_range(MapLayout.BOUNDARY_ROCK_WIDTH_MIN, MapLayout.BOUNDARY_ROCK_WIDTH_MAX),
+				rng.randf_range(0.0, TAU),
+				{"side": side, "kind": "ridge", "along": length * t}
 			)
 
 		# 墙脚碎石：让墙和草地之间不是一条数学直线。
@@ -2398,15 +2678,38 @@ func _build_boundary_walls() -> void:
 		var rubble := maxi(2, int(round(length / 6.5)))
 		for i in rubble:
 			var p := a.lerp(b, (float(i) + 0.5) / float(rubble) + rng.randf_range(-0.2, 0.2) / maxf(length, 0.001))
-			var inward := perp * (1.0 if center.dot(perp) < 0.0 else -1.0)
 			var out := inward * rng.randf_range(MapLayout.BOUNDARY_THICK * 0.5 + 0.1, MapLayout.BOUNDARY_THICK * 0.5 + 0.9)
-			var chunk := ModelUtils.fit_scene(rock_scene, rng.randf_range(0.35, 0.65), rng.randf_range(0.7, 1.3))
-			chunk.name = "rubble_boundary_%s_%d" % [side, i]
-			chunk.position = Vector3(p.x + out.x, 0.0, p.y + out.y)
-			chunk.rotation.y = rng.randf_range(0.0, TAU)
-			ModelUtils.override_material(chunk, stone)
-			ModelUtils.enable_shadows(chunk, false)
-			_props_root.add_child(chunk)
+			_queue_rock(
+				Vector2(p.x + out.x, p.y + out.y),
+				rng.randf_range(0.35, 0.65),
+				1.0,
+				rng.randf_range(0.0, TAU),
+				{"side": side, "kind": "rubble", "along": length * (float(i) + 0.5) / float(rubble)}
+			)
+
+	# 四角岩簇：两段直墙在角点硬碰硬，是最明显的「方盒子」信号。
+	# 每个角压三块大岩，前两块往外包、第三块往内收，把直角吞进山体里。
+	var c := MapLayout.BOUNDARY_CENTER
+	var corners := [Vector2(-c, -c), Vector2(c, -c), Vector2(c, c), Vector2(-c, c)]
+	for ci in corners.size():
+		var corner: Vector2 = corners[ci]
+		var outward := corner.normalized()
+		for j in 3:
+			var p := corner + outward * rng.randf_range(0.5, 1.8)
+			if j == 2:
+				p = corner - outward * rng.randf_range(0.1, 0.4)
+			p += Vector2(rng.randf_range(-0.6, 0.6), rng.randf_range(-0.6, 0.6))
+			_queue_rock(
+				p,
+				rng.randf_range(3.05, 3.6),
+				rng.randf_range(1.5, 1.75),
+				rng.randf_range(0.0, TAU),
+				{"side": "corner", "kind": "ridge", "corner": ci}
+			)
+
+	# 边界岩脊与角岩合成一批：桌面保留阴影（边界轮廓更立体）；
+	# 移动端关掉，边界基座和墙端石仍会投影，足够接地。
+	_flush_rock_batch("boundary_rocks", rock_scene, stone, not OS.has_feature("mobile"))
 
 func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> void:
 	var disc_material := StandardMaterial3D.new()
@@ -2459,6 +2762,63 @@ func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> voi
 	inner.position = Vector3(pos.x, 0.065, pos.y)
 	inner.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(inner)
+
+# 营地 / 首领坑的贴地符阵：圆盘上的旋转刻线，野怪死亡时整块暗下去。
+# 与圆盘分开放，是为了让「熄灭」只影响符阵，不把石盘和边缘环一起吞掉。
+func _add_camp_sigil(key: String, pos: Vector2, radius: float, color: Color) -> void:
+	if _sigil_shader == null:
+		_sigil_shader = load(CAMP_SIGIL_SHADER)
+	if _sigil_shader == null:
+		return
+	var material := ShaderMaterial.new()
+	material.shader = _sigil_shader
+	material.set_shader_parameter("sigil_color", Color(color.r, color.g, color.b, 0.72))
+	material.set_shader_parameter("active", 1.0)
+	var node := MeshInstance3D.new()
+	node.name = "camp_sigil_" + key
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(radius * 1.72, radius * 1.72)
+	node.mesh = plane
+	node.material_override = material
+	# 压在圆盘上沿（圆盘 0.04 / 内环 0.065），再高会被图腾柱底部吃掉。
+	node.position = Vector3(pos.x, 0.085, pos.y)
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(node)
+	_camp_sigils[key] = material
+	_camp_sigil_active[key] = true
+
+func _set_camp_sigil_active(key: String, active: bool) -> void:
+	var material: ShaderMaterial = _camp_sigils.get(key, null)
+	if material == null:
+		return
+	if bool(_camp_sigil_active.get(key, true)) == active:
+		return
+	_camp_sigil_active[key] = active
+	material.set_shader_parameter("active", 1.0 if active else 0.0)
+
+# 营地重生牌：怪物活着时隐藏，死亡后原地显示「名称 + 剩余秒数」。
+# 不用 UnitVisual 的头顶名牌，因为怪物死亡后视图会被回收，而倒计时必须留在营地上。
+func _add_camp_label(region: Dictionary, color: Color, pit := false) -> void:
+	var label := Label3D.new()
+	var region_id := str(region.get("id", ""))
+	label.name = "camp_timer_" + region_id
+	label.text = ""
+	label.font = FONT_SC
+	label.font_size = 40
+	label.pixel_size = 0.004
+	label.outline_size = 10
+	label.outline_modulate = Color(0.01, 0.02, 0.03, 0.95)
+	label.modulate = color
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = false
+	# 首领坑的怪高 2.4 米，牌要抬到头顶之上；小营地/小野点 2.1 米就够。
+	# 不能再用「buff 为空」判断首领：小野点的 buff 也是空的。
+	label.position = Vector3(float(region.pos.x), 3.4 if pit else 2.2, float(region.pos.y))
+	label.visible = false
+	label.set_meta("region_id", region_id)
+	label.set_meta("display_name", str(region.get("name", "野怪")))
+	_props_root.add_child(label)
+	_camp_labels[region_id] = label
 
 func _add_map_totem(pos: Vector2, height: float, color: Color) -> void:
 	var pole := MeshInstance3D.new()
@@ -2556,7 +2916,10 @@ func _build_grass_tufts() -> void:
 	_grass_noise.frequency = 0.045
 	_grass_noise.fractal_octaves = 2
 	_grass_bushes = MapView.map_marks().bushes
-	var tufts := GrassField.scatter(12000, _can_grow_grass, _terrain_height, rng)
+	# 手机端把草簇从 12000 降到 6000：草是半透明小片的 fill-rate 大头，
+	# 镜头移动时满屏草叶的 overdraw 会直接吃掉帧率；密度减半后远看仍是草甸。
+	var tuft_count := 6000 if OS.has_feature("mobile") else 12000
+	var tufts := GrassField.scatter(tuft_count, _can_grow_grass, _terrain_height, rng)
 	_props_root.add_child(tufts)
 
 func _build_scenery() -> void:
@@ -2723,6 +3086,7 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 		var prev_xy: Vector2 = _render_prev_positions.get(entity_id, Vector2(INF, INF))
 		view.set_snapshot(entity, delta, _render_alpha, prev_xy)
 		view.process_visual(delta)
+	_sync_camp_states(snapshot)
 
 	# 敌人离开视野：英雄不回收（等级/装备信息仍要在重新出现时立刻可用），但必须从画面消失。
 	for eid in _views:
@@ -2755,6 +3119,38 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 		else:
 			view.queue_free()
 
+# 野怪状态 → 营地地面牌 + 符阵亮度。
+# 快照里出现怪 = 这个营地当前在视野内；没出现就保持隐藏，避免隔墙读倒计时。
+func _sync_camp_states(snapshot: Dictionary) -> void:
+	for label in _camp_labels.values():
+		if label != null:
+			label.visible = false
+	for entity in snapshot.get("entities", []):
+		if str(entity.get("type", "")) != "monster":
+			continue
+		var camp_id := str(entity.get("camp_id", ""))
+		var objective_id := str(entity.get("objective_id", ""))
+		var region_id := camp_id if camp_id != "" else objective_id
+		if region_id == "":
+			continue
+		var alive := bool(entity.get("alive", false))
+		var sigil_key := ("camp_" if camp_id != "" else "pit_") + region_id
+		_set_camp_sigil_active(sigil_key, alive)
+		var label: Label3D = _camp_labels.get(region_id, null)
+		if label == null:
+			continue
+		if alive:
+			continue
+		var timer := float(entity.get("respawn_timer", 0.0))
+		if timer <= 0.0:
+			continue
+		label.visible = true
+		var seconds := int(ceil(timer))
+		var text := "%s  %ds" % [str(label.get_meta("display_name", "野怪")), seconds]
+		if str(label.get_meta("timer_text", "")) != text:
+			label.set_meta("timer_text", text)
+			label.text = text
+
 func _acquire_unit_view(entity: Dictionary) -> UnitVisual:
 	var entity_type := str(entity.get("type", "hero"))
 	var team := str(entity.get("team", "blue"))
@@ -2777,7 +3173,18 @@ func _create_unit_view(entity: Dictionary) -> UnitVisual:
 	if entity_type == "hero":
 		view.setup("hero", team, str(entity.get("hero_type", "blade")), str(entity.get("name", "英雄")), is_local, local_team)
 	elif entity_type == "monster":
-		view.setup("monster", "neutral", str(entity.get("monster_type", "wolf")), str(entity.get("name", "野怪")), false, local_team)
+		var objective := bool(entity.get("objective", false))
+		view.setup(
+			"monster",
+			"neutral",
+			str(entity.get("monster_type", "wolf")),
+			str(entity.get("name", "野怪")),
+			false,
+			local_team,
+			objective,
+			str(entity.get("objective_id", ""))
+		)
+		view.set_monster_badge(str(entity.get("buff_type", "")), objective)
 	else:
 		view.setup("minion", team, str(entity.get("minion_type", "melee")), "", false, local_team)
 	_units_root.add_child(view)
@@ -2830,14 +3237,29 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 		var range_mat: StandardMaterial3D = record.get("range_mat")
 		var band_mat: StandardMaterial3D = record.get("range_band_mat")
 		if range_mat != null or band_mat != null:
-			var team_color: Color = record.get("team_color", BLUE)
-			var ring_state := range_ring_state(entity, team_color, viewer)
-			if range_mat != null:
-				range_mat.albedo_color = ring_state.color
-				range_mat.emission = ring_state.glow
-			if band_mat != null:
-				band_mat.albedo_color = Color(ring_state.glow.r, ring_state.glow.g, ring_state.glow.b, float(ring_state.color.a) * 0.45)
-				band_mat.emission = ring_state.glow
+			# 范围圈只在「红/蓝」切换时改材质。以前每帧无条件写 albedo/emission：
+			# 5v5 有 12 座建筑，每帧 12 次材质属性写会逼渲染端重建 uniform。
+			var warned := _range_ring_warned(entity, viewer)
+			if int(record.get("ring_warned", -1)) != (1 if warned else 0):
+				record["ring_warned"] = 1 if warned else 0
+				var ring_state := range_ring_state(entity, record.get("team_color", BLUE), viewer)
+				if range_mat != null:
+					range_mat.albedo_color = ring_state.color
+					range_mat.emission = ring_state.glow
+				if band_mat != null:
+					band_mat.albedo_color = Color(ring_state.glow.r, ring_state.glow.g, ring_state.glow.b, float(ring_state.color.a) * 0.45)
+					band_mat.emission = ring_state.glow
+
+# 与 range_ring_state().warned 同一口径，但不分配 Dictionary；
+# 每帧每座建筑都要问一次，只为一个 bool 建字典不划算。
+static func _range_ring_warned(entity: Dictionary, viewer: Dictionary) -> bool:
+	if viewer.is_empty() or not bool(viewer.get("alive", false)):
+		return false
+	if str(viewer.get("team", "")) == str(entity.get("team", "")):
+		return false
+	var structure_pos := Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0)))
+	var viewer_pos := Vector2(float(viewer.get("x", 0.0)), float(viewer.get("y", 0.0)))
+	return structure_pos.distance_to(viewer_pos) <= float(entity.get("range", 8.0))
 
 # 防御塔范围圈的唯一判定入口。抽成纯函数是为了能被 headless 测到：
 # 半径必须取实体自己的 range（塔 8 / 双生塔 7 / 主堡 9），
@@ -3198,7 +3620,7 @@ func _process_events(events: Array) -> void:
 				if attacker:
 					attacker.play_attack()
 				if bool(event.get("crit", false)):
-					_hit_stop.trigger_hit_stop(0.045, 0.18)
+					_trigger_hit_stop(0.045, 0.18)
 			"hit":
 				_handle_hit_event(event)
 			"death":
@@ -3206,7 +3628,7 @@ func _process_events(events: Array) -> void:
 			"tower_destroyed":
 				var pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(pos, RED if str(event.get("team", "red")) == "red" else BLUE, 32)
-				_hit_stop.trigger_hit_stop(0.06, 0.22)
+				_trigger_hit_stop(0.06, 0.22)
 			"guard_destroyed":
 				var guard_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(guard_pos, RED if str(event.get("team", "red")) == "red" else BLUE, 30)
@@ -3216,7 +3638,7 @@ func _process_events(events: Array) -> void:
 				_spawn_ring(crystal_pos, Color(0.55, 0.84, 1.0), 1.0, 8.0, 1.0)
 				_spawn_particles(crystal_pos + Vector3(0, 2.0, 0), Color(0.62, 0.86, 1.0), 30, 6.0)
 				_camera_shake = maxf(_camera_shake, 0.22)
-				_hit_stop.trigger_hit_stop(0.1, 0.3)
+				_trigger_hit_stop(0.1, 0.3)
 			"teleport":
 				var from_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
 				var to_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
@@ -3265,7 +3687,7 @@ func _process_events(events: Array) -> void:
 				_spawn_ring(pos, GOLD, 0.4, 2.0, 0.6)
 			"match_end":
 				hud.announce("主堡陷落", GameTheme.GOLD_LIGHT, 2.0)
-				_hit_stop.trigger_hit_stop(0.16, 0.45)
+				_trigger_hit_stop(0.16, 0.45)
 				# 结算曲按本地队伍判：赢了上行号角，输了下行钟声。
 				# 这两个是一次性音（不循环），所以不走 play_cue 的声道池。
 				if _audio != null:
@@ -3361,7 +3783,7 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 	_camera_shake = maxf(_camera_shake, float(recipe.get("shake", 0.0)))
 	var hit_stop := float(recipe.get("hit_stop", 0.0))
 	if hit_stop > 0.0:
-		_hit_stop.trigger_hit_stop(hit_stop, 0.3)
+		_trigger_hit_stop(hit_stop, 0.3)
 
 # 小兵普攻：先播出手动作，再画刀光/弹丸。事件自带坐标，镜头外也照样有表现。
 func _handle_minion_attack(event: Dictionary) -> void:
@@ -3436,7 +3858,7 @@ func _handle_death_event(event: Dictionary) -> void:
 		var is_local_victim := (hero_id == _local_entity_id)
 		var is_local_killer := (killer_id == _local_entity_id)
 		var local_involved := is_local_victim or is_local_killer
-		_hit_stop.trigger_hit_stop(0.09 if local_involved else 0.05, 0.34 if local_involved else 0.16)
+		_trigger_hit_stop(0.09 if local_involved else 0.05, 0.34 if local_involved else 0.16)
 
 		# 多杀 / 一血 / 终结由模拟侧统一判定，联机两端看到的是同一份结果。
 		var announce_code := str(event.get("announcement", ""))
@@ -3551,6 +3973,23 @@ func _init_vfx_pools() -> void:
 		_effects_root.add_child(lance)
 		_lance_pool.append(lance)
 
+	# 范围环池：16 个足够覆盖 5v5 同时爆点，池空时抢占最老的那个。
+	var ring_mesh := TorusMesh.new()
+	ring_mesh.inner_radius = 0.62
+	ring_mesh.outer_radius = 0.78
+	ring_mesh.rings = 24
+	ring_mesh.ring_segments = 5
+	for i in 16:
+		var ring := MeshInstance3D.new()
+		ring.mesh = ring_mesh
+		var ring_mat := _make_fx_material(BaseMaterial3D.BLEND_MODE_ADD)
+		ring_mat.emission_energy_multiplier = 1.6
+		ring.material_override = ring_mat
+		ring.visible = false
+		ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_effects_root.add_child(ring)
+		_ring_pool.append(ring)
+
 func _make_fx_material(blend := BaseMaterial3D.BLEND_MODE_ADD) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -3564,62 +4003,78 @@ func _make_fx_material(blend := BaseMaterial3D.BLEND_MODE_ADD) -> StandardMateri
 func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 	if _effects_root == null:
 		return
-	var label: Label3D
-	if not _damage_labels_pool.is_empty():
-		label = _damage_labels_pool.pop_back()
-	else:
-		label = Label3D.new()
-		label.font = FONT_SC
-		label.font_size = 64
-		label.pixel_size = 0.005
-		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-		label.no_depth_test = true
-		label.outline_size = 12
-		label.outline_modulate = Color(0.0, 0.0, 0.0, 0.9)
-		_effects_root.add_child(label)
+	var slot: Dictionary = take_particle_slot(_damage_labels_pool, _damage_labels_active)
+	if slot.is_empty():
+		return
+	var label: Label3D = slot.get("node")
+	if bool(slot.get("stolen", false)):
+		# 池空时抢最老的那个：它已经在屏幕上方淡出，掐掉它比新数字不显示划算。
+		var old_tween: Variant = label.get_meta("tween", null)
+		if old_tween is Tween and (old_tween as Tween).is_valid():
+			(old_tween as Tween).kill()
+	# 代际号：被抢占的节点，上一次的归还回调必须作废，避免同一个节点被放回池两次。
+	var generation := int(label.get_meta("generation", 0)) + 1
+	label.set_meta("generation", generation)
 	label.text = str(int(round(amount)))
 	label.modulate = color
 	label.position = pos + Vector3(randf_range(-0.25, 0.25), 0.0, randf_range(-0.25, 0.25))
 	label.visible = true
+	_damage_labels_active.append(label)
 	var start_y := label.position.y
 	var tween := create_tween()
 	tween.set_parallel(true)
 	tween.tween_property(label, "position:y", start_y + 0.9, 0.65)
 	tween.tween_property(label, "modulate:a", 0.0, 0.65)
 	tween.chain().tween_callback(func():
-		if is_instance_valid(label):
-			label.visible = false
-			label.modulate.a = 1.0
-			_damage_labels_pool.append(label)
+		if not is_instance_valid(label):
+			return
+		if int(label.get_meta("generation", 0)) != generation:
+			return
+		label.visible = false
+		label.modulate.a = 1.0
+		_damage_labels_active.erase(label)
+		_damage_labels_pool.append(label)
 	)
+	label.set_meta("tween", tween)
 
 func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float, alpha := 0.65) -> void:
-	var ring := MeshInstance3D.new()
-	var torus := TorusMesh.new()
-	torus.inner_radius = 0.62
-	torus.outer_radius = 0.78
-	torus.rings = 24
-	torus.ring_segments = 5
-	ring.mesh = torus
+	if _effects_root == null:
+		return
+	var slot: Dictionary = take_particle_slot(_ring_pool, _ring_active)
+	if slot.is_empty():
+		return
+	var ring: MeshInstance3D = slot.get("node")
+	if bool(slot.get("stolen", false)):
+		var old_tween: Variant = ring.get_meta("tween", null)
+		if old_tween is Tween and (old_tween as Tween).is_valid():
+			(old_tween as Tween).kill()
+	var generation := int(ring.get_meta("generation", 0)) + 1
+	ring.set_meta("generation", generation)
+	var material := ring.material_override as StandardMaterial3D
+	if material == null:
+		material = _make_fx_material(BaseMaterial3D.BLEND_MODE_ADD)
+		material.emission_energy_multiplier = 1.6
+		ring.material_override = material
+	material.albedo_color = Color(color.r, color.g, color.b, alpha)
+	material.emission = color
 	ring.position = Vector3(pos.x, 0.1, pos.z)
 	ring.scale = Vector3.ONE * from_scale
-	var material := StandardMaterial3D.new()
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	material.albedo_color = Color(color.r, color.g, color.b, alpha)
-	material.emission_enabled = true
-	material.emission = color
-	material.emission_energy_multiplier = 1.6
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	ring.material_override = material
-	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_effects_root.add_child(ring)
+	ring.visible = true
+	_ring_active.append(ring)
 	var tween := create_tween()
 	tween.set_parallel(true)
 	tween.tween_property(ring, "scale", Vector3.ONE * to_scale, duration)
 	tween.tween_property(material, "albedo_color:a", 0.0, duration)
-	tween.chain().tween_callback(ring.queue_free)
+	tween.chain().tween_callback(func():
+		if not is_instance_valid(ring):
+			return
+		if int(ring.get_meta("generation", 0)) != generation:
+			return
+		ring.visible = false
+		_ring_active.erase(ring)
+		_ring_pool.append(ring)
+	)
+	ring.set_meta("tween", tween)
 
 # 从池里取一个粒子节点：优先空闲池，其次抢占最老的活动节点。
 # 抽成静态函数是为了能在无头环境里断言「不会把同一个节点借两次」——

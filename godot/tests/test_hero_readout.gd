@@ -131,11 +131,30 @@ func test_minion_bar_follows_relation_not_absolute_team() -> void:
 
 func test_arena_passes_viewer_side_into_unit_visuals() -> void:
 	# 配色逻辑再对，arena 不把 local_team 传进去也白搭（单元测试全绿但线上全是红）。
-	# 这里用源码守卫钉住接线，防止后续重构悄悄把第 6 个参数丢掉。
-	var src := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
-	check(src.contains(", is_local, local_team)"), "arena must pass local_team for hero views")
-	check(src.contains("\"\", false, local_team)"), "arena must pass local_team for minion views")
-	check(src.contains("\"野怪\")), false, local_team)"), "arena must pass local_team for monster views")
+	# 直接走真实的建视图路径，比字符串守卫更能抓住「多行调用里丢掉参数」。
+	var arena: Node3D = Arena.new()
+	arena.local_team = "blue"
+	arena._units_root = Node3D.new()
+	arena.add_child(arena._units_root)
+
+	var hero: UnitVisual = arena._create_unit_view({
+		"id": 1, "type": "hero", "team": "red", "hero_type": "blade",
+		"name": "敌人", "x": 1.0, "y": 2.0, "hp": 100.0, "max_hp": 100.0, "alive": true,
+	})
+	eq(hero.viewer_team, "blue", "arena must pass local_team for hero views")
+
+	var minion: UnitVisual = arena._create_unit_view({
+		"id": 2, "type": "minion", "team": "red", "minion_type": "melee",
+		"x": 0.0, "y": 0.0, "hp": 10.0, "max_hp": 10.0, "alive": true,
+	})
+	eq(minion.viewer_team, "blue", "arena must pass local_team for minion views")
+
+	var monster: UnitVisual = arena._create_unit_view({
+		"id": 3, "type": "monster", "team": "neutral", "monster_type": "wolf",
+		"name": "霜狼", "x": 0.0, "y": 0.0, "hp": 10.0, "max_hp": 10.0, "alive": true,
+	})
+	eq(monster.viewer_team, "blue", "arena must pass local_team for monster views")
+	arena.free()
 
 # --- 射程数据 ---
 

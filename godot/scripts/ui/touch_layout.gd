@@ -30,10 +30,8 @@ const SKILL_ARC_ANGLES_DEG := [186.0, 212.0, 238.0, 264.0]
 const UTILITY_BUTTON_SIZE := 96.0
 const UTILITY_BUTTON_GAP := 12.0
 const UTILITY_BUTTON_COUNT := 3
-# 功能键列与 Q 左沿之间的呼吸位。小于 16px 两块就又粘成一坨。
+# 功能键横排与 Q 左沿之间的呼吸位。小于 16px 两块就又粘成一坨。
 const UTILITY_SKILL_GAP := 16.0
-# 列底离屏幕底的留白：底下要压住回城条（28 高 + 8 间隙 + 40 边距）。
-const UTILITY_BOTTOM_INSET := 76.0
 
 # 攻击模式（普攻 / 补刀 / 推塔）在真机上是一列圆按钮，紧贴攻击键左侧。
 #
@@ -104,29 +102,28 @@ static func mode_button_rects(viewport_size: Vector2) -> Array[Rect2]:
 		rects.append(Rect2(center - box * 0.5, box))
 	return rects
 
-## 召唤师 / 传送 / 回城三颗功能键：技能弧左侧的一条竖列，从上往下按这个顺序。
+## 回城 / 传送 / 召唤师三颗功能键：王者式的**底部横排**，紧贴技能弧左侧。
 ##
-## 为什么整列搬到技能弧外面：它们原来横在 (1216..1504, 574..670)，正好是
-## 「技能弧左沿」和「模式圆上一格」之间的夹缝 —— 三颗 96 的小圆和模式圆
-## 长着同一张脸，位置又挨着，实机上一眼看不出哪个是「换打法」哪个是「回城」。
-## 搬到 Q 左边并留 16px 呼吸位之后，右手区只剩三组：攻击簇 / 技能弧 / 功能列。
+## 排布从左到右是 回城 → 传送 → 召唤师：召唤师离技能弧最近（拇指从技能滑过去最短），
+## 回城最远、最不容易误触。整排底边与 Q 的触摸框底边对齐，正好落在拇指自然弧线上。
+## 旧版是三颗竖着排在 Q 左侧，实战里和技能弧挤成一小摞圆点，分不清哪颗是回城。
 static func utility_button_rects(viewport_size: Vector2) -> Array[Rect2]:
 	var rects: Array[Rect2] = []
 	var arc := skill_arc_centers(viewport_size)
 	if arc.is_empty():
 		return rects
-	var q_left := arc[0].x - SKILL_TOUCH_SIZE.x * 0.5
+	var q_center: Vector2 = arc[0]
+	var q_left := q_center.x - SKILL_TOUCH_SIZE.x * 0.5
+	var q_bottom := q_center.y + SKILL_TOUCH_SIZE.y * 0.5
 	var right := q_left - UTILITY_SKILL_GAP
-	var left := right - UTILITY_BUTTON_SIZE
 	var total := UTILITY_BUTTON_SIZE * float(UTILITY_BUTTON_COUNT) \
 		+ UTILITY_BUTTON_GAP * float(UTILITY_BUTTON_COUNT - 1)
-	# 竖直方向先按 Q 居中，再被「不许压回城条」和「不许出屏」两条下限推上去。
-	var bottom := viewport_size.y - UTILITY_BOTTOM_INSET
-	var top := minf(arc[0].y - total * 0.5, bottom - total)
-	top = maxf(top, 8.0)
+	var left := maxf(8.0, right - total)
+	var bottom := minf(q_bottom, viewport_size.y - 16.0)
+	var top := maxf(8.0, bottom - UTILITY_BUTTON_SIZE)
 	for i in UTILITY_BUTTON_COUNT:
-		var y := top + float(i) * (UTILITY_BUTTON_SIZE + UTILITY_BUTTON_GAP)
-		rects.append(Rect2(Vector2(left, y), Vector2(UTILITY_BUTTON_SIZE, UTILITY_BUTTON_SIZE)))
+		var x := left + float(i) * (UTILITY_BUTTON_SIZE + UTILITY_BUTTON_GAP)
+		rects.append(Rect2(Vector2(x, top), Vector2(UTILITY_BUTTON_SIZE, UTILITY_BUTTON_SIZE)))
 	return rects
 
 static func dp_for_virtual(virtual_px: float, screen_height_px: float, viewport_height_px: float, dpi: float) -> float:

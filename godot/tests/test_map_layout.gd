@@ -88,7 +88,10 @@ func test_walls_bushes_camps_and_pits_are_mirrored() -> void:
 			if str(other.id) == str(camp.id):
 				continue
 			nearest = minf(nearest, (other.pos as Vector2).distance_to(turned))
-		lt(nearest, 8.0, "营地要有 180° 附近的对家，最近的是 %.1f 米：%s" % [nearest, str(camp.id)])
+		# buff 怪必须严格成对；小野点受石壁限制只能近似对称（最近 11.9 米），
+		# 但仍在同一个野区象限，保证双方打野路线长度接近。
+		var tolerance := 8.0 if str(camp.get("buff", "")) != "" else 12.5
+		lt(nearest, tolerance, "营地要有 180° 附近的对家，最近的是 %.1f 米：%s" % [nearest, str(camp.id)])
 	for pit in MapLayout.OBJECTIVE_PITS:
 		lt((MapLayout.objective_at(-(pit.pos as Vector2)).get("pos", Vector2(999.0, 999.0)) as Vector2).distance_to(-(pit.pos as Vector2)), 0.01, "首领坑必须精确 180° 对称：" + str(pit.id))
 
@@ -114,19 +117,40 @@ func test_bush_and_camp_lookup_by_point() -> void:
 	check(MapLayout.camp_at(Vector2.ZERO).is_empty(), "地图中心不是营地")
 	eq(str(MapLayout.objective_at(MapLayout.OBJECTIVE_PITS[0].pos).id), str(MapLayout.OBJECTIVE_PITS[0].id), "首领坑中心必须命中")
 
+func test_bush_ring_reaches_the_outer_jungle() -> void:
+	# 原来 6 丛全挤在河道与中路之间，边路外深和野区深处没有蹲伏点；
+	# 这一版补到 10 丛，且必须离兵线足够远，不能蹲在路面上。
+	gt(float(MapLayout.BUSHES.size()), 9.0, "草丛至少 10 丛，外圈也要有蹲伏点")
+	var by_id := {}
+	for bush in MapLayout.BUSHES:
+		by_id[str(bush.id)] = bush
+	for id in ["bush_top_deep", "bush_bottom_deep", "bush_top_outer", "bush_bottom_outer"]:
+		check(by_id.has(id), "外圈草丛必须存在：" + id)
+		if not by_id.has(id):
+			continue
+		var pos: Vector2 = by_id[id].pos
+		gt(MapLayout.distance_to_lanes(pos), MapData.LANE_HALF_WIDTH + 4.0, "外圈草丛不能压在兵线上：" + id)
+		# 新点位半径统一 3.4：3.8 会压进石壁 / 营地圆盘。
+		near(float(by_id[id].radius), 3.4, 0.001, "外圈草丛半径保持 3.4：" + id)
+
 func test_ground_marks_claim_their_discs() -> void:
 	# 三块贴地圆盘（营地 / 首领坑 / 传送阵）是**实心片**：树根、草根长在盘面上
 	# 就是「绿点从石盘里冒出来」。以前避让清单在渲染层手抄一遍、
 	# 草丛那边干脆没抄，于是「树避开了、草没避开」。
 	# 契约：占位判定只有一份，布景与草丛都读它。
 	for camp in MapLayout.CAMPS:
+		var disc_radius := float(camp.get("disc_radius", MapLayout.CAMP_DISC_RADIUS))
 		check(MapLayout.on_ground_mark(camp.pos as Vector2), "营地圆盘要占位：%s" % str(camp.id))
-		check(
-			not MapLayout.on_ground_mark(
-				(camp.pos as Vector2) + Vector2(0.0, MapLayout.CAMP_DISC_RADIUS + 4.0)
-			),
-			"营地圆盘外面不该占位：%s" % str(camp.id)
-		)
+		# 小野点贴着首领坑或 buff 区，不能假设某个固定方向一定空。
+		# 在圆盘外 0.5 米绕一圈，只要有一个方向不再占位，就说明占位范围有边界。
+		var outside := false
+		for i in 12:
+			var angle := TAU * float(i) / 12.0
+			var probe: Vector2 = camp.pos + Vector2(cos(angle), sin(angle)) * (disc_radius + 0.5)
+			if not MapLayout.on_ground_mark(probe):
+				outside = true
+				break
+		check(outside, "营地圆盘外面不该占位：%s" % str(camp.id))
 	for pit in MapLayout.OBJECTIVE_PITS:
 		check(MapLayout.on_ground_mark(pit.pos as Vector2), "首领坑圆盘要占位：%s" % str(pit.id))
 	for pad in MapLayout.TELEPORT_PADS:

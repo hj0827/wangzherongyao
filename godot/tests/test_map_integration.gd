@@ -106,11 +106,17 @@ func test_wave_three_has_cannon_and_high_tower_unlocks_super_minion() -> void:
 
 func test_jungle_camps_spawn_buff_monsters_and_apply_buffs() -> void:
 	var sim := _sim()
-	var buff_monsters: Array = sim.state.entities.filter(func(entity): return entity.type == "monster" and not bool(entity.get("objective", false)))
-	eq(buff_monsters.size(), 4, "四座野区营地各一只野怪")
+	var monsters: Array = sim.state.entities.filter(func(entity): return entity.type == "monster" and not bool(entity.get("objective", false)))
+	eq(monsters.size(), 12, "12 个野点各一只野怪")
+	var buff_monsters: Array = monsters.filter(func(entity): return str(entity.get("buff_type", "")) != "")
+	var small_monsters: Array = monsters.filter(func(entity): return str(entity.get("buff_type", "")) == "")
+	eq(buff_monsters.size(), 4, "四个 buff 怪")
+	eq(small_monsters.size(), 8, "八个小野点")
 	for monster in buff_monsters:
 		eq(str(monster.team), "neutral", "野怪中立")
-		check(str(monster.get("buff_type", "")) in ["blue", "red"], "野怪携带红蓝增益")
+		check(str(monster.get("buff_type", "")) in ["blue", "red"], "buff 怪携带红蓝增益")
+	for monster in small_monsters:
+		gt(float(monster.get("xp", 0.0)), 0.0, "小野点也要给经验")
 	var hero: Dictionary = sim.get_hero_by_player("p1")
 	var blue_camp: Dictionary = buff_monsters.filter(func(monster): return str(monster.get("buff_type", "")) == "blue")[0]
 	_kill(sim, blue_camp, int(hero.id))

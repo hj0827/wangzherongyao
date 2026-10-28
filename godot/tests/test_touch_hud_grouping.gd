@@ -122,11 +122,10 @@ func test_skill_arc_stays_in_the_bottom_right_thumb_corner() -> void:
 # ---------------------------------------------------------------- 功能键
 
 func test_utility_buttons_leave_the_thumb_core() -> void:
-	# 传送 / 回城 / 召唤师是低频键，不该跟模式圆挤在同一片小圆堆里：
-	# 至少离攻击键两个半径远，并且自成一条竖列。
+	# 传送 / 回城 / 召唤师是低频键：至少离攻击键两个半径远，并且沿底部排成一行。
 	for viewport in SIZES:
 		var rects := TouchLayout.utility_button_rects(viewport)
-		eq(rects.size(), 3, "summoner + teleport + recall = three utility keys at %s" % viewport)
+		eq(rects.size(), 3, "recall + teleport + summoner = three utility keys at %s" % viewport)
 		var attack := _attack_rect(viewport)
 		for i in rects.size():
 			var rect: Rect2 = rects[i]
@@ -139,8 +138,9 @@ func test_utility_buttons_leave_the_thumb_core() -> void:
 			check(rect.position.x >= 0.0 and rect.position.y >= 0.0, "utility key %d stays on screen at %s" % [i, viewport])
 			check(rect.end.x <= viewport.x and rect.end.y <= viewport.y, "utility key %d stays inside the viewport at %s" % [i, viewport])
 			if i > 0:
-				# 功能列是从上往下画的（rects[0] 在最上），所以下一颗的 y 更大。
-				near(rect.position.y, rects[i - 1].end.y + TouchLayout.UTILITY_BUTTON_GAP, 0.01, "utility key %d keeps the column rhythm at %s" % [i, viewport])
+				# 王者式底部横排：同一底边，从左往右排。
+				near(rect.position.y, rects[0].position.y, 0.01, "utility keys share one bottom row at %s" % viewport)
+				near(rect.position.x, rects[i - 1].end.x + TouchLayout.UTILITY_BUTTON_GAP, 0.01, "utility key %d keeps the row rhythm at %s" % [i, viewport])
 
 func test_utility_buttons_never_cover_a_skill_mode_or_the_attack_key() -> void:
 	for viewport in SIZES:
@@ -245,7 +245,7 @@ func _hud(viewport: Vector2) -> Control:
 func test_hud_places_utility_keys_from_touch_layout() -> void:
 	var hud := _hud(Vector2(2000.0, 900.0))
 	var expected := TouchLayout.utility_button_rects(Vector2(2000.0, 900.0))
-	var nodes := [hud._summoner_button, hud._teleport_button, hud._recall_button]
+	var nodes := [hud._recall_button, hud._teleport_button, hud._summoner_button]
 	for i in nodes.size():
 		var node: Control = nodes[i]
 		check(node != null, "utility key %d exists" % i)
@@ -258,11 +258,11 @@ func test_hud_places_utility_keys_from_touch_layout() -> void:
 
 func test_utility_keys_shrink_to_their_slot() -> void:
 	# 探针抓到的真 bug：召唤师键是 SkillButton，custom_minimum_size 是 128x148，
-	# 摆进 96 的格子后被最小尺寸顶大 40px，实拍里压住了下面的「传送」。
+	# 摆进 96 的格子里后被最小尺寸顶大 40px，实拍里压到了相邻的格子。
 	# 无头测试量 get_rect() 量不出来（没进场景树时最小尺寸不生效），所以量最小尺寸本身。
 	var hud := _hud(Vector2(2000.0, 900.0))
 	var expected := TouchLayout.utility_button_rects(Vector2(2000.0, 900.0))
-	var nodes := [hud._summoner_button, hud._teleport_button, hud._recall_button]
+	var nodes := [hud._recall_button, hud._teleport_button, hud._summoner_button]
 	for i in nodes.size():
 		var node: Control = nodes[i]
 		if node == null:

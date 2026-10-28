@@ -31,27 +31,41 @@ func _hero() -> Dictionary:
 		"buff_blue_timer": 0.0,
 	}
 
-func test_four_mirrored_camps_with_two_buff_types() -> void:
-	eq(Jungle.CAMPS.size(), 4, "野区有四座营地")
+func test_twelve_camps_split_into_buffs_and_small_camps() -> void:
+	eq(Jungle.CAMPS.size(), 12, "野区有 12 个野点：每半场 2 buff + 4 小野")
 	var buffs := {}
+	var buff_count := 0
+	var small_count := 0
 	for camp in Jungle.CAMPS:
-		buffs[str(camp.buff)] = true
+		var buff := str(camp.get("buff", ""))
+		if buff == "":
+			small_count += 1
+			continue
+		buffs[buff] = true
+		buff_count += 1
 		check(MapLayout.bush_at(camp.pos).is_empty(), "营地本身不是草丛")
+	eq(buff_count, 4, "四个 buff 怪")
+	eq(small_count, 8, "八个小野点")
 	eq(buffs.size(), 2, "红蓝两种增益都有")
-	eq(Jungle.RESPAWN_TIME, 70.0, "野怪 70 秒刷新")
+	eq(Jungle.RESPAWN_TIME, 70.0, "buff 怪 70 秒刷新")
 
 func test_every_half_gets_one_red_and_one_blue_camp() -> void:
 	# 上一版的四个营地是按 y=-x 镜像配对的，而 mirror 不换半场（a = x-y 不变），
 	# 结果是「蓝方半场两个蓝 buff、红方半场两个红 buff」——
 	# 任何一队在自己野区里都见不到另一种增益，只能入侵才拿得到。
-	var per_half := {"blue": {}, "red": {}}
+	var per_half := {"blue": {"buffs": {}, "small": 0}, "red": {"buffs": {}, "small": 0}}
 	for camp in Jungle.CAMPS:
 		var side := "blue" if camp.pos.x - camp.pos.y > 0.0 else "red"
-		per_half[side][str(camp.buff)] = true
+		var buff := str(camp.get("buff", ""))
+		if buff == "":
+			per_half[side]["small"] += 1
+		else:
+			per_half[side]["buffs"][buff] = true
 	for side in per_half:
-		var buffs: Dictionary = per_half[side]
+		var buffs: Dictionary = per_half[side]["buffs"]
 		check(buffs.has("blue"), "%s 半场必须有蓝 buff 营地" % side)
 		check(buffs.has("red"), "%s 半场必须有红 buff 营地" % side)
+		eq(int(per_half[side]["small"]), 4, "%s 半场必须有四个小野点" % side)
 
 func test_camps_stand_on_land_not_in_the_river() -> void:
 	# 旧数据里两座蓝 buff 营地 |a| = 10 → 离河心只有 7.07 米，
@@ -66,7 +80,11 @@ func test_camps_do_not_overlap_each_other() -> void:
 		for j in range(i + 1, Jungle.CAMPS.size()):
 			var first: Dictionary = Jungle.CAMPS[i]
 			var second: Dictionary = Jungle.CAMPS[j]
-			var need: float = float(first.radius) + float(second.radius) + 6.0
+			# buff 怪之间要留完整走位空间；小野点本来就是贴着 buff 区的节奏点，
+			# 只需要保证阵盘不叠、单位能挤过去。
+			var buff_pair := str(first.get("buff", "")) != "" and str(second.get("buff", "")) != ""
+			var gap := 6.0 if buff_pair else 3.0
+			var need: float = float(first.radius) + float(second.radius) + gap
 			gt((first.pos as Vector2).distance_to(second.pos), need, "营地之间要留出走位空间：%s × %s" % [str(first.id), str(second.id)])
 
 func test_monster_stats_are_scaled_per_camp() -> void:
@@ -74,10 +92,15 @@ func test_monster_stats_are_scaled_per_camp() -> void:
 		var stats: Dictionary = Jungle.monster_stats(camp)
 		eq(str(stats.type), "monster", "野怪实体类型")
 		eq(str(stats.team), "neutral", "野怪中立")
-		gt(float(stats.hp), 500.0, "野怪血量要有争夺价值")
+		gt(float(stats.hp), 300.0, "野怪要有争夺价值")
 		gt(float(stats.attack_damage), 0.0, "野怪会反击")
 		eq(str(stats.camp_id), str(camp.id), "野怪记住所属营地")
-		eq(str(stats.buff_type), str(camp.buff), "野怪携带对应增益")
+		eq(str(stats.buff_type), str(camp.get("buff", "")), "野怪携带对应增益")
+		if str(camp.get("buff", "")) != "":
+			gt(float(stats.hp), 500.0, "buff 怪血量要明显高于小野点")
+		else:
+			eq(float(stats.xp), float(camp.get("xp", 45.0)), "小野点按营地数据给经验")
+			lt(float(stats.hp), 600.0, "小野点不能比 buff 怪还厚")
 
 func test_blue_buff_shortens_cooldowns_and_red_buff_adds_damage() -> void:
 	var hero := _hero()

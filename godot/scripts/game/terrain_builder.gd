@@ -94,12 +94,12 @@ func build_mesh() -> ArrayMesh:
 
 ## 地表材质：草 / 泥 / 沙 / 岩 按坡度与河岸距离混合，并接上法线贴图。
 ## 贴图只喂 diffuse 是之前「像塑料板」的直接原因 —— 法线 + 粗糙度让表面真的有凹凸。
-static func build_material() -> ShaderMaterial:
+static func build_material(mobile_override: Variant = null) -> ShaderMaterial:
+	var mobile: bool = OS.has_feature("mobile") if mobile_override == null else bool(mobile_override)
 	var shader := Shader.new()
 	shader.code = """
 shader_type spatial;
 render_mode diffuse_burley, specular_schlick_ggx;
-
 uniform sampler2D grass_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D grass_nor : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D dirt_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
@@ -131,7 +131,7 @@ void fragment() {
 	// 每多一次纹理采样就掉几帧。三层草贴图 + 1 泥土 + 1 岩石 + 1 法线 = 6 次，
 	// 低频变化直接复用 g3.r / g2.g，不再单独采样。
 	vec3 g1 = texture(grass_tex, p * 0.46).rgb;
-	vec3 g3 = texture(grass_tex, p * 0.061 + vec2(0.71, 0.23)).rgb;
+	vec3 g3 = __TERRAIN_GRASS_3__;
 	vec3 d1 = texture(dirt_tex, p * 0.24).rgb;
 
 	// 两层草贴图（周期 2.2m / 16m）已经足够破掉重复感；
@@ -162,13 +162,23 @@ void fragment() {
 __OUTSIDE_APPLY__
 
 	ALBEDO = col;
-	NORMAL_MAP = texture(grass_nor, p * 0.46).rgb;
+	NORMAL_MAP = __TERRAIN_NORMAL__;
 	NORMAL_MAP_DEPTH = 1.5;
 	ROUGHNESS = 0.85;
 	SPECULAR = 0.16;
 }
 """
 	var material := ShaderMaterial.new()
+	# 手机端地表只保留 1 层草 + 1 层泥土，跳过高频草贴图与法线采样：
+	# 这两次采样铺满整屏，是移动端移动镜头时最大的 fill-rate 开销。
+	shader.code = shader.code.replace(
+		"__TERRAIN_GRASS_3__",
+		"g1" if mobile else "texture(grass_tex, p * 0.061 + vec2(0.71, 0.23)).rgb"
+	)
+	shader.code = shader.code.replace(
+		"__TERRAIN_NORMAL__",
+		"vec3(0.5, 0.5, 1.0)" if mobile else "texture(grass_nor, p * 0.46).rgb"
+	)
 	shader.code = ArenaLook.apply_outside_fade(shader.code)
 	material.shader = shader
 	material.set_shader_parameter("grass_tex", load("res://assets/textures/leafy_grass_Diffuse.jpg"))

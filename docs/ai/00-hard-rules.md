@@ -30,7 +30,7 @@ ARCHITECTURE.md 描述的是**目标态**，其中 `scripts/core/`、`scripts/in
 
 ## 4. 战斗中禁止 `.new()` / `queue_free()`
 
-高频对象（小兵、飘字、命中粒子、弹道光束）必须走池：`arena.gd` 里的 `_minion_pool_*`、`_damage_labels_pool`、`_hit_particles_pool`。
+高频对象（小兵、飘字、命中粒子、范围环、弹道光束）必须走池：`arena.gd` 里的 `_minion_pool_*`、`_damage_labels_pool`、`_hit_particles_pool`、`_ring_pool`、`_tracer_pool` / `_lance_pool`。
 
 **违反了会怎样**：5v5 团战同一帧几十次分配，真机掉帧，而且这种卡顿在 PC 上复现不出来。
 

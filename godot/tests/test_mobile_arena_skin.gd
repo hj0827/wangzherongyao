@@ -86,7 +86,7 @@ func test_attack_key_wears_an_outer_glow() -> void:
 # 原因是横排和攻击模式圆抢同一片小圆堆，实机上看不出哪组是「换打法」哪组是「回城」。
 # 现在右手区只剩三组：攻击簇（攻击键 + 模式列）/ 技能弧 / 功能列。
 
-func test_utility_column_sits_outside_the_skill_arc() -> void:
+func test_utility_row_sits_outside_the_skill_arc() -> void:
 	for viewport in [Vector2(1600.0, 900.0), PHONE, WIDE]:
 		var rects := TouchLayout.utility_button_rects(viewport)
 		eq(rects.size(), 3, "recall / teleport / summoner at %s" % viewport)
@@ -108,20 +108,20 @@ func test_utility_column_sits_outside_the_skill_arc() -> void:
 			for skill_center in TouchLayout.skill_arc_centers(viewport):
 				var skill := Rect2(skill_center - TouchLayout.SKILL_TOUCH_SIZE * 0.5, TouchLayout.SKILL_TOUCH_SIZE)
 				check(not rect.intersects(skill), "utility key %d does not sit on a skill at %s" % [i, viewport])
-		# 一列：x 相同、y 等距。
-		near(rects[1].position.x, rects[0].position.x, 0.01, "the utility column shares one x at %s" % viewport)
-		near(rects[2].position.x, rects[1].position.x, 0.01, "the utility column shares one x at %s" % viewport)
-		var pitch := rects[1].position.y - rects[0].end.y
-		near(rects[2].position.y - rects[1].end.y, pitch, 0.01, "the utility column keeps an even pitch at %s" % viewport)
+		# 王者式底部横排：y 相同、x 等距向右。
+		near(rects[1].position.y, rects[0].position.y, 0.01, "the utility row shares one y at %s" % viewport)
+		near(rects[2].position.y, rects[1].position.y, 0.01, "the utility row shares one y at %s" % viewport)
+		var pitch := rects[1].position.x - rects[0].end.x
+		near(rects[2].position.x - rects[1].end.x, pitch, 0.01, "the utility row keeps an even pitch at %s" % viewport)
 		gt(pitch, 0.0, "utility buttons keep a gap between them at %s" % viewport)
 
-func test_utility_column_never_touches_the_recall_bar() -> void:
-	# 回城条是底部正中的瞬时条，只有回城时才出现；功能列必须在它上面，不然一按回城就叠在一起。
+func test_utility_row_never_touches_the_recall_bar() -> void:
+	# 回城条是底部正中的瞬时条，只有回城时才出现；功能排必须在它上面，不然一按回城就叠在一起。
 	for viewport in [PHONE, WIDE]:
 		var zones := HudLayout.zones(viewport, true)
 		var bar: Rect2 = zones["recall"]
 		for rect in TouchLayout.utility_button_rects(viewport):
-			check((rect as Rect2).end.y <= bar.position.y + 0.01, "the utility column must end above the recall bar at %s" % viewport)
+			check((rect as Rect2).end.y <= bar.position.y + 0.01, "the utility row must end above the recall bar at %s" % viewport)
 
 # ---------------------------------------------------------------- 摇杆
 

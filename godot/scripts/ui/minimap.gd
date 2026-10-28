@@ -11,6 +11,8 @@ const MapData = preload("res://sim/map_data.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const MapView = preload("res://scripts/game/map_view.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
+const Jungle = preload("res://sim/map/jungle.gd")
+const Objectives = preload("res://sim/map/objectives.gd")
 
 const MARGIN := 13.0
 const DISPLAY_SIZE := Vector2(206, 206)
@@ -54,15 +56,21 @@ static func feature_shapes() -> Array:
 			"color": Color(0.16, 0.26, 0.17, 0.5),
 		})
 	for camp in MapLayout.CAMPS:
+		var buff := str(camp.get("buff", ""))
+		var camp_color := Color(0.93, 0.6, 0.24, 0.85) if buff == "red" else Color(0.32, 0.56, 0.98, 0.9)
+		if buff == "":
+			camp_color = Color(0.5, 0.72, 0.38, 0.85)
 		shapes.append({
 			"kind": "camp",
+			"id": str(camp.id),
 			"pos": camp.pos,
-			"radius": 2.8,
-			"color": Color(0.93, 0.6, 0.24, 0.85) if str(camp.get("buff", "")) == "red" else Color(0.32, 0.56, 0.98, 0.9),
+			"radius": 2.8 if buff != "" else 2.0,
+			"color": camp_color,
 		})
 	for pit in MapLayout.OBJECTIVE_PITS:
 		shapes.append({
 			"kind": "objective",
+			"id": str(pit.id),
 			"pos": pit.pos,
 			"radius": 4.2,
 			"color": Color(0.72, 0.5, 0.92, 0.9),
@@ -75,6 +83,62 @@ static func feature_shapes() -> Array:
 			"color": Color(0.36, 0.78, 0.88, 0.9),
 		})
 	return shapes
+
+# 营地 / 首领坑的死亡倒计时标记。
+#
+# 快照里死亡野怪仍然带 camp_id / objective_id / respawn_timer（只要它在视野内），
+# 小地图据此把静态营地圆点压暗，再画一圈「快转满 = 快刷新」的弧。
+# 不用文字：小地图只有 180px，营地名 + 秒数会糊成一团，弧线在余光里就能读。
+static func camp_timer_marks(entities: Array) -> Array:
+	var marks: Array = []
+	for entity in entities:
+		if not (entity is Dictionary) or str(entity.get("type", "")) != "monster":
+			continue
+		if bool(entity.get("alive", false)):
+			continue
+		var timer := float(entity.get("respawn_timer", 0.0))
+		if timer <= 0.0:
+			continue
+		var camp_id := str(entity.get("camp_id", ""))
+		var objective_id := str(entity.get("objective_id", ""))
+		if camp_id == "" and objective_id == "":
+			continue
+		var region: Dictionary = {}
+		var total := Jungle.RESPAWN_TIME
+		var color := Color(0.55, 0.72, 0.98, 0.9)
+		if camp_id != "":
+			for camp in MapLayout.CAMPS:
+				if str(camp.id) != camp_id:
+					continue
+				region = camp
+				var buff := str(camp.get("buff", ""))
+				if buff == "red":
+					color = Color(0.93, 0.6, 0.24, 0.9)
+				elif buff == "blue":
+					color = Color(0.4, 0.66, 1.0, 0.95)
+				else:
+					color = Color(0.56, 0.76, 0.42, 0.9)
+				total = float(camp.get("respawn_time", Jungle.RESPAWN_TIME))
+				break
+		else:
+			for pit in MapLayout.OBJECTIVE_PITS:
+				if str(pit.id) != objective_id:
+					continue
+				region = pit
+				total = Objectives.RESPAWN
+				color = Color(0.78, 0.56, 1.0, 0.95)
+				break
+		if region.is_empty():
+			continue
+		marks.append({
+			"id": camp_id if camp_id != "" else objective_id,
+			"kind": "camp" if camp_id != "" else "objective",
+			"pos": region.pos,
+			"timer": timer,
+			"total": total,
+			"color": color,
+		})
+	return marks
 
 # 动态单位在小地图上的呈现参数；tower 按层级放大，未解锁的塔带 locked 标记。
 static func entity_mark(entity: Dictionary) -> Dictionary:
@@ -294,6 +358,24 @@ func _draw() -> void:
 				draw_circle(pad_pos, 4.2, Color(shape.color.r, shape.color.g, shape.color.b, 0.22))
 				draw_arc(pad_pos, 4.6, 0, TAU, 20, shape.color, 1.2, true)
 				draw_arc(pad_pos, 2.4, 0, TAU, 14, Color(shape.color.r, shape.color.g, shape.color.b, 0.7), 1.0, true)
+
+	# 营地刷新倒计时：盖在静态营地圆点上，画暗底 + 顺时针生长的弧。
+	for camp_mark in camp_timer_marks(snapshot.get("entities", [])):
+		var camp_pos := world_to_screen(camp_mark.pos)
+		var mark_radius := 3.2 if str(camp_mark.kind) == "camp" else 5.0
+		draw_circle(camp_pos, mark_radius, Color(0.06, 0.07, 0.08, 0.88))
+		var progress := 1.0 - clampf(float(camp_mark.timer) / maxf(1.0, float(camp_mark.total)), 0.0, 1.0)
+		if progress > 0.01:
+			draw_arc(
+				camp_pos,
+				mark_radius + 2.2,
+				-PI * 0.5,
+				-PI * 0.5 + TAU * progress,
+				20,
+				camp_mark.color,
+				1.6,
+				true
+			)
 
 	var entities: Array = snapshot.get("entities", [])
 	for entity in entities:

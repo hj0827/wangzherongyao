@@ -28,6 +28,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   │   ├── arena.gd            2500+ 行，承担相机/单位同步/特效/指示器/输入
 │   │   ├── unit_visual.gd      单位装配 + 骨骼动画 + 血条
 │   │   ├── map_view.gd         ✅ 地图表现，**唯一真正接线的新模块**
+│   │   ├── bush_eye.gd         进草头顶斜划眼（程序化 96px 贴图 + 静态缓存）
 │   │   ├── input_assist.gd     键鼠/触控 → 战局方向向量
 │   │   ├── match_menu.gd       暂停菜单文案与状态判断
 │   │   ├── audio_plan.gd       ✅ 事件→音效 cue 的纯逻辑（距离/节流/热度）
@@ -40,11 +41,13 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   │   ├── hud_layout.gd           ✅ 常驻 HUD 分区的唯一坐标源（桌面/触屏），纯数据可测
 │   │   ├── targeting_system.gd     仅转发 sim/targeting_rules.gd（生产直接走 sim 侧）
 │   │   ├── skill_indicator.gd      ✅ 已接线（HUD 技能指示器/触摸拖拽）
-│   │   └── cancel_cast_zone.gd     ✅ 已接线（HUD 取消施法区）
+│   │   ├── cancel_cast_zone.gd     ✅ 已接线（HUD 取消施法区）
+│   │   └── debug_panel.gd          ✅ 已接线（F3 开发者面板，只主机可作弊）
 │   ├── view/hit_stop_manager.gd    ✅ 已接线（arena 顿帧 + 震屏）
 │   ├── core/                   ⚠️ 只有 README.md，**空壳**
 │   └── infra/                  ⚠️ 只有 README.md，**空壳**
 ├── shaders/billboard_bar.gdshader   血条/蓝条自定义 billboard
+├── shaders/camp_sigil.gdshader      营地/首领坑贴地旋转符阵（随野怪存活亮暗）
 ├── scenes/                     只有 main_menu.tscn 与 preview.tscn
 ├── tests/                      test_*.gd + test_base.gd + run_tests.gd
 ├── tools/                      截图 / 性能 / 资源巡检 / 设备验收
@@ -75,9 +78,9 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 
 ## 3. 两个必须知道的规模事实
 
-- **`arena.gd` 2544 行**，是 ARCHITECTURE 铁律 5（单文件 ≤500 行，超 600 必须拆）的 5 倍。
+- **`scripts/game/arena.gd` 3921 行**，是 ARCHITECTURE 铁律 5（单文件 ≤500 行，超 600 必须拆）的近 8 倍。
   往里加功能前先想清楚：**要不要顺手拆**。继续堆会让"改一处连带改几处"的半径越来越大。
-- **`main.gd` 1264 行**，同样超标。菜单/选人/联机大厅/进战斗全在一个文件里。
+- **`scripts/app/main.gd` 1459 行**，同样超标。菜单/选人/联机大厅/进战斗全在一个文件里。
 
 ---
 

@@ -1,6 +1,7 @@
 extends RefCounted
 
-# 野区：四座镜像营地，击杀后获得红/蓝增益，70 秒重新刷新。
+# 野区：12 个野点（每半场 2 个 buff + 4 个小野点），击杀 buff 怪获得红/蓝增益，
+# 小野点只给经验；buff 怪 70 秒刷新，小野点 60 秒。
 # 蓝增益缩短技能冷却，红增益提升普攻伤害。
 
 const MapLayout = preload("res://sim/map/map_layout.gd")
@@ -14,16 +15,18 @@ static var CAMPS: Array = MapLayout.CAMPS.duplicate(true)
 
 static func monster_stats(camp: Dictionary) -> Dictionary:
 	var pos: Vector2 = camp.get("pos", Vector2.ZERO)
-	var is_red := str(camp.get("buff", "")) == "red"
-	var hp := 780.0 if is_red else 720.0
-	var damage := 62.0 if is_red else 55.0
+	var buff := str(camp.get("buff", ""))
+	var is_red := buff == "red"
+	# 小野点没有 buff，血量和伤害都单独写在营地数据里；buff 怪保持原数值。
+	var hp := float(camp.get("hp", 780.0 if is_red else 720.0))
+	var damage := float(camp.get("damage", 62.0 if is_red else 55.0))
 	return {
 		"type": "monster",
 		"team": "neutral",
 		"monster_type": str(camp.get("monster_type", "wolf")),
 		"name": str(camp.get("name", "野怪")),
 		"camp_id": str(camp.get("id", "")),
-		"buff_type": str(camp.get("buff", "")),
+		"buff_type": buff,
 		"pos": pos,
 		"x": pos.x,
 		"y": pos.y,
@@ -35,7 +38,8 @@ static func monster_stats(camp: Dictionary) -> Dictionary:
 		"attack_interval": 1.4,
 		"leash_range": 11.0,
 		"move_speed": 3.4,
-		"respawn_time": RESPAWN_TIME,
+		"respawn_time": float(camp.get("respawn_time", RESPAWN_TIME)),
+		"xp": float(camp.get("xp", 45.0)),
 		"alive": true,
 	}
 

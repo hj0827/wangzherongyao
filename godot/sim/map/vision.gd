@@ -38,6 +38,27 @@ static func can_see_team(viewer_team: String) -> bool:
 	return viewer_team == "blue" or viewer_team == "red"
 
 static func is_visible(target: Dictionary, viewer_team: String, entities: Array, reveals: Array = []) -> bool:
+	return is_visible_with_viewers(target, viewer_team, _build_viewers(entities, viewer_team), reveals)
+
+# 观察者列表在一轮过滤里是固定的：队伍/存活/类型筛选只做一次，
+# 不再对每个目标重扫全部实体。距离用平方比较，少一次开方。
+static func _build_viewers(entities: Array, viewer_team: String) -> Array:
+	var viewers: Array = []
+	for viewer in entities:
+		if not (viewer is Dictionary):
+			continue
+		var data: Dictionary = viewer
+		if str(data.get("team", "")) != viewer_team:
+			continue
+		if not bool(data.get("alive", true)):
+			continue
+		if not VISION_TYPES.has(str(data.get("type", ""))):
+			continue
+		var radius := radius_of(data)
+		viewers.append({"pos": _pos(data), "radius_sq": radius * radius})
+	return viewers
+
+static func is_visible_with_viewers(target: Dictionary, viewer_team: String, viewers: Array, reveals: Array = []) -> bool:
 	if not can_see_team(viewer_team):
 		return true
 	if str(target.get("team", "neutral")) == viewer_team:
@@ -54,23 +75,14 @@ static func is_visible(target: Dictionary, viewer_team: String, entities: Array,
 			return true
 	var in_bush := not MapLayout.bush_at(target_pos).is_empty()
 	var revealed := float(target.get("revealed_timer", 0.0)) > 0.0
-	for viewer in entities:
-		if not (viewer is Dictionary):
-			continue
-		var viewer_data: Dictionary = viewer
-		if str(viewer_data.get("team", "")) != viewer_team:
-			continue
-		if not bool(viewer_data.get("alive", true)):
-			continue
-		if not VISION_TYPES.has(str(viewer_data.get("type", ""))):
-			continue
-		var viewer_pos := _pos(viewer_data)
-		var distance := viewer_pos.distance_to(target_pos)
-		if distance > radius_of(viewer_data):
+	for viewer in viewers:
+		var viewer_pos: Vector2 = viewer.pos
+		var distance_sq := viewer_pos.distance_squared_to(target_pos)
+		if distance_sq > float(viewer.radius_sq):
 			continue
 		if Collision.segment_blocked(viewer_pos, target_pos):
 			continue
-		if in_bush and not revealed and distance > BUSH_REVEAL:
+		if in_bush and not revealed and distance_sq > BUSH_REVEAL * BUSH_REVEAL:
 			continue
 		return true
 	return false
@@ -81,6 +93,7 @@ static func filter_events(events: Array, viewer_team: String, entities: Array, r
 	if not can_see_team(viewer_team):
 		return events.duplicate(true)
 	var kept: Array = []
+	var viewers: Array = _build_viewers(entities, viewer_team)
 	for item in events:
 		if not (item is Dictionary):
 			continue
@@ -95,7 +108,7 @@ static func filter_events(events: Array, viewer_team: String, entities: Array, r
 		if point == null:
 			# 无坐标的敌方事件一律丢弃，宁可少播报也不给透视。
 			continue
-		if is_visible({"type": "event", "team": "neutral", "pos": point}, viewer_team, entities, reveals):
+		if is_visible_with_viewers({"type": "event", "team": "neutral", "pos": point}, viewer_team, viewers, reveals):
 			kept.append(event.duplicate(true))
 	return kept
 
@@ -123,7 +136,11 @@ static func _event_position(event: Dictionary) -> Variant:
 
 # 副本过滤：友军全留、建筑全留，敌方与中立单位只有被看见才进快照。
 static func filter_snapshot(snapshot: Dictionary, viewer_team: String) -> Dictionary:
-	var filtered: Dictionary = snapshot.duplicate(true)
+	# 只做浅拷贝：下面会整体替换 entities / events / river 三个键，
+	# 其余（scores / board / objectives）是只读的，没有调用方会改。
+	# 以前这里 duplicate(true) 会把整份世界连实体一起深拷贝一遍，
+	# 紧接着又对每个保留实体 duplicate(true)，等于同一批数据拷两次。
+	var filtered: Dictionary = snapshot.duplicate(false)
 	var source: Array = snapshot.get("entities", [])
 	var reveals: Array = []
 	var river: Variant = snapshot.get("river", null)
@@ -132,11 +149,12 @@ static func filter_snapshot(snapshot: Dictionary, viewer_team: String) -> Dictio
 		if reveal_map is Dictionary and reveal_map.get(viewer_team, null) is Array:
 			reveals = reveal_map.get(viewer_team)
 	var kept: Array = []
+	var viewers: Array = _build_viewers(source, viewer_team)
 	for item in source:
 		if not (item is Dictionary):
 			continue
 		var entity: Dictionary = item
-		if bool(is_visible(entity, viewer_team, source, reveals)):
+		if bool(is_visible_with_viewers(entity, viewer_team, viewers, reveals)):
 			kept.append(entity.duplicate(true))
 	filtered["entities"] = kept
 	if snapshot.get("events", null) is Array:

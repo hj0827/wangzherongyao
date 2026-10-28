@@ -217,7 +217,9 @@ static func apply_sun(sun: DirectionalLight3D) -> void:
 	sun.light_energy = SUN_ENERGY
 	sun.shadow_enabled = true
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
-	sun.directional_shadow_max_distance = 48.0
+	# 手机端把阴影范围从 48 收到 36 米：镜头附近的石壁/塔仍有影子，
+	# 远处阴影本来就被雾和墙外渐隐盖住，却要占满 shadow map 的采样预算。
+	sun.directional_shadow_max_distance = 36.0 if OS.has_feature("mobile") else 48.0
 	sun.shadow_bias = 0.035
 	sun.shadow_normal_bias = 1.2
 
