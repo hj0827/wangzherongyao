@@ -2,15 +2,15 @@ extends "res://tests/test_base.gd"
 
 # 丝带层的走位守卫。
 #
-# 丝带不是装饰，是**缝合线**：它必须从左侧标题栏横穿到右侧战场面板，并且真的钻到
-# 面板底下再出来。走位偏一点，丝带就从面板旁边绕过去 —— 屏幕上看着还是一张挺好看
-# 的图，但左右两块仍然是孤岛，改版就白做了。
+# 只剩一条远景弧（贴画面上缘、右上角出画）。它不承担构图，但仍然是「读不出来的失败」高发区：
+#   · 有没有跑出画面（跑出去会突然截断在视口边）
+#   · 有没有压到左栏文字块 / 战场面板（压住了画面还是「挺好看」，只是字废了）
+#   · 缩放后走位是否还贴着设计稿（窗口改了尺寸，丝带留在原地）
+#   · 生长循环、波形闭合、接缝不跳（这些是动画的正确性，与带子有几条无关）
 #
-# 这里守的都是「读不出来的失败」：
-#   · 有没有真的穿过面板矩形（test_main_ribbon_crosses_the_panel）
-#   · 三条丝带是不是都还活着（层被删掉一条，画面只是变稀，不会报错）
-#   · 有没有跑出画面上下边界（跑出去会突然截断在视口边）
-#   · 缩放后走位是否还贴着面板（窗口改了尺寸，丝带留在原地）
+# 上一版还有一条横穿下半屏的主带和一条绕过面板的细带，2026-10-26 按需求删掉了；
+# 那两条专属的断言（穿面板、从面板左缘吐出、主带比细带宽、三条错开生长）也一并删除 ——
+# 留着它们只会变成「测一个不存在的东西」。
 
 const RibbonLayer = preload("res://scripts/ui/ribbon_layer.gd")
 
@@ -39,14 +39,13 @@ func _ribbon(layout: Array, key: String) -> Dictionary:
 			return item
 	return {}
 
-func test_every_ribbon_layer_is_present() -> void:
+func test_the_ambient_arc_is_present() -> void:
 	var layout := RibbonLayer.layout(CANVAS, PANEL)
-	eq(layout.size(), 3, "三条丝带：主带 / 从面板左缘吐出的细带 / 上方远景带")
+	eq(layout.size(), 1, "只保留一条远景弧（贴画面上缘、右上角出画）")
 	var keys: Array = []
 	for item in layout:
 		keys.append(str((item as Dictionary).get("key")))
-	for key in ["main", "thin", "accent"]:
-		check(keys.has(key), "缺少丝带层：%s" % key)
+	check(keys.has("accent"), "缺少丝带层：accent")
 
 func test_every_ribbon_has_all_its_layers() -> void:
 	# 「透明丝绸」= 整带底 + 截面细带 + 上下两条沿边线。少掉截面那层，
@@ -97,37 +96,31 @@ func test_sections_are_drawn_inside_the_band() -> void:
 				and bounds.end.y <= body_bounds.end.y + 0.5,
 				"丝带 %s 有一条截面跑出了整带轮廓" % str(ribbon.get("key")))
 
-func test_main_ribbon_crosses_the_panel() -> void:
-	# 只擦到面板的角不算穿过：必须有一段落在面板内部，并且明显地从左边进、右边出。
-	var ribbon := _ribbon(RibbonLayer.layout(CANVAS, PANEL), "main")
-	var spine: PackedVector2Array = ribbon.get("spine", PackedVector2Array())
-	var inside := 0
-	var left_of := 0
-	var right_of := 0
-	for point in spine:
+func test_the_arc_never_crosses_the_battle_panel() -> void:
+	# 这条弧从面板**上方**掠过。上一版细带是故意从面板上缘钻进去的（缝合那套设计），
+	# 那条带子删掉之后，剩下的弧就必须完全避开面板 —— 半透明的绸子叠半透明的面板，
+	# 屏幕上是一块浑浊的色块，谁也说不清哪里错。
+	var ribbon := _ribbon(RibbonLayer.layout(CANVAS, PANEL), "accent")
+	var hits := 0
+	for point in ribbon["body"] as PackedVector2Array:
 		if PANEL.has_point(point):
-			inside += 1
-		if point.x < PANEL.position.x:
-			left_of += 1
-		if point.x > PANEL.end.x and point.y > PANEL.position.y:
-			right_of += 1
-	gt(float(inside), 6.0, "主带必须从面板底下穿过（内部采样点只有 %d 个）" % inside)
-	gt(float(left_of), 20.0, "主带必须从面板左侧一路过来")
-	gt(float(right_of), 10.0, "主带必须从面板右侧/下方再钻出来，否则收势断在面板后面")
+			hits += 1
+	eq(hits, 0, "这条弧压到了战场面板上（%d 个顶点落在面板内）" % hits)
 
-func test_thin_ribbon_exits_from_the_panel_left_edge() -> void:
-	# 设计里细带的「妙处」是从面板左缘吐出来 —— 这一笔决定面板像不像浮在绸子上面。
-	var ribbon := _ribbon(RibbonLayer.layout(CANVAS, PANEL), "thin")
-	var spine: PackedVector2Array = ribbon.get("spine", PackedVector2Array())
-	var inside := 0
-	var below_left := 0
-	for point in spine:
-		if PANEL.has_point(point):
-			inside += 1
-		if point.x < PANEL.position.x and point.y > PANEL.position.y:
-			below_left += 1
-	gt(float(inside), 4.0, "细带必须擦过面板（内部采样点只有 %d 个）" % inside)
-	gt(float(below_left), 20.0, "细带必须从面板左侧拖出去，而不是停在面板里")
+func test_the_arc_squeezes_into_the_strip_when_the_panel_moves_up() -> void:
+	# 面板被排版挤到很靠上时，弧必须**压进「上缘 ~ 面板顶」那条窄带**里，
+	# 而不是从面板上穿过去，也不是被推出画面外静默消失。
+	var high := Rect2(PANEL.position.x, 40.0, PANEL.size.x, PANEL.size.y)
+	var ribbon := _ribbon(RibbonLayer.layout(CANVAS, high), "accent")
+	var inside_panel := 0
+	var on_screen := 0
+	for point in ribbon["body"] as PackedVector2Array:
+		if high.has_point(point):
+			inside_panel += 1
+		if point.y >= 0.0 and point.y <= CANVAS.y:
+			on_screen += 1
+	eq(inside_panel, 0, "面板上移后这条弧仍然压在面板上（%d 个顶点）" % inside_panel)
+	gt(float(on_screen), 8.0, "面板上移后这条弧整条被挤出画面了（可见顶点只有 %d 个）" % on_screen)
 
 func test_ribbons_stay_inside_the_vertical_frame() -> void:
 	# 上下跑出画面会在视口边缘出现一条突然截断的宽带，像贴图错位。
@@ -137,46 +130,35 @@ func test_ribbons_stay_inside_the_vertical_frame() -> void:
 		gt(bounds.position.y, -CANVAS.y * 0.25, "丝带 %s 向上跑出画面太多" % str((item as Dictionary).get("key")))
 		lt(bounds.end.y, CANVAS.y * 1.30, "丝带 %s 向下跑出画面太多" % str((item as Dictionary).get("key")))
 
-func test_main_ribbon_enters_and_leaves_the_frame() -> void:
-	# 两端必须在画面外：起于画外、收于画外，才读得出「绸子从别处飘过这里」。
-	var spine: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "main").get("spine", PackedVector2Array())
+func test_the_arc_enters_from_the_top_and_leaves_at_the_right() -> void:
+	# 两端必须在画面外：从上方探进来、从右外侧飘出去，才读得出「绸子从别处掠过这里」。
+	# 两端都留在画面里的话，它会被读成一条画上去的装饰线。
+	var spine: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "accent").get("spine", PackedVector2Array())
 	var bounds := _bounds(spine)
-	lt(bounds.position.x, 0.0, "主带必须从画面左外侧入画")
-	gt(bounds.end.x, CANVAS.x, "主带必须收到画面右外侧出画")
-
-func test_main_ribbon_is_much_wider_than_the_thin_one() -> void:
-	# 两条带的关系必须一眼分得清：主带是「面」，细带是「线」。宽度接近就没有层次。
-	var main_body: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "main")["body"]
-	var thin_body: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "thin")["body"]
-	gt(_widest(main_body), _widest(thin_body) * 1.6, "主带最宽处必须明显宽于细带")
-
-func _widest(body: PackedVector2Array) -> float:
-	var widest := 0.0
-	var count := body.size() / 2
-	for index in count:
-		widest = maxf(widest, body[index].distance_to(body[body.size() - 1 - index]))
-	return widest
+	lt(bounds.position.y, 0.0, "这条弧必须从画面**上方**入画")
+	gt(bounds.end.x, CANVAS.x, "这条弧必须收到画面右外侧出画")
 
 func test_layout_falls_back_when_no_panel_rect_is_known() -> void:
 	# 菜单刚建起来时控件还没排版，拿不到面板矩形 —— 这时不能画出空丝带。
+	# 回落位置是设计稿里的比例框，弧同样得在它上方。
 	var layout := RibbonLayer.layout(CANVAS, Rect2())
-	eq(layout.size(), 3, "没有面板矩形时仍要给出三条丝带（走位退回设计稿坐标）")
+	eq(layout.size(), 1, "没有面板矩形时仍要给出这条弧（走位退回设计稿坐标）")
 	var fallback := RibbonLayer.default_focus(CANVAS)
 	for item in layout:
 		check(_all_finite((item as Dictionary)["body"] as PackedVector2Array),
 			"回落走位不能出现 NaN")
-	var inside := 0
-	for point in _ribbon(layout, "main").get("spine", PackedVector2Array()):
+	var hits := 0
+	for point in _ribbon(layout, "accent")["body"] as PackedVector2Array:
 		if fallback.has_point(point):
-			inside += 1
-	gt(float(inside), 4.0, "回落的走位也必须穿过回落面板矩形（否则首次打开就没有缝合效果）")
+			hits += 1
+	eq(hits, 0, "回落面板矩形上仍被这条弧压住（%d 个顶点）" % hits)
 
 func test_layout_scales_with_the_canvas() -> void:
 	# 窗口从 1600×900 换到 3200×1800，丝带必须整体放大一倍。
-	var small: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "main")["body"]
+	var small: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "accent")["body"]
 	var big_canvas := CANVAS * 2.0
 	var big_panel := Rect2(PANEL.position * 2.0, PANEL.size * 2.0)
-	var big: PackedVector2Array = _ribbon(RibbonLayer.layout(big_canvas, big_panel), "main")["body"]
+	var big: PackedVector2Array = _ribbon(RibbonLayer.layout(big_canvas, big_panel), "accent")["body"]
 	var small_bounds := _bounds(small)
 	var big_bounds := _bounds(big)
 	near(big_bounds.size.x / small_bounds.size.x, 2.0, 0.08, "横向必须按画布等比放大")
@@ -237,7 +219,8 @@ func _keep_out_screen() -> Array:
 	return result
 
 func test_ribbons_never_cross_any_text_block() -> void:
-	# 上一版只挡了标题块，结果主带正好压在底部那行操作提示上 —— 这是真实发生过的缺陷。
+	# 上一版只挡了标题块，结果有条带子正好压在底部那行操作提示上 —— 这是真实发生过的缺陷。
+	# 现在这条弧在画面上方，碰不到两块字；但守卫留着，将来加带子时它得先过这一关。
 	var blocks := _keep_out_screen()
 	gt(float(blocks.size()), 1.0, "左栏有两块字，只挡一块会漏掉底部提示行")
 	for item in RibbonLayer.layout(CANVAS, PANEL):
@@ -302,8 +285,8 @@ func test_the_band_edge_fades_out_instead_of_being_cut() -> void:
 	gt(bottom_inside, 0.0, "下沿暗面完全透明的话，带子下缘会直接切在背景上")
 
 func test_ribbons_never_dip_out_of_frame_and_come_back() -> void:
-	# 之前主带在 x≈780 处掉到画布下方 (y=1122) 再折回 y=922 —— 带子被视口底边切掉一截
-	# 又突然接回来，屏幕上就是左边缘那个「凿出来的直角」。
+	# 上一版有条带子在 x≈780 处掉到画布下方 (y=1122) 再折回 y=922 —— 带子被视口底边切掉
+	# 一截又突然接回来，屏幕上就是左边缘那个「凿出来的直角」。
 	#
 	# 允许：进画（从画外飘进来）+ 出画（收出去），各一次。
 	# 禁止：已经进过画之后又跑出去、再折回来 —— 那才是挖坑。
@@ -367,24 +350,13 @@ func test_ribbon_bodies_stay_out_of_the_title_block_too() -> void:
 		eq(hits, 0, "丝带 %s 的轮廓有 %d 个顶点压在文字块上"
 			% [str(ribbon.get("key")), hits])
 
-func test_the_two_stitching_ribbons_enter_the_panel_from_opposite_sides() -> void:
-	# 面板被绸子「扎」在画面里，靠的是两条带各钻一次板底、并且从**不同**两侧进出。
-	# 两条都从左进右出的话，面板只是被两条平行线穿过，缝合感没有了。
-	var layout := RibbonLayer.layout(CANVAS, PANEL)
-	var main_spine: PackedVector2Array = _ribbon(layout, "main").get("spine", PackedVector2Array())
-	var thin_spine: PackedVector2Array = _ribbon(layout, "thin").get("spine", PackedVector2Array())
-	var main_entry := _first_inside(main_spine)
-	var thin_entry := _first_inside(thin_spine)
-	gt(main_entry.y, PANEL.position.y + PANEL.size.y * 0.45,
-		"主带必须从面板下半部钻进去（当前入点在 y=%.0f）" % main_entry.y)
-	lt(thin_entry.y, PANEL.position.y + PANEL.size.y * 0.45,
-		"细带必须从面板上半部钻进去（当前入点在 y=%.0f）" % thin_entry.y)
-
-func _first_inside(spine: PackedVector2Array) -> Vector2:
-	for point in spine:
-		if PANEL.has_point(point):
-			return point
-	return Vector2(-1.0, -1.0)
+func test_the_arc_stays_in_the_upper_band_of_the_frame() -> void:
+	# 这条弧的存在感是「贴着上缘掠过去」。它一旦往下沉到画面中部，就会开始和标题、
+	# 和面板抢位置 —— 那时它的宽度（17px）根本撑不住那个位置，看起来只是「一条放错地方的线」。
+	var body: PackedVector2Array = _ribbon(RibbonLayer.layout(CANVAS, PANEL), "accent")["body"]
+	var bounds := _bounds(body)
+	lt(bounds.end.y, CANVAS.y * 0.22, "这条弧的下沿已经沉到画面 %.0f%% 处，不该这么低"
+		% (bounds.end.y / CANVAS.y * 100.0))
 
 # ---------- 绘制路径：一次三角带，而不是每帧三角化 ----------
 
@@ -467,7 +439,10 @@ func test_motion_is_slow_per_frame_but_visible_over_half_a_period() -> void:
 	# 「流畅」和「看得见在动」是一对互相拉扯的指标，必须同时量：
 	#   每帧位移太大 → 60fps 下也像在抽搐；
 	#   半周期总位移太小 → 整条丝带静止，动画白做。
-	# 实测基线（1600×900）：单帧 0.164px，半周期 41.15px。
+	# 实测基线（1600×900，只剩远景弧之后）：半周期 7.39px。
+	# 上一版有三条带时这里是 41px —— 那是主带撑起来的量级；远景弧的振幅被夹在下限 5px，
+	# 收敛了一个数量级，这正是「只留一条淡弧」想要的结果，所以判据从 8px 降到 5px。
+	# 5px 仍然是「肉眼能看出在动」的下限：一条 17px 宽的线在 6.5 秒里位移 7px 是看得见的。
 	# 生长（头部推进）本来就走得比波快，那是另一组测试；这里只量波形本身。
 	var base := RibbonLayer.base_layout(CANVAS, PANEL, 96)
 	var step := 1.0 / 60.0
@@ -477,7 +452,7 @@ func test_motion_is_slow_per_frame_but_visible_over_half_a_period() -> void:
 	var per_frame := _max_point_move(start, next_frame)
 	var per_half := _max_point_move(start, half)
 	lt(per_frame, 2.0, "单帧位移 %.3fpx 太大，60fps 下会看成抽搐" % per_frame)
-	gt(per_half, 8.0, "半周期只移动了 %.2fpx，丝带看起来是静止的" % per_half)
+	gt(per_half, 5.0, "半周期只移动了 %.2fpx，丝带看起来是静止的" % per_half)
 
 func test_the_loop_seam_cannot_be_told_apart_from_any_other_frame() -> void:
 	# 循环最容易露馅的地方：跨过周期那一刻的位移和别处不一样，屏幕上就是「弹一下」。
@@ -504,7 +479,7 @@ func test_the_loop_seam_cannot_be_told_apart_from_any_other_frame() -> void:
 #   · 生长单调、每帧推进量可见但不抽搐
 #   · 还没长出来的那段必须真的没有宽度（否则是一条被齐口切断的带子）
 #   · 头部要收成尖（线头），不是断口
-#   · 三条带不许同时长（那又变回「一起动」）
+#   · 一个循环里静止的时间必须占多数（它是背景，不是主角）
 
 func _body_widths(body: PackedVector2Array) -> PackedFloat32Array:
 	# 带轮廓 = 去程 n 点 + 回程 n 点，所以第 i 点的带宽就是首尾对称两点的距离。
@@ -586,74 +561,37 @@ func test_the_growth_cycle_closes_and_lines_up_with_the_wave() -> void:
 		near(before.x, after.x, 0.0001, "t=%.1f 尾部在一个循环后没回到原处" % time)
 		near(before.y, after.y, 0.0001, "t=%.1f 头部在一个循环后没回到原处" % time)
 
-func test_the_three_ribbons_do_not_grow_together() -> void:
-	# 「一起动」的另一半：三条带必须错开长。三条同时长/同时满，画面就是一次整体的呼吸，
-	# 依然读不出「从边边来」。
+func test_the_menu_opens_with_the_arc_already_whole() -> void:
+	# 开场那一帧不能是「什么都没有」。只剩一条带之后这件事更要紧：
+	# 一进菜单就是空背景、绸子要等十几秒才从画外探进来，那不是「在动」，是「漏了」。
+	# 所以 phase 必须让 t=0 落在停留段里（见 RIBBON_SPECS 的 phase）。
 	var base := RibbonLayer.base_layout(CANVAS, PANEL, 60)
-	var widest := 0.0
-	var busiest := 0
-	for step in 131:
-		var time := RibbonLayer.CYCLE * float(step) / 130.0
-		var shortest := 1.0
-		var longest := 0.0
-		var growing := 0
-		for item in base:
-			var span := RibbonLayer.reveal_span(time, float((item as Dictionary).get("phase", 0.0)))
-			var length := span.y - span.x
-			shortest = minf(shortest, length)
-			longest = maxf(longest, length)
-			# 尾部钉在画外、长度介于 0 和 1 之间 = 这一条正在长
-			if span.x < 0.001 and length > 0.001 and length < 0.999:
-				growing += 1
-		widest = maxf(widest, longest - shortest)
-		busiest = maxi(busiest, growing)
-	gt(widest, 0.35, "三条丝带的生长进度最多只差 %.2f —— 读起来还是整条一起动" % widest)
-	eq(busiest, 1, "同一时刻有 %d 条丝带在一起长 —— 那就又变成「一起动」了" % busiest)
-
-func test_at_least_one_ribbon_keeps_the_panel_stitched_at_all_times() -> void:
-	# 丝带不是装饰：它把左栏和右面板缝在一起。生长循环里允许「这一条没了」，
-	# 但不允许「两条都没了」—— 那几秒里面板重新变成一座孤岛，而截图上只会被读成
-	# 「这张图有点空」，没人会把它报成 bug。远景带在画面上方，不参与缝合。
-	var base := RibbonLayer.base_layout(CANVAS, PANEL, 60)
-	var worst := 1.0
-	var worst_at := 0.0
-	for step in 131:
-		var time := RibbonLayer.CYCLE * float(step) / 130.0
-		var best := 0.0
-		for item in base:
-			if str((item as Dictionary).get("key")) == "accent":
-				continue
-			var span := RibbonLayer.reveal_span(time, float((item as Dictionary).get("phase", 0.0)))
-			best = maxf(best, span.y - span.x)
-		if best < worst:
-			worst = best
-			worst_at = time
-	gt(worst, 0.5, "t=%.1fs 时主带和细带都不足一半 —— 面板会在这几秒里变成孤岛" % worst_at)
-
-func test_the_menu_opens_with_the_panel_stitched_and_one_ribbon_still_growing() -> void:
-	# 开场那一秒不能是「什么都没有」：丝带是左栏和右面板之间的缝合线，
-	# 菜单一打开就得有一整条在，否则面板先当几秒钟孤岛，再被绸子慢慢补上。
-	# 同时必须**还有一条没长完** —— 那是「从边边慢慢出现」的第一印象，
-	# 一打开就三条齐满的话，生长要等十几秒才轮到，用户看不到他要的那个动法。
-	var base := RibbonLayer.base_layout(CANVAS, PANEL, 60)
-	var full_at_open := 0
-	var coming_in := 0
 	for item in base:
 		var span := RibbonLayer.reveal_span(0.0, float((item as Dictionary).get("phase", 0.0)))
-		var length := span.y - span.x
-		if length > 0.99:
-			full_at_open += 1
-		elif length < 0.5:
-			coming_in += 1
-	gt(float(full_at_open), 1.0, "开场时必须至少有一条丝带是整条的（当前 %d 条）" % full_at_open)
-	gt(float(coming_in), 0.0, "开场时三条都已经长满了 —— 用户要等十几秒才看得到生长")
+		near(span.y - span.x, 1.0, 0.001,
+			"开场时 %s 不是整条的（%.2f）—— 菜单一打开会是一张空背景" % [str((item as Dictionary).get("key")), span.y - span.x])
+
+func test_the_arc_is_mostly_still_over_a_full_cycle() -> void:
+	# 它是背景，不是主角。一个 39s 的循环里，「正在长 / 正在被抽走」的时间必须占少数 ——
+	# 老是动，读者的视线就被它带走了，菜单的正文反而看不清。
+	var base := RibbonLayer.base_layout(CANVAS, PANEL, 60)
+	var moving := 0
+	var steps := 130
+	for step in steps:
+		var time := RibbonLayer.CYCLE * float(step) / float(steps)
+		for item in base:
+			var span := RibbonLayer.reveal_span(time, float((item as Dictionary).get("phase", 0.0)))
+			if (span.y - span.x) < 0.999:
+				moving += 1
+	lt(float(moving) / float(steps), 0.40,
+		"一个循环里有 %.0f%% 的时间在长/在抽走，动得太多了" % (float(moving) / float(steps) * 100.0))
 
 func test_the_part_that_has_not_grown_yet_draws_nothing() -> void:
 	# 没长出来的那段必须真的「没有」：宽度归零、点全部叠在头部尖端。
 	# 否则屏幕上是一条从画外伸到半路、末端齐刷刷切断的带子 —— 比不长还难看。
 	var time := RibbonLayer.GROW_TIME * 0.5
-	var ribbon := _one_frame("main", time)
-	check(not ribbon.is_empty(), "生长中段必须还能拿到主带的几何")
+	var ribbon := _one_frame("accent", time)
+	check(not ribbon.is_empty(), "生长中段必须还能拿到这条弧的几何")
 	check(bool(ribbon.get("revealed", true)), "生长中段必须判定为可见")
 	var widths := _body_widths(ribbon["body"] as PackedVector2Array)
 	var count := widths.size()
@@ -669,7 +607,7 @@ func test_the_part_that_has_not_grown_yet_draws_nothing() -> void:
 func test_the_growing_tip_comes_to_a_point() -> void:
 	# 头部必须是「线头」，不是断口：宽度在最后十几个采样点内收零。
 	# 齐口的样子很像贴图被裁掉一截 —— 说不清哪里错，但就是假。
-	var ribbon := _one_frame("main", RibbonLayer.GROW_TIME * 0.55)
+	var ribbon := _one_frame("accent", RibbonLayer.GROW_TIME * 0.55)
 	var widths := _body_widths(ribbon["body"] as PackedVector2Array)
 	var count := widths.size()
 	var span: Vector2 = ribbon["reveal"]
@@ -682,12 +620,12 @@ func test_the_growing_tip_comes_to_a_point() -> void:
 func test_growth_moves_at_a_steady_visible_speed() -> void:
 	# 头部每帧推进：太小看着没在长，太大会一顿一顿。上限按「一眼能看出在走」定。
 	var step := 1.0 / 60.0
-	var previous := _one_frame("main", 0.0)
+	var previous := _one_frame("accent", 0.0)
 	var worst := 0.0
 	var travelled := 0.0
 	var time := step
 	while time < RibbonLayer.GROW_TIME:
-		var current := _one_frame("main", time)
+		var current := _one_frame("accent", time)
 		var delta := _tip_of(previous).distance_to(_tip_of(current))
 		worst = maxf(worst, delta)
 		travelled += delta
@@ -700,7 +638,7 @@ func test_the_ribbon_really_vanishes_between_cycles() -> void:
 	# 空档里必须「什么都没有」。零宽度的退化三角带虽然看不见，但每帧照样提交几千个顶点；
 	# 更要紧的是：判据错了会画出一条宽度乱跳的残带。
 	var gap_time := RibbonLayer.GROW_TIME + RibbonLayer.HOLD_TIME + RibbonLayer.SLIDE_TIME + 0.1
-	var ribbon := _one_frame("main", gap_time)
+	var ribbon := _one_frame("accent", gap_time)
 	check(not ribbon.is_empty(), "空档里也要给出几何（绘制端靠 revealed 标记跳过）")
 	check(not bool(ribbon.get("revealed", true)), "空档里必须判定为不可见")
 	var widths := _body_widths(ribbon["body"] as PackedVector2Array)

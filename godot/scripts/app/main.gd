@@ -63,7 +63,7 @@ var _arena: Node3D = null
 var _ui: CanvasLayer
 var _screen_root: Control
 var _background: Control
-# 菜单的丝带层 / 战场面板 / 入口按钮：面板矩形要回填给丝带层（走位跟着面板算），
+# 菜单的丝带层 / 战场面板 / 入口按钮：面板矩形要回填给丝带层（那条远景弧得从面板上方掠过），
 # 按钮要按键取回（测试与键盘导航都靠这个稳定的键）。
 var _ribbon_layer: Control = null
 var _menu_panel: PanelContainer = null
@@ -1346,7 +1346,8 @@ func _glass_light() -> TextureRect:
 	rect.offset_bottom = 150.0
 	return rect
 
-## 把面板的矩形回填给丝带层：丝带是按「面板在哪」算走位的，不是硬编码坐标。
+## 把面板的矩形回填给丝带层：那条远景弧必须从面板**上方**掠过，
+## 面板被排版挤到更靠上的位置时，弧要按矩形让路（见 ribbon_layer.gd 的 strip）。
 ## 排版每帧可能还在微调，set_focus_rect 内部有半像素的容差，不会每帧重建几何。
 func _sync_ribbon_focus() -> void:
 	if _ribbon_layer == null or _menu_panel == null or _screen_root == null:

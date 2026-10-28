@@ -137,6 +137,12 @@ MENU_VIDEO_REGION = (200, 350, 1500, 900)
 HERO_VIDEO_REGION = (90, 240, 610, 520)
 HERO_VIDEO_REGION_2 = (650, 240, 1170, 520)
 
+# Menu identity anchors: the gold wordmark on the left and the mode panel on the
+# right are static UI, so they survive the background video's frame-to-frame
+# churn. The loading screen and any black frame score 0 on both.
+MENU_BRAND_RECT = (50, 80, 760, 420)
+MENU_PANEL_RECT = (1780, 180, 2280, 920)
+
 # Match menu panel spans 460x460 virtual px at the screen center.
 PAUSE_PANEL = (918, 264, 1470, 816)
 
@@ -414,6 +420,26 @@ def picture_xy(img: Image.Image) -> tuple[int, int]:
 def mean_lum(img: Image.Image, box: tuple[int, int, int, int] | None = None) -> float:
     crop = img.crop(box) if box else img
     return float(ImageStat.Stat(crop.convert("L")).mean[0])
+
+
+def bright_fraction(img: Image.Image, box: tuple[int, int, int, int], threshold: int = 120) -> float:
+    """Share of pixels above ``threshold`` -- PIL-only so numpy stays optional."""
+    hist = img.crop(box).convert("L").histogram()
+    total = sum(hist)
+    return sum(hist[threshold + 1:]) / total if total else 0.0
+
+
+def menu_visible(img: Image.Image) -> bool:
+    """True when the menu's static chrome is on screen.
+
+    Measured on the 2026-10-25 build: wordmark 7.8% bright pixels vs 0% on the
+    loading screen, mode panel mean 21.8 vs 6.0. Both anchors are far apart
+    because the panel/wordmark are UI, not video.
+    """
+    return (
+        bright_fraction(img, MENU_BRAND_RECT) > 0.01
+        and mean_lum(img, MENU_PANEL_RECT) > 12.0
+    )
 
 
 def diff_mean(a: Image.Image, b: Image.Image, box: tuple[int, int, int, int] | None = None) -> float:
@@ -1152,11 +1178,20 @@ def run_video_checks() -> None:
     a = screenshot(tag="menu_video_a", save=True)
     time.sleep(2.0)
     b = screenshot(tag="menu_video_b", save=True)
-    d = diff_mean(a, b, MENU_VIDEO_REGION)
-    if d > 2.0:
-        REPORT.passed("VIDEO-01", "menu background video plays", f"2s frame diff={d:.2f}")
+    # A page jump also produces a huge frame diff, so prove we never left the
+    # menu before crediting the difference to video playback.
+    if not (menu_visible(a) and menu_visible(b)):
+        REPORT.failed(
+            "VIDEO-01",
+            "menu background video plays",
+            f"left the menu while sampling (a={menu_visible(a)}, b={menu_visible(b)})",
+        )
     else:
-        REPORT.failed("VIDEO-01", "menu background video plays", f"static background (diff={d:.2f})")
+        d = diff_mean(a, b, MENU_VIDEO_REGION)
+        if d > 2.0:
+            REPORT.passed("VIDEO-01", "menu background video plays", f"2s frame diff={d:.2f}")
+        else:
+            REPORT.failed("VIDEO-01", "menu background video plays", f"static background (diff={d:.2f})")
 
     try:
         log_text = adb(["logcat", "-d", "-v", "brief"], timeout=30)

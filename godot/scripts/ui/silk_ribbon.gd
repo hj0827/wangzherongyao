@@ -27,6 +27,14 @@ const DENSE_PER_SPAN := 32
 ## 控制点间距悬殊时，均匀参数化（alpha = 0）会在拐弯外侧甩出一个鼓包。
 const ALPHA := 0.5
 
+## 波形里叠的二倍频强度（相对主波）。
+##
+## 「圆润」在几何上的定义是**曲率只变号一次**：沿脊线走一遍，只有一处高、一处处低。
+## 叠太重的二倍频（上一版 0.32）会凭空多出第二个反曲点 —— 屏幕上就是那条线
+## 「抖了一下」，细线上尤其明显，读起来是「在发颤」而不是「在流」。
+## 0.12 只够把纯正弦的机械感磨掉，形状仍然是一个干净的弧。
+const HARMONIC := 0.12
+
 ## 把一串控制点连成一条**穿过每个点**的平滑曲线，并按弧长等距重采样。
 ##
 ## 用向心 Catmull-Rom 而不是三次贝塞尔：贝塞尔不穿过中间控制点，想让它贴着给定的
@@ -190,8 +198,8 @@ static func wave(
 		var envelope := sin(PI * t)
 		var phase := t * TAU * waves - time * cycle
 		# 第二谐波让波形不那么「正弦」：纯单频看着像被机器推开，
-		# 叠一层二倍频才有一点绸子在风里的不规则感（周期仍然严格闭合）。
-		var value := sin(phase) + 0.32 * sin(phase * 2.0 + time * cycle)
+		# 叠一层很淡的二倍频才有一点绸子在风里的不规则感（周期仍然严格闭合）。
+		var value := sin(phase) + HARMONIC * sin(phase * 2.0 + time * cycle)
 		result[index] = curve[index] + curve_normals[index] * (value * amplitude * envelope)
 	return result
 
@@ -220,7 +228,7 @@ static func flow_widths(
 		# 相位比 wave 偏 0.9 rad：位移最大的地方宽度不是最宽，看着才像布在扭，
 		# 而不是一个气球在胀缩。
 		var phase := t * TAU * waves - time * cycle + 0.9
-		var value := sin(phase) + 0.28 * sin(phase * 2.0 - time * cycle)
+		var value := sin(phase) + HARMONIC * sin(phase * 2.0 - time * cycle)
 		result[index] = width_values[index] * (1.0 + value * depth * envelope)
 	return result
 

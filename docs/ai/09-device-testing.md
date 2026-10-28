@@ -54,6 +54,25 @@ cd godot
 python tools/device_checks.py
 ```
 
+### 2.1 工具链路径（别写死）
+
+`tools/android_env.py` 是 SDK / JDK 的唯一真身。两个脚本都从它取路径，顺序是：
+
+1. 环境变量（`ANDROID_HOME` / `ANDROID_SDK_ROOT` / `JAVA_HOME`）
+2. **Godot 编辑器设置**（`export/android/android_sdk_path`、`export/android/java_sdk_path`）—— 和导出器用同一份值，脚本不会跟它校验的 APK 漂移
+3. 常规安装位置兜底；`build-tools` 取装了 `aapt2`/`apksigner`/`zipalign` 的最高版本
+
+2026-10-25 之前两个脚本写死 `D:\AppCache\Android-Sdk` + `jdk-17`，SDK 搬家后 `fix_apk_theme_icon.py` 直接 `FileNotFoundError`、`device_checks.py` 连 `adb` 都找不到。**SDK 再搬家时先跑这条自检，别去改脚本里的字符串**：
+
+```cmd
+cd godot
+python tools/android_env.py
+```
+
+七行全 `OK` 才继续；缺哪行补哪个环境变量或改 Godot 设置。
+
+`device_checks.py` 需要 `PIL` + `numpy`。系统 Python（`C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps\python.exe`）已装好；managed 运行时（3.13.12）是干净的，直接跑会 `ModuleNotFoundError: numpy`。
+
 `device_checks.py` 用 ADB + 截图 + 像素差 + logcat 做黑盒验证，不改游戏代码。退出码 `0` = 无 FAIL；`1` = 有 FAIL；`2` = 静态检查就失败。
 
 ---

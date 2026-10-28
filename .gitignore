@@ -44,6 +44,7 @@ godot/shots/
 # 一次性诊断脚本：跑完就作废，依赖本地场景/截图，队友拉下来也用不上。
 # 注意 *_shot.gd（验收截图工具）是可复用的，要入库，别一并忽略。
 godot/tools/probe_*.gd
+godot/tools/probe_*.py
 # .uid 是 Godot 4.4+ 的脚本标识文件，会跟着被忽略的脚本一起冒出来；
 # 只忽略"宿主已被忽略"的 uid，正常的 tools/*_shot.gd.uid 仍然入库。
 godot/tools/probe_*.gd.uid
