@@ -25,6 +25,13 @@ const BUSHES := [
 	{"id": "bush_red_jungle", "pos": Vector2(28.0, 16.0), "radius": 3.8},
 	{"id": "bush_top_river", "pos": Vector2(-30.0, 6.0), "radius": 3.6},
 	{"id": "bush_bottom_river", "pos": Vector2(-6.0, 30.0), "radius": 3.6},
+	# 外圈补两对：原来 6 丛全挤在河道与中路之间，边路和野区深处蹲不了人。
+	# 半径统一 3.4：这几处离石壁/营地都只剩 5~6 米余量，按 3.8 会压进墙体重叠。
+	# 位置全部过探针：离兵线 > 9 米、离最近墙体 > 5.5 米、不碰营地/首领坑/传送阵。
+	{"id": "bush_top_deep", "pos": Vector2(-38.0, -4.0), "radius": 3.4},
+	{"id": "bush_bottom_deep", "pos": Vector2(4.0, 38.0), "radius": 3.4},
+	{"id": "bush_top_outer", "pos": Vector2(-36.0, 18.0), "radius": 3.4},
+	{"id": "bush_bottom_outer", "pos": Vector2(-18.0, 36.0), "radius": 3.4},
 ]
 
 # 野区墙体（2026-10-25 重做）。

@@ -174,3 +174,19 @@ const PVE_HERO_DAMAGE_SCALE := 0.62 # 小兵/野怪打英雄的伤害系数，�
 8. **打包前确认 `export_presets.cfg` 的 `include_filter` 覆盖 `*.ogv`**
 
 漏第 6 步：英雄能玩，但所有技能特效是同一个颜色——不报错。
+
+---
+
+## E. 调试开关（仅主机，F3）
+
+调试字段不是「英雄新字段」，不要按 A 节的 6 处清单补：
+
+| 开关 | 写在哪 | 读在哪 |
+| --- | --- | --- |
+| `debug_god` | 本地英雄实体（`Arena._debug_set_local_flag`） | `MatchSim._damage()` 最前面的 hero 分支 |
+| `debug_infinite_mana` | 同上 | `MatchSim._update_hero_timers()` 每 tick 回满 |
+| `debug_no_cooldown` | 同上 | `MatchSim._update_hero_timers()` 每 tick 清零 CD |
+
+它们**不写入 `_spawn_hero()`、不进快照白名单**：默认缺失 = 关闭（`Dictionary.get(key, false)`），客机没有 sim 也读不到。
+世界类操作集中在 `MatchSim.debug_*`（加钱 / 升级 / 回血 / 传送 / 清兵 / 刷野），表现层只负责把按钮接到 `Arena.debug_*`。
+接线守卫在 `tests/test_debug_mode.gd`：面板调用的方法必须全部存在，漏一个直接红。

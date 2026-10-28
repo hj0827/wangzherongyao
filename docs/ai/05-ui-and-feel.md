@@ -8,17 +8,19 @@
 
 | 文件 | 职责 | 规模 |
 | --- | --- | --- |
-| `scripts/ui/game_hud.gd` | 局内全部 2D：顶栏、小地图、底栏、技能键、商店/播报、死亡/结算/暂停遮罩 | 1131 行 |
-| `scripts/ui/minimap.gd` | 小地图绘制（206×206）+ 英雄圆形头像 + 点击查情报 | 511 行 |
-| `scripts/ui/skill_button.gd` | 单个技能键（CD 扇形遮罩、法力不足、禁用态、触摸拖拽） | 134 行 |
-| `scripts/ui/shop_panel.gd` | 商店面板：购买/出售/快速购买、金币显示 | 207 行 |
-| `scripts/ui/attack_cluster.gd` | 攻击键簇：补刀/推塔模式切换、头像锁敌 | 159 行 |
-| `scripts/ui/touch_joystick.gd` / `touch_action_button.gd` | 摇杆 / 圆形动作键 | 91 / 77 行 |
-| `scripts/ui/touch_layout.gd` | 触控尺寸与弧度的**唯一常量源** | 36 行 |
-| `scripts/ui/hud_layout.gd` | 常驻 HUD 分区的**唯一坐标源**（桌面/触屏两套），纯数据、可无头测 | 132 行 |
-| `scripts/ui/game_theme.gd` | 配色、字体、StyleBox | 132 行 |
-| `scripts/game/arena.gd` | 3D 表现：相机、特效、飘字、震屏、指示环、输入 | 2544 行 |
-| `scripts/game/unit_visual.gd` | 单位装配、骨骼动画、头顶血条 | 809 行 |
+| `scripts/ui/game_hud.gd` | 局内全部 2D：顶栏、小地图、底栏、技能键、商店/播报、死亡/结算/暂停遮罩 | 1314 行 |
+| `scripts/ui/minimap.gd` | 小地图绘制（206×206）+ 英雄圆形头像 + 点击查情报 | 574 行 |
+| `scripts/ui/skill_button.gd` | 单个技能键（CD 扇形遮罩、法力不足、禁用态、触摸拖拽） | 245 行 |
+| `scripts/ui/shop_panel.gd` | 商店面板：购买/出售/快速购买、金币显示 | 283 行 |
+| `scripts/ui/attack_cluster.gd` | 攻击键簇：补刀/推塔模式切换、头像锁敌 | 188 行 |
+| `scripts/ui/touch_joystick.gd` / `touch_action_button.gd` | 摇杆 / 圆形动作键 | 150 / 156 行 |
+| `scripts/ui/touch_layout.gd` | 触控尺寸与弧度的**唯一常量源** | 136 行 |
+| `scripts/ui/hud_layout.gd` | 常驻 HUD 分区的**唯一坐标源**（桌面/触屏两套），纯数据、可无头测 | 158 行 |
+| `scripts/ui/game_theme.gd` | 配色、字体、StyleBox | 203 行 |
+| `scripts/game/arena.gd` | 3D 表现：相机、特效、飘字、震屏、指示环、输入 | 3921 行 |
+| `scripts/game/unit_visual.gd` | 单位装配、骨骼动画、头顶血条、野怪名牌、草丛斜划眼 | 917 行 |
+| `scripts/game/bush_eye.gd` | 进草「不可见」标记：96px 斜划眼，逐像素生成 + 静态缓存 | 74 行 |
+| `scripts/ui/debug_panel.gd` | 开发者调试面板（F3）：时间倍率/暂停/作弊开关/运行指标 | 245 行 |
 
 ---
 
@@ -121,7 +123,7 @@ godot --path godot --script res://tools/probe_hud_rects.gd
 ## 3. 表现层的三个硬约束
 
 1. **只能读快照**：`set_snapshot()` 里不许回写 `hp`、不许触发结算。
-2. **高频对象走池**：飘字、粒子、弹道必须从 `_damage_labels_pool` / `_hit_particles_pool` 取，用完 `visible=false` 放回，**不要 `queue_free()`**。
+2. **高频对象走池**：飘字、粒子、范围环、弹道必须从 `_damage_labels_pool` / `_hit_particles_pool` / `_ring_pool` 取，用完 `visible=false` 放回，**不要 `queue_free()`**。
 3. **事件驱动，不要轮询**：一次性表现（技能、击杀、塔毁）挂在 `_process_events(events)` 的 `match` 分支里，不要每帧扫描状态变化。
 
 ---
@@ -167,6 +169,12 @@ godot --path godot --script res://tools/mobile_shot.gd
 
 产物在 `godot/shots/`（不入库）。
 
+### 5.1 输入采样不丢点
+
+输入每 20Hz 采样一次（`arena._gather_input`）。**按住类**动作（走位、持续普攻）直接读实时状态；**点按类**动作（普攻 / 技能 / 召唤师 / 回城 / 传送）必须锁存：按下时置位，真正发出去之后才清（见 `_queued_attack` 与 `_consume_skill_queue()`）。
+
+否则 60FPS 下 16ms 的一次点击可能刚好落在两次采样之间，被整帧吞掉——玩家看到的就是"我明明点了却没出手"。新增即时键时，除了加进 `net_protocol.EMPTY_INPUT` 白名单与 §6 的强制发送条件，还要按同样方式锁存。
+
 ---
 
 ## 6. 技能键的现状与扩展点
@@ -182,11 +190,28 @@ godot --path godot --script res://tools/mobile_shot.gd
 
 ## 7. 头顶血条
 
-`shaders/billboard_bar.gdshader`，英雄尺寸 `1.45 × 0.20`（蓝条 `1.45 × 0.10`），小兵/野怪按 `width_scale` 等比缩放（小兵 `0.62`、野怪 `0.9`，基准 `1.24 × 0.14`）。
+`shaders/billboard_bar.gdshader`，英雄尺寸 `1.9 × 0.26`（蓝条 `1.9 × 0.13`），小兵/野怪按 `width_scale` 等比缩放（小兵 `0.62`、普通野怪 `0.9`、首领 `1.55`，基准 `1.24 × 0.14`）。
 
 - 填充是**连续** `ratio`，**没有分段刻度**（王者是每 1000 血一格）。
 - 加了护盾会在血条右侧叠一段白色 `shield_ratio`。
 - **不要换成 `BaseMaterial3D.BILLBOARD_ENABLED`**，原因见 `02-godot-pitfalls.md` §3。
+
+**首领体型**：暴君 `3.8 m`、主宰 `4.2 m`，分别是英雄 `2.7 m` 的 `1.41 / 1.56` 倍。Orc 模型按高度等比放大后宽约 `5.1 / 5.7 m`，与模拟层 `2.6 / 2.8` 的碰撞半径一致，避免「身板看着小、实际被打范围大」。首领血条整体抬到 `身高 + 0.55`、名字字号 `44`；普通野怪仍是 `身高 + 0.25` / `32`。`UnitVisual.setup()` 的 `objective / pit_id` 由 `Arena` 从快照的 `objective / objective_id` 传入，**普通营地只能走小体型分支**。
+
+血条之外的头顶信息：
+
+| 单位 | 头顶 | 规则 |
+| --- | --- | --- |
+| 英雄 | 名字 + 等级 + 草丛斜划眼 | 眼睛只给**本地英雄**，敌人进草不显示（否则是透视） |
+| 野怪 | 名字 + `蓝BUFF`/`红BUFF`/`首领` 前缀 | 前缀与颜色由 `Arena` 从快照字段传给 `set_monster_badge()`，`UnitVisual` 不猜语义 |
+| 小兵 | 只有血条 | 数量太多，名字会糊成一片 |
+
+营地/首领坑的**地面**信息（`arena._sync_camp_states`）：
+
+- 贴地符阵 `shaders/camp_sigil.gdshader` 随野怪存活状态亮/暗；
+- 野怪死亡后视图会被回收，所以在营地上保留一块 `Label3D` 倒计时牌（`名称 + 剩余秒数`）；
+- 小地图同步画倒计时弧（`Minimap.camp_timer_marks()`），三者共用快照里的 `respawn_timer`。
+- 符阵/倒计时只在营地进入本地视野时显示：快照里没有那只野怪，就不隔墙读计时。
 
 ---
 
@@ -198,6 +223,7 @@ godot --path godot --script res://tools/mobile_shot.gd
 - [ ] 用了 `queue_free()` 吗？（高频对象应该回池）
 - [ ] 特效颜色是不是落到了默认分支？（`_hero_vfx_color()` 只认 4 个英雄）
 - [ ] 5v5 满员时会不会糊成一片？（同屏 10 英雄 + 几十小兵）
+- [ ] 调试面板加了按钮吗？后端必须有同名 `debug_*` 方法（`_call` 用 `has_method` 静默跳过，漏了不报错）。
 - [ ] 截图存到 `godot/shots/` 了吗？（别提交）
 
 ---
@@ -238,3 +264,33 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 ```
 
 `probe_*` 已在 `.gitignore` 里，不入库。
+
+---
+
+## 10. 开发者调试面板（F3）
+
+入口：`Arena._build_debug_panel()`，只有以下任一条件成立才会创建：
+
+- `OS.is_debug_build()`（编辑器 / debug 导出）；
+- 启动参数带 `--dev`；
+- 比赛配置显式 `debug_panel = true`。
+
+正式包默认没有面板，F3 也不响应。
+
+**所有权**：作弊全部落在 `sim` 的本地英雄实体上（`debug_god` / `debug_infinite_mana` / `debug_no_cooldown`），
+`MatchSim._damage()` 与 `_update_hero_timers()` 读取这些键。它们**不进快照白名单**，客机拿不到 sim，天然无效。
+
+**唯一的 UI→后端契约**：`DebugPanel._call()` 用 `has_method` 静默跳过不存在的接口。
+新按钮必须同时在 `Arena` 上实现同名 `debug_*` 方法，并由 `tests/test_debug_mode.gd` 的方法清单守住。
+
+面板当前能做的事：
+
+| 分组 | 功能 |
+| --- | --- |
+| 模拟 | 0.25x ~ 4x 时间倍率、暂停模拟、单步 1 tick |
+| 英雄 | 无敌、无限法力、无冷却、+1000 金币、等级 +1、回满血蓝、传送到鼠标 |
+| 世界 | 清空小兵、刷新野怪、全图视野（只改本地快照，广播仍按队伍过滤） |
+| 表现 | 关闭顿帧（`_trigger_hit_stop` 统一入口）、关闭震屏 |
+| 网络 | 只读：FPS / 实体数 / tick 耗时 / 快照耗时 / 缓冲深度 / 主机或客机 |
+
+注意：时间倍率只作用于主机模拟，表现层永远按真实时间走；客机上所有作弊控件会被禁用。

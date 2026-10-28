@@ -46,6 +46,19 @@ else                           → 纯本地（无 session）
 
 事件包按队伍分别构造：`sim.events_for(team, events)` 只做视野过滤，不构造整份快照；与 `snapshot_for` 共用 `Vision` 同一套规则，避免两条路径对"敌人是否看得见"判断不一致。客机收到后走 `session.events_received` → `main._on_network_events` → `arena.receive_events`。
 
+### 2.1.1 快照只构建一次，按队过滤复用
+
+10Hz 广播要发两支队伍。如果每队各调一次 `snapshot_for(team)`，就会把"全实体 + 经济面板 + 河道"构建两遍——这是团战帧里最大的一笔分配。
+
+现在主机每 tick 只构建一份全量 `sim.snapshot()`（`arena._last_world_shot`），供 `current_snapshot` 与广播共用：
+
+- 本地视角：`sim.snapshot_for(local_team, null, _last_world_shot)`；
+- 广播：`sim.snapshot_for(team, null, world_shot)`，两队复用同一份 base；
+- `Vision.filter_snapshot()` 做**浅拷贝**（`duplicate(false)`）后只替换 `entities / events / river`，其余顶层字段共享；视觉层只读，不回写；
+- 一次过滤内把观察者（英雄/兵/塔/基地）预建成 `{pos, radius_sq}` 列表，目标逐个用平方距离判断，不再每个目标重扫全表。
+
+`test_combat_regressions.gd` 钉住了两点：传 `base` 不会改动 `base` 本身；带 base 的过滤结果与从头重建完全一致。基准脚本 `godot --headless --path godot --script res://tools/bench_combat.gd`（56 实体、10 英雄）：全量快照 ~0.53ms，两队广播 ~1.7ms（单份构建 + 两次过滤）；对局内这份构建已被本帧快照摊掉，广播只剩 ~1.16ms 的过滤成本（原先两队各建一次 ~2.2ms+）。**不要退回"每队各 snapshot() 一次"的写法。**
+
 ### 2.2 压缩帧
 
 `NetProtocol.encode()` 在包 ≥ 512 字节时用 ZSTD 压一遍；压不小就原样发。
@@ -115,7 +128,7 @@ hero 分支逐字段列举并钳制范围。W/R/召唤师冷却、金币、装�
 
 ### 4.2.1 视野与事件过滤
 
-`match_sim.snapshot_for(team)` 会调用 `Vision.filter_snapshot()`：
+`match_sim.snapshot_for(team, events_override, base)` 会调用 `Vision.filter_snapshot()`（后两个参数都可省；`base` 用于复用同一份全量快照，见 §2.1.1）：
 
 - 实体：只保留友军、建筑与视野内敌人。
 - 事件：`snapshot` 包里**不再携带事件**（联机时事件单独走 `events` 包，见 §2.1）；`events_for(team, events)` 用的是同一套 `Vision.filter_events()`：全局播报（兵线、首领刷新、塔毁、比赛结束等）照常下发；攻击/技能/受击/死亡等带坐标事件只有在本队视野内才下发，防止通过事件流透视。
@@ -142,20 +155,32 @@ hero 分支逐字段列举并钳制范围。W/R/召唤师冷却、金币、装�
 
 **自定义事件里带的新键会被丢掉**——比如你想发 `{"type":"gold_gain","amount":50}`，`amount` 不在名单里，客机收到的事件里没有金额。
 
+### 4.5 调试字段故意不入白名单
+
+`debug_god / debug_infinite_mana / debug_no_cooldown` 只存在于主机的 `sim.state.entities` 里：
+
+- 它们不参与快照构造（`_snapshot_entity` 是显式白名单），客机永远看不到；
+- 客机没有 `sim`，所有 `Arena.debug_*` 方法在客机上直接 return；
+- 全图视野（`debug_set_reveal`）也只替换**本机**的 `current_snapshot`，10Hz 广播仍走 `snapshot_for(team)`。
+
+如果哪天要让调试状态跨机同步，必须同时改 `net_protocol.gd` 白名单和 `tests/test_net_protocol.gd`；**不要**把调试字段顺手塞进实体白名单。
+
 ---
 
 ## 5. 战争迷雾对所有本地视角生效
 
 ```gdscript
-func snapshot() -> Dictionary:                          # 全量：调试/服务端内部用
-func snapshot_for(team: String, events = null):         # 按视野过滤：所有玩家视角
+func snapshot() -> Dictionary:                                      # 全量：调试/服务端内部用
+func snapshot_for(team, events_override = null, base = null):       # 按视野过滤：所有玩家视角
 ```
 
 单机、主机、客机都只拿本队视角：
 
 - 主机/单机：`arena.current_snapshot = sim.snapshot_for(local_team)`，sim 内部照常全算。
-- 主机联网广播：状态用 `sim.snapshot_for(team)`（按队伍过滤实体、河道眼位），事件用 `sim.events_for(team, outgoing_events)`（只过滤事件，不重建快照），分别走不可靠与可靠通道。`outgoing_events` 攒的是两次 10Hz 广播之间的全部 30Hz 事件，避免漏事件。
+- 主机联网广播：状态用 `sim.snapshot_for(team, null, world_shot)`（复用同一份全量快照，按队伍过滤实体、河道眼位），事件用 `sim.events_for(team, outgoing_events)`（只过滤事件，不重建快照），分别走不可靠与可靠通道。`outgoing_events` 攒的是两次 10Hz 广播之间的全部 30Hz 事件，避免漏事件。
 - 客机：服务端下发的已经是过滤后的快照，jitter buffer 直接回放；事件通过 `session.events_received` 单独到达。
+
+`filter_snapshot()` 返回的是**浅拷贝**：顶层字典与 `scores / wave / objectives / board` 与传入的 base 共享引用，只有 `entities / events / river` 是过滤后重建的。视觉层只读这份数据；**谁要改快照内容，必须先自己深拷贝**，否则会改到主机的 `_last_world_shot`，下一队就看到被篡改的视野。
 
 `_sync_units()` 会把离开视野的敌方英雄视图 `visible = false`，重新进入视野时直接落位，避免从旧位置滑入泄露动向。
 

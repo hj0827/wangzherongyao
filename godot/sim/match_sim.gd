@@ -587,8 +587,10 @@ func _tick_channels(entity: Dictionary, input: Dictionary, dt: float) -> bool:
 
 func _update_hero_timers(dt: float) -> void:
 	for entity in state.entities:
-		if entity.type != "hero" or not entity.alive:
+		if entity.type != "hero":
 			continue
+		# 死亡不是时间暂停：复活等待期间冷却、buff、护盾计时照样走。
+		# 以前整段都挂在 alive 上，死一次大招 CD 就白送（复活后仍是 60 秒）。
 		EconomySystem.tick_natural_gold(entity, dt)
 		Jungle.tick_buffs(entity, dt)
 		entity.skill_q_cd = maxf(0.0, float(entity.skill_q_cd) - dt)
@@ -597,6 +599,16 @@ func _update_hero_timers(dt: float) -> void:
 		entity.skill_r_cd = maxf(0.0, float(entity.get("skill_r_cd", 0.0)) - dt)
 		entity.summoner_cd = maxf(0.0, float(entity.get("summoner_cd", 0.0)) - dt)
 		entity.teleport_cd = maxf(0.0, float(entity.get("teleport_cd", 0.0)) - dt)
+		# 调试开关挂在实体上而不是全局：客机上这些键不存在，等于永远关闭，
+		# 也不需要进快照白名单（它们不参与任何结算结果的下发）。
+		if bool(entity.get("debug_no_cooldown", false)):
+			entity.skill_q_cd = 0.0
+			entity.skill_w_cd = 0.0
+			entity.skill_e_cd = 0.0
+			entity.skill_r_cd = 0.0
+			entity.summoner_cd = 0.0
+		if bool(entity.get("debug_infinite_mana", false)):
+			entity.mp = float(entity.max_mp)
 		entity.cc_immune_timer = maxf(0.0, float(entity.get("cc_immune_timer", 0.0)) - dt)
 		entity.attack_cd = maxf(0.0, float(entity.attack_cd) - dt)
 		entity.shield_timer = maxf(0.0, float(entity.shield_timer) - dt)
@@ -605,6 +617,8 @@ func _update_hero_timers(dt: float) -> void:
 		entity.haste_timer = maxf(0.0, float(entity.haste_timer) - dt)
 		entity.slow_timer = maxf(0.0, float(entity.slow_timer) - dt)
 		entity["revealed_timer"] = maxf(0.0, float(entity.get("revealed_timer", 0.0)) - dt)
+		if not entity.alive:
+			continue
 		entity.mp = minf(float(entity.max_mp), float(entity.mp) + FIELD_MP_REGEN * dt)
 		if float(entity.hp) < float(entity.max_hp) and float(state.time) - float(entity.last_damage_time) > 8.0:
 			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * FIELD_HP_REGEN * dt)
@@ -1041,6 +1055,10 @@ func apply_damage(entity_id: int, amount: float, source_id: int = -1) -> void:
 func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 	if target.is_empty() or not target.alive or amount <= 0.0:
 		return
+	# 调试无敌：只挡伤害，不挡仇恨。塔和小兵仍然会锁定他，
+	# 否则一开无敌，整条兵线就停在原地不动了。
+	if target.type == "hero" and bool(target.get("debug_god", false)):
+		return
 	if target.type == "tower" and not TowerRules.is_tower_vulnerable(target, state.entities):
 		return
 	if target.type == "guard" and not Crystal.is_guard_vulnerable(target, state.entities):
@@ -1066,6 +1084,37 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 		target["revealed_timer"] = REVEAL_AFTER_COMBAT
 		if str(source.get("type", "")) == "hero":
 			source["revealed_timer"] = REVEAL_AFTER_COMBAT
+	# 交手记账必须在护盾结算之前。被盾吃掉的伤害同样是「有人打我」：
+	# 脱战回血计时、回城/传送打断、击杀归属、助攻都读这些字段，
+	# 放在护盾 return 之后会让「打盾」变成完全没有战斗痕迹。
+	if not source.is_empty():
+		target["last_attacker_id"] = int(source.get("id", -1))
+		target["last_attacker_time"] = float(state.time)
+	if target.type == "hero":
+		target.last_damage_time = float(state.time)
+		# 受击打断引导：只有真正中断的那一次才发事件（interrupt 幂等）。
+		if RecallRules.interrupt(target):
+			_emit("recall_interrupt", {
+				"team": target.team,
+				"hero": target.id,
+				"x": float(target.get("recall_from", target.pos).x),
+				"y": float(target.get("recall_from", target.pos).y),
+			})
+		if Teleport.interrupt(target):
+			_emit("teleport_interrupt", {
+				"team": target.team,
+				"hero": target.id,
+				"x": float(target.get("teleport_from", target.pos).x),
+				"y": float(target.get("teleport_from", target.pos).y),
+			})
+		if not source.is_empty():
+			if str(source.get("type", "")) == "hero" and str(source.get("team", "")) != str(target.get("team", "")):
+				target.last_hero_attacker_id = int(source.get("id", -1))
+				target.last_hero_attacker_time = float(state.time)
+				# 助攻要靠「所有打过他的人」，单靠 last_hero_attacker 只留得下最后一下。
+				var damagers: Dictionary = target.get("hero_damagers", {})
+				damagers[int(source.get("id", -1))] = float(state.time)
+				target["hero_damagers"] = damagers
 	# —— 面板统计 ——
 	# 记的是护盾结算**之前**的伤害：被盾吃掉的输出一样是玩家打出来的，
 	# 面板要能回答「谁在打输出」，而不是「谁把盾打破了」。
@@ -1082,38 +1131,7 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 			target["last_shield_hit_time"] = float(state.time)
 	if remaining <= 0.0:
 		return
-	if target.type == "hero":
-		# 受击打断引导：只有真正中断的那一次才发事件（interrupt 幂等）。
-		if RecallRules.interrupt(target):
-			_emit("recall_interrupt", {
-				"team": target.team,
-				"hero": target.id,
-				"x": float(target.get("recall_from", target.pos).x),
-				"y": float(target.get("recall_from", target.pos).y),
-			})
-		if Teleport.interrupt(target):
-			_emit("teleport_interrupt", {
-				"team": target.team,
-				"hero": target.id,
-				"x": float(target.get("teleport_from", target.pos).x),
-				"y": float(target.get("teleport_from", target.pos).y),
-			})
 	target.hp = float(target.hp) - remaining
-	# 「谁打了我」要对所有目标都记账，不能只记英雄：野怪改成纯反击后，
-	# 全靠这个字段决定要不要还手，普攻打野怪却不留痕的话它就永远站着不动。
-	if not source.is_empty():
-		target["last_attacker_id"] = int(source.get("id", -1))
-		target["last_attacker_time"] = float(state.time)
-	if target.type == "hero":
-		target.last_damage_time = float(state.time)
-		if not source.is_empty():
-			if str(source.get("type", "")) == "hero" and str(source.get("team", "")) != str(target.get("team", "")):
-				target.last_hero_attacker_id = int(source.get("id", -1))
-				target.last_hero_attacker_time = float(state.time)
-				# 助攻要靠「所有打过他的人」，单靠 last_hero_attacker 只留得下最后一下。
-				var damagers: Dictionary = target.get("hero_damagers", {})
-				damagers[int(source.get("id", -1))] = float(state.time)
-				target["hero_damagers"] = damagers
 	_emit("hit", {
 		"target": target.id,
 		"target_type": target.type,
@@ -1143,7 +1161,7 @@ func _kill_entity(target: Dictionary, source: Dictionary) -> void:
 		if not source.is_empty() and str(source.get("type", "")) == "hero" and str(source.get("team", "")) != str(target.get("team", "")):
 			killer = source
 		# 2. 致命伤害来自防御塔/小兵/机关等非英雄，但近期受到敌方英雄伤害（10秒内判定为英雄击杀）
-		elif float(state.time) - float(target.get("last_hero_attacker_time", -999.0)) <= 10.0:
+		elif float(state.time) - float(target.get("last_hero_attacker_time", -999.0)) <= ASSIST_WINDOW:
 			var hero_attacker: Dictionary = _entity_by_id(int(target.get("last_hero_attacker_id", -1)))
 			if not hero_attacker.is_empty() and str(hero_attacker.get("type", "")) == "hero" and str(hero_attacker.get("team", "")) != str(target.get("team", "")):
 				killer = hero_attacker
@@ -1411,6 +1429,66 @@ func _entity_by_id(entity_id: int) -> Dictionary:
 			return entity
 	return {}
 
+# --- 开发者调试接口 ---------------------------------------------------------
+# 只给主机用：客机没有 sim，这些方法根本不会被调用。
+# 全部走 owner_id 而不直接收字典，避免表现层拿着过期实体引用改到复制出来的快照。
+
+func debug_hero(owner_id: String) -> Dictionary:
+	return get_hero_by_player(owner_id)
+
+func debug_level_up(owner_id: String) -> bool:
+	var hero: Dictionary = get_hero_by_player(owner_id)
+	if hero.is_empty() or not bool(hero.get("alive", false)):
+		return false
+	if int(hero.level) >= MAX_LEVEL:
+		return false
+	# 只补到「刚好升一级」的经验，避免连升两级把等级 +1 变成 +2。
+	var amount: float = maxf(0.0, _xp_needed(int(hero.level)) - float(hero.xp))
+	_add_xp(hero, amount)
+	return true
+
+func debug_add_gold(owner_id: String, amount: int) -> bool:
+	var hero: Dictionary = get_hero_by_player(owner_id)
+	if hero.is_empty():
+		return false
+	hero.gold = int(hero.get("gold", 0)) + maxi(0, amount)
+	return true
+
+func debug_heal(owner_id: String) -> bool:
+	var hero: Dictionary = get_hero_by_player(owner_id)
+	if hero.is_empty() or not bool(hero.get("alive", false)):
+		return false
+	hero.hp = float(hero.max_hp)
+	hero.mp = float(hero.max_mp)
+	return true
+
+func debug_teleport_hero(owner_id: String, pos: Vector2) -> bool:
+	var hero: Dictionary = get_hero_by_player(owner_id)
+	if hero.is_empty() or not bool(hero.get("alive", false)):
+		return false
+	# 走 nearest_free 而不是直接赋值：传进墙里会让英雄卡死，回城/传送也读 pos。
+	hero.pos = Collision.nearest_free(pos, float(hero.get("radius", 0.55)))
+	hero.moving = false
+	hero["recall_from"] = hero.pos
+	return true
+
+func debug_clear_minions() -> int:
+	var removed := 0
+	for i in range(state.entities.size() - 1, -1, -1):
+		if str(state.entities[i].get("type", "")) == "minion":
+			state.entities.remove_at(i)
+			removed += 1
+	return removed
+
+func debug_respawn_monsters() -> int:
+	var revived := 0
+	for entity in state.entities:
+		if str(entity.get("type", "")) != "monster" or bool(entity.get("alive", false)):
+			continue
+		_respawn_monster(entity)
+		revived += 1
+	return revived
+
 func snapshot() -> Dictionary:
 	var entities: Array = []
 	for entity in state.entities:
@@ -1436,9 +1514,19 @@ func snapshot() -> Dictionary:
 # 客机视角快照：只包含己方与视野内目标，避免全图透视。
 # events_override 用于联机广播：服务端把两次快照之间的全部事件攒下来传入，
 # 避免 10Hz 快照只带得走最后 1/30 秒的事件。
-func snapshot_for(team: String, events_override: Variant = null) -> Dictionary:
-	var shot := snapshot()
+# base 允许主机复用同一份世界快照按队伍过滤：2 队 × 10Hz 不再重复构建两次全量快照。
+# filter_snapshot 会先深拷贝，传入的 base 不会被改写。
+func snapshot_for(team: String, events_override: Variant = null, base: Variant = null) -> Dictionary:
+	var shot: Dictionary
+	var shared := false
+	if base is Dictionary and not (base as Dictionary).is_empty():
+		shot = base
+		shared = true
+	else:
+		shot = snapshot()
 	if events_override is Array:
+		if shared:
+			shot = shot.duplicate(false)
 		shot["events"] = (events_override as Array).duplicate(true)
 	return Vision.filter_snapshot(shot, team)
 

@@ -62,7 +62,7 @@ Godot 4.4+ 给每个资源生成 `.uid`（`hero_defs.gd.uid`、`main_menu.tscn.u
 `project.godot` 里桌面和移动都是 `gl_compatibility`。
 
 - **没有** SDFGI、体积雾、SSAO、SSR。
-- 自定义着色器用 `unshaded` + `EMISSION` 最稳，参考 `billboard_bar.gdshader` 和 `_spawn_ring()` 里的 `StandardMaterial3D` 写法。
+- 自定义着色器用 `unshaded` + `EMISSION` 最稳，参考 `billboard_bar.gdshader`，以及 `_init_vfx_pools()` 里用 `_make_fx_material()` 一次性建好的材质（池节点各持一份，命中时只改颜色/透明度）——**不要在命中路径上再新建材质**。
 - 不要用 Forward+ 才有的特性，本地可能能跑，打包到 Android 直接黑屏。
 
 ---
@@ -98,6 +98,8 @@ const MINION_POOL_LIMIT := 40
 ```
 
 `_prewarm_minion_pool()` 在第一波兵线前预实例化。**改小会在首波兵线时卡一下**；改大只是多占内存，通常无害。
+
+`_init_vfx_pools()` 还预热了 `_damage_labels_pool`（Label3D 飘字）与 `_ring_pool`（16 个共享 `TorusMesh` 的范围环）。`_spawn_damage_number()` / `_spawn_ring()` 只从池里借、用完 `visible=false` 放回；池空时抢占最老的活动节点，靠 `generation` 元数据防止同一节点被归还两次。**不要再给这两个函数加 `Label3D.new()` / 新建网格的兜底分支**——那等于把硬规则 4 重新破掉。
 
 ---
 

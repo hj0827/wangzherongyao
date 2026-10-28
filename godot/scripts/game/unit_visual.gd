@@ -2,6 +2,7 @@ extends Node3D
 class_name UnitVisual
 
 const ModelUtils = preload("res://scripts/game/model_utils.gd")
+const BushEye = preload("res://scripts/game/bush_eye.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
 const BLUE := Color(0.22, 0.6, 1.0)
@@ -50,6 +51,16 @@ const HERO_BAR_SIZE := Vector2(1.9, 0.26)
 const HERO_MANA_SIZE := Vector2(1.9, 0.13)
 const HERO_MANA_GAP := 0.03
 const OTHER_BAR_SIZE := Vector2(1.24, 0.14)
+# 首领体型：暴君 / 主宰必须比英雄（2.7 m）明显大一圈，否则四个营地共用
+# 两种模型时，首领在俯视下只是一只「血多一点的野怪」。
+# 3.8 / 4.2 = 英雄的 1.41 / 1.56 倍；Orc 模型按高度等比放大后宽约
+# 5.1 / 5.7 m，正好对上模拟层 2.6 / 2.8 的碰撞半径 —— 玩家看到的身板
+# 与真实受击范围一致，普攻距离才不会读成「隔空打」。
+const TYRANT_HEIGHT := 3.8
+const OVERLORD_HEIGHT := 4.2
+# 首领血条比普通野怪宽 1.55 倍（≈ 英雄血条宽度），4 米高的身板上
+# 1.1 米宽的细条会小到读不出剩余血量。
+const OBJECTIVE_BAR_WIDTH := 1.55
 
 const UAL1 := preload("res://assets/animations/ual1.glb")
 const UAL2 := preload("res://assets/animations/ual2.glb")
@@ -184,6 +195,9 @@ var is_local := false
 var viewer_team := ""
 var monster_type := ""
 var minion_type := "melee"
+# 首领（暴君 / 主宰）走更大体型的独立分支；objective_id 用来区分两座坑。
+var is_objective := false
+var objective_id := ""
 
 var model_root: Node3D
 var body_root: Node3D
@@ -227,14 +241,30 @@ var mp_material: ShaderMaterial
 var mp_ratio := 0.0
 var name_label: Label3D
 var level_label: Label3D
+# 进草后的「不可见」眼睛（仅本地英雄）。斜划眼挂在血条上方，
+# 用 no_depth_test 保证被草丛叶簇挡住时仍然看得见 —— 它本来就是给玩家看的状态。
+var bush_eye: Sprite3D = null
+var bush_hidden := false
+var _bush_eye_time := 0.0
 var team_ring: MeshInstance3D
 var local_ring: MeshInstance3D
 var cast_light: OmniLight3D
 
-func setup(unit_kind: String, unit_team: String, type_id: String, label: String, local: bool, viewer: String = "") -> void:
+func setup(
+	unit_kind: String,
+	unit_team: String,
+	type_id: String,
+	label: String,
+	local: bool,
+	viewer: String = "",
+	objective: bool = false,
+	pit_id: String = ""
+) -> void:
 	kind = unit_kind
 	team = unit_team
 	hero_type = type_id
+	is_objective = objective
+	objective_id = pit_id
 	if kind == "monster":
 		monster_type = type_id
 	elif kind == "minion":
@@ -394,7 +424,12 @@ func _build_monster() -> void:
 		return
 	var scene: PackedScene
 	var target_height := 1.5
-	if monster_type == "orc":
+	var bar_width := 0.9
+	if is_objective:
+		scene = preload("res://assets/characters/Orc.glb")
+		target_height = OVERLORD_HEIGHT if objective_id == "overlord" else TYRANT_HEIGHT
+		bar_width = OBJECTIVE_BAR_WIDTH
+	elif monster_type == "orc":
 		scene = preload("res://assets/characters/Orc.glb")
 		target_height = 2.4
 	else:
@@ -409,8 +444,14 @@ func _build_monster() -> void:
 		if player:
 			animation_players.append(player)
 			player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
-	_add_ring(0.6)
-	_add_health_bar(target_height + 0.25, 0.9)
+	if is_objective:
+		# 脚下环贴着碰撞半径画（暴君 2.6 / 主宰 2.8），
+		# 让玩家在选中首领前就能读出它的实际体积。
+		_add_ring(2.4 if objective_id == "tyrant" else 2.6)
+		_add_health_bar(target_height + 0.55, bar_width)
+	else:
+		_add_ring(0.6)
+		_add_health_bar(target_height + 0.25, bar_width)
 	_set_anim("Idle", true)
 	ModelUtils.enable_shadows(self, false)
 
@@ -549,6 +590,72 @@ func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 		level_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		level_label.position = Vector3(HERO_BAR_SIZE.x * 0.5 + 0.20, name_label.position.y, 0.0)
 		bar_root.add_child(level_label)
+		_build_bush_eye()
+	elif kind == "monster":
+		# 野怪也要有名字：四个营地共用两种模型，没有名牌时玩家分不清
+		# 「霜狼 / 赤狼 / 暴君」，更看不出这只会掉蓝 BUFF 还是红 BUFF。
+		name_label = Label3D.new()
+		name_label.text = display_name
+		name_label.font = _get_font()
+		# 首领离镜头更远才装得下，名牌也要跟着放大；普通野怪保持紧凑。
+		name_label.font_size = 44 if is_objective else 32
+		name_label.pixel_size = 0.0032
+		name_label.outline_size = 10 if is_objective else 8
+		name_label.outline_modulate = Color(0.01, 0.02, 0.03, 0.9)
+		name_label.modulate = Color(0.9, 0.95, 1.0)
+		name_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		name_label.position.y = hp_size.y * 0.5 + (0.18 if is_objective else 0.12)
+		bar_root.add_child(name_label)
+
+func _build_bush_eye() -> void:
+	bush_eye = Sprite3D.new()
+	bush_eye.name = "BushEye"
+	bush_eye.texture = BushEye.texture()
+	# 96px 的贴图铺成约 1 米宽：比血条窄一点，不会抢名字的视线。
+	bush_eye.pixel_size = 1.0 / float(BushEye.TEXTURE_SIZE)
+	bush_eye.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	bush_eye.no_depth_test = true
+	bush_eye.render_priority = 10
+	bush_eye.position = Vector3(0.0, HERO_HEIGHT + 1.05, 0.0)
+	bush_eye.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	bush_eye.visible = false
+	add_child(bush_eye)
+
+# 本地英雄进出草时由 Arena 调用；其他单位即使被误调也不会长出眼睛。
+func set_bush_hidden(value: bool) -> void:
+	if kind != "hero":
+		bush_hidden = false
+		return
+	bush_hidden = value
+	if bush_hidden and bush_eye == null:
+		_build_bush_eye()
+	_refresh_bush_eye()
+
+func _refresh_bush_eye() -> void:
+	if bush_eye == null:
+		return
+	bush_eye.visible = bush_hidden and not dead
+	if bush_eye.visible:
+		_bush_eye_time = 0.0
+
+# 野怪名牌上带增益信息。颜色和文案都由 Arena 从快照字段读出来，
+# UnitVisual 不猜 camp / buff 的语义。
+func set_monster_badge(buff_type: String, objective: bool) -> void:
+	if kind != "monster" or name_label == null:
+		return
+	var prefix := ""
+	var color := Color(0.9, 0.95, 1.0)
+	if objective:
+		prefix = "首领 · "
+		color = Color(0.86, 0.68, 1.0)
+	elif buff_type == "blue":
+		prefix = "蓝BUFF · "
+		color = Color(0.52, 0.76, 1.0)
+	elif buff_type == "red":
+		prefix = "红BUFF · "
+		color = Color(1.0, 0.66, 0.36)
+	name_label.text = prefix + display_name
+	name_label.modulate = color
 
 func _get_font() -> Font:
 	if _font == null:
@@ -762,6 +869,7 @@ func _update_dead_state(alive: bool) -> void:
 			team_ring.visible = true
 		if name_label:
 			name_label.visible = true
+		_refresh_bush_eye()
 	elif not alive and not dead:
 		dead = true
 		death_timer = 2.4
@@ -776,6 +884,7 @@ func _update_dead_state(alive: bool) -> void:
 			local_ring.visible = false
 		if name_label:
 			name_label.visible = false
+		_refresh_bush_eye()
 
 func play_action(anim_name: String) -> void:
 	if dead or anim_name == "":
@@ -830,6 +939,12 @@ func play_hit() -> void:
 		play_action("Hit_Chest" if kind == "hero" else "Hit_A")
 
 func process_visual(delta: float) -> void:
+	if bush_eye != null and bush_eye.visible:
+		# 轻微呼吸 + 透明度起伏：静止的眼睛会被当成贴图污点。
+		_bush_eye_time += delta
+		var pulse := 1.0 + sin(_bush_eye_time * 5.0) * 0.07
+		bush_eye.scale = Vector3.ONE * pulse
+		bush_eye.modulate.a = 0.78 + sin(_bush_eye_time * 5.0) * 0.16
 	if action_timer > 0.0:
 		action_timer -= delta
 		if action_timer <= 0.0 and not dead:

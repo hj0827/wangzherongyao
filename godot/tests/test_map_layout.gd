@@ -114,6 +114,22 @@ func test_bush_and_camp_lookup_by_point() -> void:
 	check(MapLayout.camp_at(Vector2.ZERO).is_empty(), "地图中心不是营地")
 	eq(str(MapLayout.objective_at(MapLayout.OBJECTIVE_PITS[0].pos).id), str(MapLayout.OBJECTIVE_PITS[0].id), "首领坑中心必须命中")
 
+func test_bush_ring_reaches_the_outer_jungle() -> void:
+	# 原来 6 丛全挤在河道与中路之间，边路外深和野区深处没有蹲伏点；
+	# 这一版补到 10 丛，且必须离兵线足够远，不能蹲在路面上。
+	gt(float(MapLayout.BUSHES.size()), 9.0, "草丛至少 10 丛，外圈也要有蹲伏点")
+	var by_id := {}
+	for bush in MapLayout.BUSHES:
+		by_id[str(bush.id)] = bush
+	for id in ["bush_top_deep", "bush_bottom_deep", "bush_top_outer", "bush_bottom_outer"]:
+		check(by_id.has(id), "外圈草丛必须存在：" + id)
+		if not by_id.has(id):
+			continue
+		var pos: Vector2 = by_id[id].pos
+		gt(MapLayout.distance_to_lanes(pos), MapData.LANE_HALF_WIDTH + 4.0, "外圈草丛不能压在兵线上：" + id)
+		# 新点位半径统一 3.4：3.8 会压进石壁 / 营地圆盘。
+		near(float(by_id[id].radius), 3.4, 0.001, "外圈草丛半径保持 3.4：" + id)
+
 func test_ground_marks_claim_their_discs() -> void:
 	# 三块贴地圆盘（营地 / 首领坑 / 传送阵）是**实心片**：树根、草根长在盘面上
 	# 就是「绿点从石盘里冒出来」。以前避让清单在渲染层手抄一遍、
