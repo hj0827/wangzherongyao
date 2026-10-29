@@ -1012,6 +1012,9 @@ func _try_attack(hero: Dictionary) -> void:
 		damage *= 1.5
 	_emit("attack", {
 		"hero": hero.id,
+		# 表现层要靠英雄类型选形态与配色：近战挥刀光、远程打弹道。
+		# 客机这一帧可能还没建好英雄视图，事件里带上就不用回查快照。
+		"hero_type": str(hero.hero_type),
 		"x": float(hero.pos.x),
 		"y": float(hero.pos.y),
 		"aim_x": float(target.pos.x),

@@ -88,6 +88,9 @@ const CAMERA_FOCUS_GLIDE_SPEED := 200.0
 # 松手归位的速率。比观察更快 —— 「不按了立刻回到自己的画面」，
 # 跨整张图（116m）0.36s，体感是「唰一下回来」而不是「慢慢飘回去」。
 const CAMERA_FOCUS_RETURN_SPEED := 320.0
+# 远山挡视野：相机贴到地图边界时（尤其拉远镜头）会钻进山体，半个屏幕被岩壁糊住。
+# 远山只是布景 —— 相机进入或贴近某座山的包围盒时整座隐藏，离远后恢复。
+const BACKDROP_HIDE_MARGIN := 20.0
 # 客机渲染相对服务端的固定延迟。要略大于一个快照周期（服务端 10Hz ≈ 0.1s），
 # 否则缓冲里凑不齐两格；取 0.16 给网络抖动留余量。
 const NET_RENDER_DELAY := 0.16
@@ -95,11 +98,34 @@ const NET_RENDER_DELAY := 0.16
 const NET_BUFFER_LIMIT := 16
 # 地面射程环的高度。要略高于路面（0.022）与河水（0.012），避免被 z-fighting 吃掉。
 const RANGE_RING_Y := 0.06
-# 防御塔攻击范围圈：平时很淡（整张图十几座塔，画浓了像一堆靶子），
-# 本地英雄踏进敌方射程时整圈转红并加亮，这才是「危险」的那一瞬。
+# 防御塔攻击范围圈：默认**不画**。整张图十几座塔同时铺满射程圈就是一片蓝雾，
+# 只有敌方小兵/英雄真的踏进射程（塔马上要开火）时才亮起；
+# 本地英雄在敌方塔下时整圈转红，这才是「危险」的那一瞬。
 const TOWER_RING_IDLE_ALPHA := 0.16
+const TOWER_RING_ACTIVE_ALPHA := 0.36
 const TOWER_RING_WARN_ALPHA := 0.55
 const TOWER_RING_WARN_COLOR := Color(1.0, 0.2, 0.16)
+# --- 英雄普攻表现（2026-10-28）---------------------------------------------
+# 症状：按普攻只有一次骨骼动作，目标身上四颗小火星，打起来「看不出谁在出手」。
+# 现在近战英雄挥出一片新月刀光（走池，见 _slash_pool），远程英雄打一条弹道。
+# 三种近战（苍刃 2.0 / 铁壁 2.1 / 墨鸦 2.0）与两种远程（星璃 5.6 / 翎羽 6.4）
+# 用 HERO_RANGED_REACH 分档，取的是 hero_defs 的 attack_range，不另写一份数值。
+const HERO_RANGED_REACH := 4.0
+const HERO_SLASH_ARC_DEG := 118.0
+# 内沿半径（相对外沿）：1.0 = 实心扇形。0.62 太厚，2 米半径下是一片白饼；
+# 0.78 才读成「一道月牙刀光」。
+const HERO_SLASH_INNER := 0.78
+# 刀光高度取胸口（英雄身高 2.7，剑是举在肩上的）。0.95 那一版在 51° 俯角下
+# 正好压在脚面上，看着像「地上铺了张纸」。
+const HERO_SLASH_HEIGHT := 1.35
+# 刀光半径只吃到攻击距离的 92%：吃到 112% 时它比英雄还宽，
+# 画面里是一把「比自己还大的刀」。
+const HERO_SLASH_REACH_RATIO := 0.92
+const HERO_SLASH_GROW := 1.1
+const HERO_SLASH_DURATION := 0.18
+const HERO_SHOT_DURATION := 0.16
+const HERO_SHOT_HEIGHT := 1.15
+const HERO_SHOT_RADIUS := 0.16
 # 塔的视觉体型：51° 俯角下塔越宽，站在塔后（相机远侧）的英雄被盖得越狠。
 # 程序化石塔（TowerVisual）本身就按「细而尖」建模：最高 8.95m、最宽 2.76m，
 # 宽高比 ≈ 3.2。宽高比契约见 tests/test_map_presentation.gd::test_tower_model_is_slim_and_tall。
@@ -173,6 +199,8 @@ var _rock_mesh_cache: Dictionary = {}
 # 地形实例：布景（山 / 树 / 石头）要靠它取实际地面高度，
 # 否则摆件会悬在坡上或陷进土里。
 var _terrain = null
+# 远山布景及其世界包围盒：相机靠近时整座隐藏，避免山体挡住英雄（见 backdrop_hidden）。
+var _backdrop_mountains: Array[Dictionary] = []
 var camera: Camera3D
 var hud: GameHUD
 var aim_marker: Node3D
@@ -318,6 +346,10 @@ var _lance_active: Array[MeshInstance3D] = []
 # 团战里一秒十几次就是十几次材质创建。池化后只改颜色和缩放。
 var _ring_pool: Array[MeshInstance3D] = []
 var _ring_active: Array[MeshInstance3D] = []
+# 英雄普攻刀光：12 片新月。5v5 同时开打时每秒十几次普攻，
+# 每次 new SurfaceTool 提交网格 + 新建材质就等于把硬规则 4 重新破掉。
+var _slash_pool: Array[MeshInstance3D] = []
+var _slash_active: Array[MeshInstance3D] = []
 var build_complete := false
 
 func configure(options: Dictionary) -> void:
@@ -1424,6 +1456,19 @@ func _update_camera(delta: float, instant: bool) -> void:
 		if stop_shake.length_squared() > 0.0:
 			eye += Vector3(stop_shake.x, stop_shake.y * 0.4, 0.0)
 	camera.transform = Transform3D(placement.basis, eye)
+	_update_backdrop_visibility(camera.global_position)
+
+# 相机是否已经进入（或贴近）某座远山的包围盒。
+# 用包围盒最近点而不是中心点：山体很大，中心还在几十米外时近面已经贴到镜头。
+static func backdrop_hidden(camera_pos: Vector3, box: AABB) -> bool:
+	return box.grow(BACKDROP_HIDE_MARGIN).has_point(camera_pos)
+
+# 贴边拉远时相机会钻进远山，半屏岩壁把英雄糊掉。远山只是布景：
+# 相机靠近哪座就把哪座隐藏，离开后自动恢复；山体本身不动，远景轮廓保留。
+func _update_backdrop_visibility(eye: Vector3) -> void:
+	for entry in _backdrop_mountains:
+		var node: Node3D = entry.node
+		node.visible = not backdrop_hidden(eye, entry.box)
 
 # --- 小地图定位 -----------------------------------------------------------
 # 按住小地图 = 把镜头移到那个世界坐标；松手立刻回到英雄。
@@ -1966,6 +2011,10 @@ func _build_lane_edges() -> void:
 			# 俯视看就是桥面镶了一圈牙 —— 桥段的路缘石必须让位。
 			if _inside_bridge_window(float(stone.get("arc", 0.0)), windows):
 				continue
+			# 角落广场同理：广场面（0.075）压在路缘石顶（0.18）之下，
+			# 石头会从石面里冒出半截 —— 广场里的路缘石一律不铺。
+			if MapLayout.inside_corner_plaza(stone.pos):
+				continue
 			stones.append(stone)
 	if stones.is_empty():
 		return
@@ -1990,13 +2039,15 @@ func _build_lane_edges() -> void:
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(instance)
 
+# 路缘石要给谁让位：中路的桥面（桥有自己的护栏）。
+# 边路 2026-10-28 起没有桥了 —— 角落改由广场铺石，广场里的路缘石在
+# _build_lane_edges 里按 inside_corner_plaza 单独剔除。
+# 以前这里也给边路跨河点开窗口，拆桥之后那个窗口会把广场外 5 米的路缘石一起剃掉，
+# 留下一条没有石沿的路。
 func _bridge_arc_windows(lane: String, path: Array) -> Array:
 	var entries: Array = []
 	if lane == "mid":
 		entries.append({"center": Vector2.ZERO, "half": BRIDGE_SPAN_MID * 0.5})
-	for crossing in MapLayout.lane_river_crossings():
-		if str(crossing.lane) == lane:
-			entries.append({"center": crossing.pos, "half": BRIDGE_SPAN_EDGE * 0.5})
 	var windows: Array = []
 	var total := LaneRoad.path_length(path)
 	for entry in entries:
@@ -2105,9 +2156,99 @@ __OUTSIDE_APPLY__
 	river.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(river)
 
+	# 2026-10-28：边路的两个跨河角落改成**整块铺石**（玩家：「把这个角落全部铺上……
+	# 不需要那个桥」）。角落桥不再建 —— 广场已经把跨河段整段盖住，
+	# 桥的护栏/桥墩/接坡留在广场底下反而会露出半截。
 	_build_bridge("mid", Vector2.ZERO, BRIDGE_SPAN_MID)
-	for crossing in MapLayout.lane_river_crossings():
-		_build_bridge(str(crossing.lane), crossing.pos, BRIDGE_SPAN_EDGE)
+	_build_corner_plazas()
+
+# 角落广场：两个空角落整块铺石（数据在 MapLayout.corner_plazas()）。
+#
+# 为什么广场面比路面高 2cm（0.075 对 0.055）：广场要盖住路面和河面，
+# 只有压在路面之上才读得出「路从石台上过」；和桥面用同一个高度，
+# 于是传送阵的抬升量（BRIDGE_DECK_Y + 0.02）两边通用。
+#
+# 为什么要裙板：广场内沿跨在水面上，没有裙板就是「一块悬空石板」——
+# 和桥裙板同一个 bug、同一套口径（沉到 BRIDGE_SKIRT_BOTTOM，水面 -0.42 以下）。
+#
+# 材质关掉背面剔除：广场只有 6 个面片，省下的三角形远不如「绕序写反 → 整块看不见」
+# 的风险值钱（桥面是几百段连续带，才必须逐面较真绕序）。
+func _build_corner_plazas() -> void:
+	var plazas: Array = MapLayout.corner_plazas()
+	if plazas.is_empty():
+		return
+	var material := _bridge_deck_material()
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.uv1_scale = Vector3(1, 1, 1)
+	for index in plazas.size():
+		var plaza: Dictionary = plazas[index]
+		var low: Vector2 = plaza.min
+		var high: Vector2 = plaza.max
+		var deck := MeshInstance3D.new()
+		# 名字即接口：测试靠 CornerPlaza* 数广场、验「跨河点落在广场上」「广场够到墙脚」。
+		deck.name = "CornerPlaza_%d" % index
+		deck.mesh = _plaza_deck_mesh(low, high)
+		deck.material_override = material
+		ModelUtils.enable_shadows(deck, true)
+		deck.set_meta("corner", plaza.corner)
+		_props_root.add_child(deck)
+		var skirt := MeshInstance3D.new()
+		skirt.name = "corner_plaza_skirt_%d" % index
+		skirt.mesh = _plaza_skirt_mesh(low, high)
+		skirt.material_override = material
+		ModelUtils.enable_shadows(skirt, true)
+		_props_root.add_child(skirt)
+
+func _plaza_deck_mesh(low: Vector2, high: Vector2) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# 与 lane_road.ribbon 同一套绕序约定：相机在上方，几何法线朝下 = 正面。
+	var corners := [
+		Vector3(low.x, BRIDGE_DECK_Y, low.y),
+		Vector3(high.x, BRIDGE_DECK_Y, low.y),
+		Vector3(high.x, BRIDGE_DECK_Y, high.y),
+		Vector3(low.x, BRIDGE_DECK_Y, high.y),
+	]
+	var span := high - low
+	# 每 4 米重复一次 cliff 贴图：uv1_scale 是 1，靠 UV 自己控制密度。
+	var uvs := [
+		Vector2(0.0, 0.0),
+		Vector2(span.x * 0.25, 0.0),
+		Vector2(span.x * 0.25, span.y * 0.25),
+		Vector2(0.0, span.y * 0.25),
+	]
+	for triangle in [[0, 1, 2], [0, 2, 3]]:
+		for corner in triangle:
+			st.set_normal(Vector3.UP)
+			st.set_uv(uvs[corner])
+			st.add_vertex(corners[corner])
+	return st.commit()
+
+func _plaza_skirt_mesh(low: Vector2, high: Vector2) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var corners := [low, Vector2(high.x, low.y), high, Vector2(low.x, high.y)]
+	for index in 4:
+		var a: Vector2 = corners[index]
+		var b: Vector2 = corners[(index + 1) % 4]
+		var segment := a.distance_to(b)
+		if segment < 0.0001:
+			continue
+		var direction := (b - a) / segment
+		var outward := Vector2(direction.y, -direction.x)
+		var normal := Vector3(outward.x, 0.0, outward.y)
+		var quad := [
+			Vector3(a.x, BRIDGE_DECK_Y, a.y),
+			Vector3(b.x, BRIDGE_DECK_Y, b.y),
+			Vector3(a.x, BRIDGE_SKIRT_BOTTOM, a.y),
+			Vector3(b.x, BRIDGE_SKIRT_BOTTOM, b.y),
+		]
+		var quad_uv := [Vector2(0, 1), Vector2(1, 1), Vector2(0, 0), Vector2(1, 0)]
+		for corner in [0, 1, 2, 1, 3, 2]:
+			st.set_normal(normal)
+			st.set_uv(Vector2(quad_uv[corner].x * segment * LaneRoad.UV_PER_METER, quad_uv[corner].y))
+			st.add_vertex(quad[corner])
+	return st.commit()
 
 func _build_bridge(label: String, center: Vector2, span: float) -> void:
 	# 桥面沿**看得见的那条兵线**走：边路的跨河点正好压在上路的圆角上，
@@ -2511,10 +2652,16 @@ func _build_map_features() -> void:
 		var pad_color := Color(0.4, 0.82, 0.92)
 		# 盘半径走 MapLayout 的唯一真身：传送判定用的是同一个数，
 		# 画大 / 画小都会变成「看着在阵里、按了没反应」。
-		_add_map_disc(pad.pos, MapLayout.PAD_DISC_RADIUS, Color(pad_color.r, pad_color.g, pad_color.b, 0.2), pad_color)
-		# 图腾柱留在盘沿内侧（2.8 < 3.0）：再往外会被挤进兵线路缘
-		# —— 阵盘离路缘只有 1.25 米，柱子一探出去就长在柏油上。
-		_add_map_totem(pad.pos + Vector2(0.0, -2.8), 2.6, pad_color)
+		# 高度必须压在广场面**之上**：阵落在角落广场里，广场面 y = BRIDGE_DECK_Y(0.075)，
+		# 沿用野区那套 0.04 会被广场整个盖住 —— 阵还在，画面上什么都没有。
+		_add_map_disc(
+			pad.pos, MapLayout.PAD_DISC_RADIUS,
+			Color(pad_color.r, pad_color.g, pad_color.b, 0.2), pad_color,
+			BRIDGE_DECK_Y + 0.02
+		)
+		# 图腾柱朝角落里立（离阵心 4.2 米，在阵盘 3.0 之外）：
+		# 站在广场上、不压阵眼，也不立在路面正中挡小兵。
+		_add_map_totem(pad.pos + Vector2(pad.get("totem", Vector2(0.0, -2.8))), 2.6, pad_color)
 
 # 岩脊单块：fit_scene 先把高度对齐，再在水平方向拉伸成更宽的岩块。
 # 不能直接给 fit_scene 传 max_width：Rock.glb 本身高瘦，按宽度封顶会把它压矮。
@@ -2711,7 +2858,9 @@ func _build_boundary_walls() -> void:
 	# 移动端关掉，边界基座和墙端石仍会投影，足够接地。
 	_flush_rock_batch("boundary_rocks", rock_scene, stone, not OS.has_feature("mobile"))
 
-func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> void:
+# 贴地圆盘（营地 / 首领坑 / 传送阵）。base_y 默认压在草地上（草地 0.0、路面 0.022）；
+# 传送阵现在坐在角落桥上（桥面 y = BRIDGE_DECK_Y），必须显式抬高，否则整块被桥面盖住。
+func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color, base_y := 0.04) -> void:
 	var disc_material := StandardMaterial3D.new()
 	disc_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	disc_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -2724,7 +2873,7 @@ func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> voi
 	cylinder.radial_segments = 40
 	disc.mesh = cylinder
 	disc.material_override = disc_material
-	disc.position = Vector3(pos.x, 0.04, pos.y)
+	disc.position = Vector3(pos.x, base_y, pos.y)
 	disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(disc)
 	var ring := MeshInstance3D.new()
@@ -2740,7 +2889,7 @@ func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> voi
 	ring_material.emission = edge
 	ring_material.emission_energy_multiplier = 0.9
 	ring.material_override = ring_material
-	ring.position = Vector3(pos.x, 0.07, pos.y)
+	ring.position = Vector3(pos.x, base_y + 0.03, pos.y)
 	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(ring)
 	# 内环：一道边环的实心圆片读成「地上的一滩水」，两道同心环才读成「法阵」。
@@ -2759,7 +2908,7 @@ func _add_map_disc(pos: Vector2, radius: float, fill: Color, edge: Color) -> voi
 	inner_material.emission = edge
 	inner_material.emission_energy_multiplier = 0.5
 	inner.material_override = inner_material
-	inner.position = Vector3(pos.x, 0.065, pos.y)
+	inner.position = Vector3(pos.x, base_y + 0.025, pos.y)
 	inner.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(inner)
 
@@ -2925,52 +3074,14 @@ func _build_grass_tufts() -> void:
 func _build_scenery() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20261022
-	var pine: PackedScene = load(ENV_DIR + "Resource_PineTree_Group.glb")
-	var broadleaf: PackedScene = load(ENV_DIR + "Resource_Tree_Group.glb")
-	var single_tree: PackedScene = load(ENV_DIR + "Resource_Tree1.glb")
+	# 玩家要求地图内不放树：树只是布景，却会把兵线、野区和草丛挡得看不清。
+	# 岩石与远山保留，地形轮廓仍然成立。
 	var rock_group: PackedScene = load(ENV_DIR + "Rock_Group.glb")
 	var rock_single: PackedScene = load(ENV_DIR + "Rock.glb")
 	var mountains: Array[PackedScene] = [
 		load(ENV_DIR + "Mountain_Group_1.glb"),
 		load(ENV_DIR + "Mountain_Group_2.glb"),
 	]
-
-	for i in 52:
-		var angle := rng.randf_range(0.0, TAU)
-		var radius := rng.randf_range(25.0, 68.0)
-		var pos := Vector2(cos(angle), sin(angle)) * radius
-		if _lane_distance(pos) < 9.0 or _base_distance(pos) < 24.0 or _river_distance(pos) < 10.0:
-			continue
-		if not _feature_clear(pos, 2.0):
-			continue
-		var scene: PackedScene = pine if i % 3 != 1 else broadleaf
-		var height := rng.randf_range(7.0, 12.5)
-		var tree := ModelUtils.fit_scene(scene, height, height * 1.1)
-		tree.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 0.15, pos.y)
-		tree.rotation.y = rng.randf_range(0.0, TAU)
-		ModelUtils.tint(tree, Color(0.16, 0.28, 0.14), 0.45)
-		ModelUtils.enable_shadows(tree, false)
-		_props_root.add_child(tree)
-		if i % 8 == 7:
-			await _next_frame()
-
-	for i in 18:
-		var angle := rng.randf_range(0.0, TAU)
-		var radius := rng.randf_range(24.0, 58.0)
-		var pos := Vector2(cos(angle), sin(angle)) * radius
-		if _lane_distance(pos) < 8.0 or _base_distance(pos) < 22.0 or _river_distance(pos) < 8.0:
-			continue
-		if not _feature_clear(pos, 2.0):
-			continue
-		var height := rng.randf_range(5.0, 8.0)
-		var tree := ModelUtils.fit_scene(single_tree, height, height * 0.8)
-		tree.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 0.15, pos.y)
-		tree.rotation.y = rng.randf_range(0.0, TAU)
-		ModelUtils.tint(tree, Color(0.18, 0.30, 0.15), 0.45)
-		ModelUtils.enable_shadows(tree, false)
-		_props_root.add_child(tree)
-		if i % 6 == 5:
-			await _next_frame()
 
 	for i in 16:
 		var angle := rng.randf_range(0.0, TAU)
@@ -3006,6 +3117,8 @@ func _build_scenery() -> void:
 		ModelUtils.tint(mountain, Color(0.20, 0.25, 0.31), 0.80)
 		ModelUtils.enable_shadows(mountain, false)
 		_props_root.add_child(mountain)
+		# 登记包围盒：相机钻进山体时由 _update_backdrop_visibility 整座隐藏。
+		_backdrop_mountains.append({"node": mountain, "box": ModelUtils.relative_aabb(mountain)})
 		if i % 4 == 3:
 			await _next_frame()
 
@@ -3031,9 +3144,13 @@ func _river_distance(point: Vector2) -> float:
 	# 与 TerrainBuilder.river_distance / MapIntel 同源：河道中心线是 x - y = 0。
 	return absf(point.x - point.y) * 0.70710678
 
-# 墙体/草丛/营地/首领坑/传送阵/边界墙周围留白，避免随机植被长进可交互区域。
+# 墙体/草丛/营地/首领坑/传送阵/角落广场/边界墙周围留白，避免随机植被长进可交互区域。
 func _feature_clear(point: Vector2, margin: float) -> bool:
 	if MapLayout.near_boundary(point, 2.5 + margin):
+		return false
+	# 角落广场是整块石面：树长在石板上比长在阵盘上更离谱。
+	# 广场外沿本来就吃掉了边界留白，这里按内沿外扩 margin 判。
+	if MapLayout.inside_corner_plaza(point, margin):
 		return false
 	var marks := MapView.map_marks()
 	for wall in marks.walls:
@@ -3203,6 +3320,12 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 			if int(candidate.get("id", -1)) == _local_entity_id:
 				viewer = candidate
 				break
+	# 范围圈只在敌方可攻击单位进圈时亮：先筛一遍，十几座结构复用同一份列表。
+	var ring_targets: Array = []
+	for unit in snapshot.get("entities", []):
+		var unit_type := str(unit.get("type", ""))
+		if unit_type == "minion" or unit_type == "hero":
+			ring_targets.append(unit)
 	for entity in snapshot.get("entities", []):
 		var entity_type := str(entity.get("type", ""))
 		if entity_type != "tower" and entity_type != "guard" and entity_type != "base":
@@ -3234,37 +3357,54 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 		if bar_mat and not is_equal_approx(float(record.get("ratio", -1.0)), ratio):
 			record["ratio"] = ratio
 			bar_mat.set_shader_parameter("ratio", ratio)
-		var range_mat: StandardMaterial3D = record.get("range_mat")
-		var band_mat: StandardMaterial3D = record.get("range_band_mat")
-		if range_mat != null or band_mat != null:
-			# 范围圈只在「红/蓝」切换时改材质。以前每帧无条件写 albedo/emission：
-			# 5v5 有 12 座建筑，每帧 12 次材质属性写会逼渲染端重建 uniform。
-			var warned := _range_ring_warned(entity, viewer)
-			if int(record.get("ring_warned", -1)) != (1 if warned else 0):
-				record["ring_warned"] = 1 if warned else 0
-				var ring_state := range_ring_state(entity, record.get("team_color", BLUE), viewer)
-				if range_mat != null:
-					range_mat.albedo_color = ring_state.color
-					range_mat.emission = ring_state.glow
-				if band_mat != null:
-					band_mat.albedo_color = Color(ring_state.glow.r, ring_state.glow.g, ring_state.glow.b, float(ring_state.color.a) * 0.45)
-					band_mat.emission = ring_state.glow
+		# 圈默认隐藏：敌方小兵/英雄进圈才亮，本地英雄在敌方塔下时转红。
+		var ring_state := range_ring_state(entity, record.get("team_color", BLUE), viewer, ring_targets)
+		var range_ring: MeshInstance3D = record.get("range_ring")
+		var range_band: MeshInstance3D = record.get("range_band")
+		var ring_visible := bool(ring_state.visible)
+		if range_ring != null:
+			range_ring.visible = ring_visible
+		if range_band != null:
+			range_band.visible = ring_visible
+		# 材质只在「隐藏/亮起/报警」切换时改。以前每帧无条件写 albedo/emission：
+		# 5v5 有 12 座建筑，每帧 12 次材质属性写会逼渲染端重建 uniform。
+		var tone := 2 if bool(ring_state.warned) else (1 if ring_visible else 0)
+		if int(record.get("ring_tone", -1)) != tone:
+			record["ring_tone"] = tone
+			var range_mat: StandardMaterial3D = record.get("range_mat")
+			var band_mat: StandardMaterial3D = record.get("range_band_mat")
+			if range_mat != null:
+				range_mat.albedo_color = ring_state.color
+				range_mat.emission = ring_state.glow
+			if band_mat != null:
+				band_mat.albedo_color = Color(ring_state.glow.r, ring_state.glow.g, ring_state.glow.b, float(ring_state.color.a) * 0.45)
+				band_mat.emission = ring_state.glow
 
-# 与 range_ring_state().warned 同一口径，但不分配 Dictionary；
-# 每帧每座建筑都要问一次，只为一个 bool 建字典不划算。
-static func _range_ring_warned(entity: Dictionary, viewer: Dictionary) -> bool:
-	if viewer.is_empty() or not bool(viewer.get("alive", false)):
-		return false
-	if str(viewer.get("team", "")) == str(entity.get("team", "")):
-		return false
+# 塔的范围圈只在「真的有可攻击目标」时显示：敌方小兵/英雄进入射程。
+# 口径与 TowerRules.select_target 一致 —— 自家单位和野怪（neutral）都不算，
+# 否则一圈蓝雾会因为自家兵线或路过一只野怪亮起来。
+static func range_ring_revealed(entity: Dictionary, entities: Array) -> bool:
+	var team := str(entity.get("team", ""))
+	var reach := float(entity.get("range", 8.0))
 	var structure_pos := Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0)))
-	var viewer_pos := Vector2(float(viewer.get("x", 0.0)), float(viewer.get("y", 0.0)))
-	return structure_pos.distance_to(viewer_pos) <= float(entity.get("range", 8.0))
+	for unit in entities:
+		var unit_type := str(unit.get("type", ""))
+		if unit_type != "minion" and unit_type != "hero":
+			continue
+		if not bool(unit.get("alive", false)):
+			continue
+		var unit_team := str(unit.get("team", ""))
+		if unit_team == team or unit_team == "neutral":
+			continue
+		var unit_pos := Vector2(float(unit.get("x", 0.0)), float(unit.get("y", 0.0)))
+		if structure_pos.distance_to(unit_pos) <= reach:
+			return true
+	return false
 
 # 防御塔范围圈的唯一判定入口。抽成纯函数是为了能被 headless 测到：
 # 半径必须取实体自己的 range（塔 8 / 双生塔 7 / 主堡 9），
-# 只有**敌方**塔在本地英雄踏入时才转红 —— 站在自家塔下不该满屏红光。
-static func range_ring_state(entity: Dictionary, team_color: Color, viewer: Dictionary) -> Dictionary:
+# 只有**敌方**塔在本地英雄踏入时才转红；没有敌方单位进圈时整圈隐藏。
+static func range_ring_state(entity: Dictionary, team_color: Color, viewer: Dictionary, entities: Array = []) -> Dictionary:
 	var attack_range := float(entity.get("range", 8.0))
 	var warned := false
 	if not viewer.is_empty() and bool(viewer.get("alive", false)):
@@ -3274,11 +3414,13 @@ static func range_ring_state(entity: Dictionary, team_color: Color, viewer: Dict
 			# 边界算在内：和塔的命中判定（中心距 <= range）保持一致，
 			# 否则会出现「圈还是蓝的，人已经在挨打」。
 			warned = structure_pos.distance_to(viewer_pos) <= attack_range
+	var revealed := warned or range_ring_revealed(entity, entities)
 	var glow: Color = TOWER_RING_WARN_COLOR if warned else team_color
-	var alpha := TOWER_RING_WARN_ALPHA if warned else TOWER_RING_IDLE_ALPHA
+	var alpha := TOWER_RING_WARN_ALPHA if warned else (TOWER_RING_ACTIVE_ALPHA if revealed else TOWER_RING_IDLE_ALPHA)
 	return {
 		"radius": attack_range,
 		"warned": warned,
+		"visible": revealed,
 		"glow": glow,
 		"color": Color(glow.r, glow.g, glow.b, alpha),
 	}
@@ -3307,6 +3449,64 @@ static func attack_fx_plan(event: Dictionary) -> Dictionary:
 		"super":
 			return {"mode": "melee", "radius": 0.14, "from_height": 0.95, "to_height": 0.85, "duration": 0.1}
 	return {"mode": "melee", "radius": 0.09, "from_height": 0.75, "to_height": 0.8, "duration": 0.07}
+
+# 英雄普攻表现配方（纯数据、无节点）。抽成静态纯函数，headless 才能断言
+# 「近战英雄挥刀光 / 远程英雄打弹道」「暴击只是同一刀更狠，不是另一个形态」。
+# 形态由 hero_defs 的 attack_range 分档，不另抄一份「谁是远程」的名单：
+# 改数值表时表现自动跟着走，不会出现「数值说她是射手、画出刀光」。
+static func hero_attack_fx_plan(hero_type: String, crit := false) -> Dictionary:
+	var reach := maxf(HeroDefs.attack_range(hero_type), 1.6)
+	var color := _hero_vfx_color(hero_type)
+	if crit:
+		# 暴击偏白偏亮：同一片刀光里，玩家要能一眼分出这一下更重。
+		color = color.lerp(Color(1.0, 0.97, 0.9), 0.45)
+	if reach < HERO_RANGED_REACH:
+		return {
+			"mode": "slash",
+			"color": color,
+			"reach": reach,
+			"arc": HERO_SLASH_ARC_DEG,
+			"height": HERO_SLASH_HEIGHT,
+			# 刀光半径是**比例**（×reach），弹道半径是**绝对米数** ——
+			# 两个键分开命名：同一个 "radius" 有两种量纲，下一个人一定会乘错。
+			"reach_ratio": HERO_SLASH_REACH_RATIO,
+			"duration": HERO_SLASH_DURATION,
+			"impact": 8 if crit else 5,
+			"shake": 0.06 if crit else 0.0,
+		}
+	return {
+		"mode": "shot",
+		"color": color,
+		"reach": reach,
+		"arc": 0.0,
+		"height": HERO_SHOT_HEIGHT,
+		"radius": HERO_SHOT_RADIUS,
+		"duration": HERO_SHOT_DURATION,
+		"impact": 4 if crit else 0,
+		"shake": 0.05 if crit else 0.0,
+	}
+
+# 刀光的几何：一片朝局部 +X 张开的新月带。外沿半径 1，内沿从 1 收到
+# HERO_SLASH_INNER，两端收成尖 —— 平口两端会读成「被切了一块扇形」。
+# 只建一次、12 个池节点共用；每个实例只改颜色 / 朝向 / 缩放。
+static func slash_mesh(segments := 18) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+	var half := deg_to_rad(HERO_SLASH_ARC_DEG * 0.5)
+	var steps := maxi(segments, 2)
+	for index in steps + 1:
+		var t := float(index) / float(steps)
+		var angle := -half + 2.0 * half * t
+		var pinch := sin(PI * t)
+		var inner := lerpf(1.0, HERO_SLASH_INNER, pow(pinch, 0.55))
+		var dir := Vector2(cos(angle), sin(angle))
+		st.set_normal(Vector3.UP)
+		st.set_uv(Vector2(t, 0.0))
+		st.add_vertex(Vector3(dir.x, 0.0, dir.y))
+		st.set_normal(Vector3.UP)
+		st.set_uv(Vector2(t, 1.0))
+		st.add_vertex(Vector3(dir.x * inner, 0.0, dir.y * inner))
+	return st.commit()
 
 func _create_structure_view(entity: Dictionary) -> Dictionary:
 	var team := str(entity.get("team", "blue"))
@@ -3533,6 +3733,8 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	range_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	range_ring.material_override = range_mat
 	range_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# 默认隐藏：等 _sync_structures 判定「有敌方小兵/英雄进圈」才亮。
+	range_ring.visible = false
 	root.add_child(range_ring)
 	# 参考图里的射程是一条又宽又柔的暖色光带，细环只负责把边界钉死。
 	var range_band := MeshInstance3D.new()
@@ -3554,6 +3756,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	band_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	range_band.material_override = band_mat
 	range_band.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	range_band.visible = false
 	root.add_child(range_band)
 	var fill := _add_structure_bar(root, bar_height, bar_width, team_color)
 	return {
@@ -3616,11 +3819,7 @@ func _process_events(events: Array) -> void:
 			hud.add_feed(str(banner.get("feed", "")), banner_color)
 		match str(event.get("type", "")):
 			"attack":
-				var attacker: UnitVisual = _views.get(int(event.get("hero", -1)))
-				if attacker:
-					attacker.play_attack()
-				if bool(event.get("crit", false)):
-					_trigger_hit_stop(0.045, 0.18)
+				_handle_hero_attack(event)
 			"hit":
 				_handle_hit_event(event)
 			"death":
@@ -3784,6 +3983,64 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 	var hit_stop := float(recipe.get("hit_stop", 0.0))
 	if hit_stop > 0.0:
 		_trigger_hit_stop(hit_stop, 0.3)
+
+# 英雄普攻：出手动作 + 刀光 / 弹道 + 命中火星。
+#
+# 三条必须写在这里的理由：
+# ① 事件自带起点与目标点，镜头外（或刚进视野）的普攻也照样有表现，
+#    不能挂在 _views 上，否则「看得见的才出手」；
+# ② 表现配方来自纯函数 hero_attack_fx_plan()，headless 能断言近战与远程不一样；
+# ③ 刀光从 _slash_pool 借，绝不在普攻路径上 new 网格/材质（硬规则 4）。
+func _handle_hero_attack(event: Dictionary) -> void:
+	var view: UnitVisual = _views.get(int(event.get("hero", -1)))
+	if view != null:
+		view.play_attack()
+	var crit := bool(event.get("crit", false))
+	# 顿帧必须排在「特效根节点还没建好」的早退之前：进场分帧构建期间
+	# 也会收到 attack 事件，手感不该因为没画完场景就丢掉。
+	if crit:
+		_trigger_hit_stop(0.045, 0.18)
+	if _effects_root == null:
+		return
+	# hero_type 由模拟层随事件下发（联机白名单里也有）：客机即使这一帧还没建好
+	# 英雄视图，也能按同一套配方画刀光。
+	var hero_type := str(event.get("hero_type", ""))
+	if hero_type == "" and view != null:
+		hero_type = view.hero_type
+	var plan := hero_attack_fx_plan(hero_type, crit)
+	var from_point := Vector2(float(event.get("x", 0.0)), float(event.get("y", 0.0)))
+	var aim_point := Vector2(float(event.get("aim_x", from_point.x)), float(event.get("aim_y", from_point.y)))
+	var direction := aim_point - from_point
+	# 贴脸出手时方向会退化（目标就压在自己身上）：退到 -Y，
+	# 避免画出一片朝零向量张开的刀光。
+	if direction.length() < 0.05:
+		direction = Vector2(0.0, -1.0)
+	direction = direction.normalized()
+	var color: Color = plan.get("color", GOLD)
+	var target := Vector3(aim_point.x, 0.85, aim_point.y)
+	if str(plan.get("mode", "slash")) == "slash":
+		_spawn_slash(
+			Vector3(from_point.x, float(plan.get("height", HERO_SLASH_HEIGHT)), from_point.y),
+			direction, color,
+			float(plan.get("reach", 2.0)) * float(plan.get("reach_ratio", HERO_SLASH_REACH_RATIO)),
+			float(plan.get("arc", HERO_SLASH_ARC_DEG)),
+			float(plan.get("duration", HERO_SLASH_DURATION))
+		)
+	else:
+		# 远程：从手部抛出、落点抬到胸口，箭矢/法球才不是贴着地面飞。
+		var hand := Vector3(from_point.x, float(plan.get("height", HERO_SHOT_HEIGHT)), from_point.y) \
+			+ Vector3(direction.x, 0.0, direction.y) * 0.55
+		_spawn_tracer(hand, target, color, float(plan.get("radius", HERO_SHOT_RADIUS)), float(plan.get("duration", HERO_SHOT_DURATION)))
+		# 枪口一圈小闪 + 四颗火星：只有一颗飞过去的小球时，玩家要靠「血掉了」
+		# 才反推自己出过手；小兵弹丸也是这么补的。
+		_spawn_ring(hand, color, 0.14, 0.55, 0.16, 0.7)
+		_spawn_particles(hand, color, 4, 1.6, 0.06, 0.16)
+	var impact := int(plan.get("impact", 0))
+	if impact > 0:
+		_spawn_particles(target, color.lerp(Color(1.0, 1.0, 1.0), 0.35), impact, 2.6, 0.07, 0.24)
+	var shake := float(plan.get("shake", 0.0))
+	if shake > 0.0:
+		_camera_shake = maxf(_camera_shake, shake)
 
 # 小兵普攻：先播出手动作，再画刀光/弹丸。事件自带坐标，镜头外也照样有表现。
 func _handle_minion_attack(event: Dictionary) -> void:
@@ -3990,6 +4247,22 @@ func _init_vfx_pools() -> void:
 		_effects_root.add_child(ring)
 		_ring_pool.append(ring)
 
+	# 英雄普攻刀光：12 片新月，5v5 同一秒十几次普攻也够；池空时抢占最老的。
+	# 网格只提交一次（slash_mesh），材质每个节点一份 —— 挥击要独立改透明度。
+	# 用普通混合（和塔光束/弹丸同一条理由）：叠加混合在亮石板、桥面上会被抬成纯白，
+	# 英雄谱系色（苍刃橙 / 墨鸦粉）就没了 —— 第一版实测就是一片白。
+	var slash_shape := slash_mesh()
+	for i in 12:
+		var slash := MeshInstance3D.new()
+		slash.mesh = slash_shape
+		var slash_mat := _make_fx_material(BaseMaterial3D.BLEND_MODE_MIX)
+		slash_mat.emission_energy_multiplier = 1.4
+		slash.material_override = slash_mat
+		slash.visible = false
+		slash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_effects_root.add_child(slash)
+		_slash_pool.append(slash)
+
 func _make_fx_material(blend := BaseMaterial3D.BLEND_MODE_ADD) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -4172,6 +4445,54 @@ func _spawn_beam(from: Vector3, to: Vector3, color: Color, duration: float) -> v
 		orb.queue_free()
 	)
 
+# 英雄普攻刀光：从池里借一片新月，按英雄朝向张开，边扫边淡出。
+#
+# 四个取舍：
+# ① 朝向：网格朝局部 +X 张开，绕 Y 转 yaw = atan2(-dir.y, dir.x) 才对准 `direction`
+#    （绕 Y 转 θ 后局部 +X 指向世界 (cosθ, 0, -sinθ)）；
+# ② 挥击感：把旋转从 yaw 扫到 yaw + arc*0.22，同时略放大 —— 静止一片弧读成「贴图」；
+# ③ 高度：放在胸口，不贴地：51° 俯角下贴地会被路面和血迹吃掉；
+# ④ 混合模式用 MIX 而不是 ADD：叠加混合在石板路 / 桥面上会被抬成一片白，
+#    和塔光束、小兵弹丸是同一个坑（见 _init_vfx_pools 里那两处注释）。
+func _spawn_slash(center: Vector3, direction: Vector2, color: Color, reach: float, arc_deg: float, duration: float) -> void:
+	if _effects_root == null:
+		return
+	var slot: Dictionary = take_particle_slot(_slash_pool, _slash_active)
+	if slot.is_empty():
+		return
+	var slash: MeshInstance3D = slot.get("node")
+	if bool(slot.get("stolen", false)):
+		var old_tween: Variant = slash.get_meta("tween", null)
+		if old_tween is Tween and (old_tween as Tween).is_valid():
+			(old_tween as Tween).kill()
+	var generation := int(slash.get_meta("generation", 0)) + 1
+	slash.set_meta("generation", generation)
+	var material := slash.material_override as StandardMaterial3D
+	material.albedo_color = Color(color.r, color.g, color.b, 0.95)
+	material.emission = color
+	var size := maxf(reach, 0.6)
+	var yaw := atan2(-direction.y, direction.x)
+	slash.position = center
+	slash.rotation = Vector3(0.0, yaw, 0.0)
+	slash.scale = Vector3.ONE * size
+	slash.visible = true
+	_slash_active.append(slash)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(slash, "rotation:y", yaw + deg_to_rad(maxf(arc_deg, 0.0) * 0.22), duration)
+	tween.tween_property(slash, "scale", Vector3.ONE * size * HERO_SLASH_GROW, duration)
+	tween.tween_property(material, "albedo_color:a", 0.0, duration)
+	tween.chain().tween_callback(func():
+		if not is_instance_valid(slash):
+			return
+		if int(slash.get_meta("generation", 0)) != generation:
+			return
+		slash.visible = false
+		_slash_active.erase(slash)
+		_slash_pool.append(slash)
+	)
+	slash.set_meta("tween", tween)
+
 # 小兵普攻弹道 / 近战刀光：从池里借一颗发光球飞向目标。
 # 近战用极短 duration（0.06~0.1s），看上去就是一道瞬时刀光。
 func _spawn_tracer(from: Vector3, to: Vector3, color: Color, radius: float, duration: float) -> void:
@@ -4253,7 +4574,9 @@ func _explosion(pos: Vector3, color: Color, amount: int) -> void:
 	_spawn_particles(pos, Color(1.0, 0.85, 0.55), int(amount * 0.5), 4.0, 0.1, 0.5)
 	_spawn_ring(Vector3(pos.x, 0.12, pos.z), color, 0.6, 4.5, 0.55)
 
-func _hero_vfx_color(hero_type: String) -> Color:
+# 英雄特效色：谱系色只认这几个英雄。static 是为了让纯函数
+# hero_attack_fx_plan() 也能取到同一份颜色（测试要断言「不同英雄颜色不同」）。
+static func _hero_vfx_color(hero_type: String) -> Color:
 	match hero_type:
 		"blade":
 			return Color(1.0, 0.72, 0.3)

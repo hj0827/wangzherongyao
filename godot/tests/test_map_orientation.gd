@@ -35,13 +35,13 @@ func test_bases_sit_on_opposite_corners_of_the_rotated_diagonal() -> void:
 	near(MapData.BLUE_BASE.y, -MapData.RED_BASE.y, EPS, "两基地 y 关于原点对称")
 
 func test_river_centre_line_is_x_minus_y() -> void:
-	# 河心线现在过 (46,46) 和 (-46,-46)。
+	# 河心线现在过 (46,46) 和 (-46,-46)，也就是两条边路 L 形拐角的跨河点。
 	#
-	# 这里原来拿「传送阵在河心线上」当证据 —— 那个契约已经改了：
-	# 法阵整盘挪到河**岸**上（阵盘漂在水面是上一版的真 bug）。
-	# 但河心线的朝向仍然可以用它们验：两座阵绕原点 180° 对称，
-	# 中点必然落在原点上、且各自到 y=x 的**有向**距离绝对值相等、符号相反。
-	# 也就是「这条线正好从两阵中间穿过」。河道之灵还在河心线上，继续直接验。
+	# 这里原来拿「传送阵在河心线两侧、有向距离异号」当证据 —— 那个契约已经改了：
+	# 两座阵 2026-10-28 挪到两个空角落的广场里，阵心 (∓52, ∓52) 正压在河心线上，
+	# 有向距离都是 0，异号断言自然不成立。河心线本身改用两条独立证据：
+	#   ① 两座阵绕原点 180° 对称 → 中点必然落在原点上；
+	#   ② 河道之灵仍在河心线上（a = 0）。
 	var pads: Array = MapLayout.TELEPORT_PADS
 	eq(pads.size(), 2, "两端各一座传送阵")
 	if pads.size() == 2:
@@ -50,8 +50,9 @@ func test_river_centre_line_is_x_minus_y() -> void:
 		var mid := (a + b) * 0.5
 		near(mid.x, 0.0, EPS, "两座传送阵的中点 x")
 		near(mid.y, 0.0, EPS, "两座传送阵的中点 y（河心线过原点）")
-		near(absf(a.x - a.y), absf(b.x - b.y), EPS, "两座阵到河心线的距离相等")
-		check((a.x - a.y) * (b.x - b.y) < 0.0, "两座阵分处河心线两侧")
+		# 阵心就在河心线上：两个空角落本来就在河道两端。
+		near(a.x - a.y, 0.0, EPS, "东南角阵心在河心线上")
+		near(b.x - b.y, 0.0, EPS, "西北角阵心在河心线上")
 	for spirit in MapLayout.RIVER_SPIRITS:
 		var s: Vector2 = spirit.pos
 		near(absf(s.x - s.y), 0.0, EPS, "河道之灵必须在河心线上：%s" % str(spirit.id))

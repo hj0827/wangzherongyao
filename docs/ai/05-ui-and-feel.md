@@ -135,6 +135,7 @@ godot --path godot --script res://tools/probe_hud_rects.gd
 | 伤害飘字 | `arena._spawn_damage_number()` | 只有数字；`amount >= 150` 金色，否则近白；上飘 0.9、0.65s 淡出 |
 | 命中粒子 | `_handle_hit_event()` | 英雄 10 颗，小兵/建筑 4 颗 |
 | 普攻特效 | `_handle_minion_attack()` / `_handle_structure_attack()` | 近战刀光、远程/炮车弹丸、塔的枪口闪光 + 淡出光束；走 `_tracer_pool` / `_lance_pool`，配方由纯函数 `attack_fx_plan()` 决定 |
+| 英雄普攻 | `_handle_hero_attack()` | 配方是纯函数 `hero_attack_fx_plan()`：攻击距离 < `HERO_RANGED_REACH`(4.0) 的近战英雄挥一片新月刀光（`_slash_pool`，12 片），远程英雄打一条弹道 + 枪口小闪；暴击只放大不改形态（更亮、火星更多、带一点震屏） |
 | 震屏 | `_camera_shake` + `_hit_stop` | 受击 `0.12`、坦克技能 `0.18`；顿帧触发时附加击退感 shake |
 | 顿帧 | `scripts/view/hit_stop_manager.gd` | 暴击/击杀/破塔/破盾/终局分别触发；只冻结表现层，模拟与网络照常 |
 | 范围环 | `_spawn_ring()` / `_flash_skill_range()` | 技能命中/施放时闪一次；触摸拖拽时由 `SkillIndicator` 实时绘制 |
@@ -333,6 +334,19 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 - 边界岩脊进深在 `-0.5 ~ +0.8` 米之间摆动，四角各压三块大岩，把直角吞掉；不再有等距壁柱和外挑压顶（`test_wall_look` 会拦住它们回来）。
 - 高度预算：野区 `WALL_TOP = 2.45`、边界 `BOUNDARY_TOP = 3.7`，相机安全边距按这两个值反解。
 - 野区岩脊按**真实顶点**校验：到墙心距离不超过 `0.8 + 0.55 + 0.06` 米，避免玩家穿进石头；边界岩脊最内缘留在 54.3 米外。
+
+**两个空角落：整块角落广场 + 一座传送阵（2026-10-28 第二版）**
+
+玩家看完第一版（阵压在角落桥正中）之后的要求：「把这个角落全部铺上，然后将这个传送阵放在最角落里面不需要那个桥」。于是：
+
+- **角落广场**：`MapLayout.corner_plazas()`（`CORNER_PLAZA_INNER = 40`、`CORNER_PLAZA_OUTER = 58.6`）。渲染层 `arena._build_corner_plazas()` 铺一块广场面 + 一圈落水的裙板，节点名 `CornerPlaza_<n>`。
+  - 内沿 40 必须**盖住上下路的跨河点**（跨河段最远到 `(43.1, 43.1)`）—— 角落桥已经拆掉（`_build_river` 只建中路桥），盖不住就是「一条土路悬在河面上」，`test_river_and_teleport::test_corner_plazas_pave_the_two_empty_corners` 与 `test_lane_edges::test_every_river_crossing_sits_on_solid_stone` 一起钉住。
+  - 外沿 58.6 塞进边界墙基座下面（墙内表面 58.0），墙脚不留缝。
+  - 广场面 `y = BRIDGE_DECK_Y (0.075)`，比路面最上层 `0.055` 高 2cm —— 广场里的路面被盖住，读成「路从石台上过」，不需要接坡。
+  - 广场里的**路缘石不铺**（石墩顶 0.18 会从石面里冒半截），随机布景也避让（`_feature_clear`）。
+- **传送阵**：`MapLayout.TELEPORT_PADS` 的阵心 `(∓52, ∓52)`，在广场最角落。约束：必须落在广场里、离地图角点 < 12 米、离可走边界至少留 1 米（可走上限 53.65）、两座绕原点 180° 对称且到两方基地**等距**（中立设施）。
+- 阵盘**必须抬高到广场面之上**：沿用 `_add_map_disc()` 的 `base_y`，传 `BRIDGE_DECK_Y + 0.02`；用野区那套 `0.04` 会被广场整个盖住（阵还在、画面上什么都没有）。
+- 图腾柱朝角落里立（离阵心 4.2 米，在阵盘 3.0 之外）。
 
 ---
 
