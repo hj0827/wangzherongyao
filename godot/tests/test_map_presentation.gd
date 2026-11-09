@@ -122,6 +122,50 @@ func test_arena_structure_view_marks_locked_tower() -> void:
 		check(not shield.visible, "unlocked tower hides shield")
 	arena.free()
 
+func test_map_scenery_ships_no_trees() -> void:
+	# 玩家要求地图里不放树：树只是布景，却会把兵线、野区和草丛挡得看不清。
+	# 源码级断言把「以后又加回来」也挡在门外（_build_scenery 带 await，headless 不便直接跑）。
+	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	check(not source.contains("Resource_PineTree_Group.glb"), "地图不再加载松树模型")
+	check(not source.contains("Resource_Tree_Group.glb"), "地图不再加载阔叶树模型")
+	check(not source.contains("Resource_Tree1.glb"), "地图不再加载单株树模型")
+	var start := source.find("func _build_scenery")
+	var end := source.find("func _lane_distance", start)
+	check(start >= 0 and end > start, "_build_scenery 要在")
+	if start >= 0 and end > start:
+		var body := source.substr(start, end - start)
+		check(not body.contains("tree"), "布景里不能再生成树")
+		check(body.contains("_props_root.add_child(rock)"), "岩石留着")
+		check(body.contains("_props_root.add_child(mountain)"), "远山留着")
+
+func test_backdrop_mountains_hide_when_the_camera_reaches_them() -> void:
+	# 玩家反馈：贴到地图下边缘并拉远镜头时，相机会钻进远山，
+	# 半个屏幕被岩壁糊住、英雄看不见。远山只是布景 —— 相机进入或贴近
+	# 山体包围盒时整座隐藏，离远后恢复（判定用 AABB 而不是中心点）。
+	var box := AABB(Vector3(-63.0, 8.6, -115.0), Vector3(62.0, 26.4, 63.0))
+	check(not Arena.backdrop_hidden(Vector3(0.0, 20.0, 0.0), box), "相机在地图中心时远山照常显示")
+	check(Arena.backdrop_hidden(Vector3(-19.0, 32.0, -76.0), box), "相机钻进山体时必须隐藏")
+	check(Arena.backdrop_hidden(Vector3(-19.0, 32.0, -58.0), box), "相机贴着山体近面也要隐藏")
+	check(not Arena.backdrop_hidden(Vector3(-19.0, 32.0, -20.0), box), "离得远就保持可见")
+
+func test_arena_toggles_backdrop_visibility_from_the_camera() -> void:
+	var arena: Node3D = Arena.new()
+	var mountain := Node3D.new()
+	arena.add_child(mountain)
+	arena._backdrop_mountains.append({
+		"node": mountain,
+		"box": AABB(Vector3(-63.0, 8.6, -115.0), Vector3(62.0, 26.4, 63.0)),
+	})
+	arena._update_backdrop_visibility(Vector3(-19.0, 32.0, -70.0))
+	check(not mountain.visible, "相机进山体时要把它关掉")
+	arena._update_backdrop_visibility(Vector3(0.0, 20.0, 0.0))
+	check(mountain.visible, "相机离远后要恢复")
+	# 「写好了但没人调用」的老坑：建图要登记远山，相机每帧要刷新显隐。
+	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	check(source.contains("_backdrop_mountains.append"), "建图时必须登记每一座远山")
+	check(source.contains("_update_backdrop_visibility(camera.global_position)"), "相机每帧要刷新远山显隐")
+	arena.free()
+
 func test_tower_model_is_slim_and_tall() -> void:
 	# 塔身太宽会把站在塔后的英雄整条盖住（玩家反馈「塔挡视野」）。
 	# 契约：视觉宽高比至少 2.8（细而尖），且血条必须悬在模型顶之上。

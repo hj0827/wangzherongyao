@@ -131,20 +131,82 @@ const RIVER_SPIRITS := [
 	{"id": "river_spirit_south", "pos": Vector2(30.0, 30.0), "name": "河道之灵"},
 ]
 
-# 传送阵：河道两岸各一座，互为对端；引导期间移动/施法/受击都会打断。
+# 传送阵：两座在地图的两个**空角落**，互为对端；引导期间移动/施法/受击都会打断。
 #
-# 2026-10-25 挪位：原来两座都在 (∓34, ∓34)，a = x - y = 0 —— 正压河心线，
-# 阵盘整个漂在水面上，中间还插一根图腾柱。水面能走，功能没坏，
-# 但俯视图上就是「两块浮在水里的塑料盘子」，而且是全图最显眼的两块。
+# 2026-10-28 第二版（玩家原话：「把这个角落全部铺上，然后将这个传送阵放在最角落里面
+# 不需要那个桥」）。第一版把阵压在角落桥桥面正中（±47.66），玩家看过之后要求：
+# 角落整块铺石、阵再往里挪、角落桥不要了。
 #
-# 现在整盘落在**河岸**上（盘半径 3.0，离水面 0.73 米、离兵线路缘 1.25 米，
-# 正好卡在水面与边路之间那条走廊的中线上 —— 探针 tools/probe_pad_sites.gd 量的）。
-# 两座用**绕地图中心 180°**（-p）配对，一队一座；用 mirror 配对会让两座
-# 都落在蓝方河岸（mirror 保持 a 不变），那和营地当初的错是同一个。
+# 现在的口径：
+#   - 两个空角落各铺一块**角落广场**（见下面的 CORNER_PLAZA_*），广场从 ±40 一直铺到
+#     边界墙脚，把上下路的跨河段整段盖住 —— 所以角落桥不再建（中路桥保留）；
+#   - 阵心 (∓52, ∓52)：比广场中心更靠角落，是「最角落里面」；
+#     可走边界是 |坐标| ≤ 53.65（BOUNDS 58 - 相机边距 3.8 - 英雄半径 0.55），
+#     所以阵心四周还有 1.65 米可站，人走得进去、按得下去；
+#   - 两座绕地图中心 180°（-p）配对，各自到两个基地的距离完全相等 —— 中立设施。
+#
+# 玩家视角：蓝方的小地图是整张转 180° 的（见 minimap.oriented），
+# 所以东南角那座显示在**左上**、西北角那座显示在**右下** —— 就是需求里的两个角。
+# 名字按世界轴取（城墙命名口径：north = -y、east = +x），不按某一队的屏幕方向取，
+# 否则换一边看，名字就和位置对不上了。
+#
+# 历史上的两次错，一并记在这里，免得下次再犯：
+#   ① 最初两座在 (∓34, ∓34)，a = x - y = 0，正压河心线，阵盘整个漂在水面上；
+#   ② 后来挪到河岸走廊中线 (∓42, ∓24)，两座分处两个半场，但离角落还很远。
+# totem 是图腾柱相对阵心的偏移：朝角落里，离阵心 4.2 米（在阵盘 3.0 之外），
+# 站在广场上、不立在路面也不立在水里。
 const TELEPORT_PADS := [
-	{"id": "river_pad_north", "pos": Vector2(-42.0, -24.0), "partner": "river_pad_south", "name": "北路传送阵"},
-	{"id": "river_pad_south", "pos": Vector2(42.0, 24.0), "partner": "river_pad_north", "name": "南路传送阵"},
+	{
+		"id": "corner_pad_southeast",
+		"pos": Vector2(52.0, 52.0),
+		"partner": "corner_pad_northwest",
+		"name": "东南角传送阵",
+		"totem": Vector2(2.97, 2.97),
+	},
+	{
+		"id": "corner_pad_northwest",
+		"pos": Vector2(-52.0, -52.0),
+		"partner": "corner_pad_southeast",
+		"name": "西北角传送阵",
+		"totem": Vector2(-2.97, -2.97),
+	},
 ]
+
+# --- 角落广场 ---------------------------------------------------------------
+# 两个空角落整块铺石（2026-10-28，玩家：「把这个角落全部铺上……不需要那个桥」）。
+#
+# 之前那里是「石桥 + 桥外一片水 + 一圈边界乱石」：斜俯视能看见桥与墙之间那个水窟窿。
+# 改成整块广场之后角落是一个完整石面，阵放到最角落，角落桥不再建。
+#
+# 几何口径（两条都被 test_river_and_teleport 钉住）：
+#   - INNER = 40：必须**盖住上下路的跨河点**。跨河段沿路 ±(桥长/2)=±6.4 米，
+#     最远到 (43.1, 43.1)，40 留出 3 米余量，拆桥之后路面不会悬在水上；
+#   - OUTER = 58.6：塞进边界墙基座下面（墙内表面 58.0），墙脚不留缝。
+# 两座按**角落符号**取（+1/+1 与 -1/-1），天然绕原点 180° 对称。
+const CORNER_PLAZA_INNER := 40.0
+const CORNER_PLAZA_OUTER := 58.6
+const CORNER_PLAZA_SIGNS := [Vector2(1.0, 1.0), Vector2(-1.0, -1.0)]
+
+static func corner_plazas() -> Array:
+	var plazas: Array = []
+	for sign_point in CORNER_PLAZA_SIGNS:
+		var corner: Vector2 = sign_point
+		var near_point := corner * CORNER_PLAZA_INNER
+		var far_point := corner * CORNER_PLAZA_OUTER
+		plazas.append({
+			"corner": corner,
+			"min": Vector2(minf(near_point.x, far_point.x), minf(near_point.y, far_point.y)),
+			"max": Vector2(maxf(near_point.x, far_point.x), maxf(near_point.y, far_point.y)),
+		})
+	return plazas
+
+# 点是否落在某块角落广场上（margin > 0 表示向外扩，给布景避让用）。
+static func inside_corner_plaza(point: Vector2, margin := 0.0) -> bool:
+	for plaza in corner_plazas():
+		if point.x >= float(plaza.min.x) - margin and point.x <= float(plaza.max.x) + margin \
+				and point.y >= float(plaza.min.y) - margin and point.y <= float(plaza.max.y) + margin:
+			return true
+	return false
 
 # --- 边界城墙 -------------------------------------------------------------
 # 模拟层用 collision.clamp_bounds 兜底（走到 ±(BOUNDS - radius) 就停），
@@ -284,8 +346,9 @@ static func wall_end_radius(point: Vector2) -> float:
 # 边路与河心线（y = x）的交点。
 #
 # 河道一直通到地图两端，而贴边的 L 形边路拐角必然压在河心线上 ——
-# 那个位置需要一座桥，否则路面就是一块悬在水面上的板子。
-# 渲染层按这个结果摆桥，测试按同一个结果验「桥真的压在跨河点上」。
+# 那个位置的路面必须落在石面上，否则就是一块悬在水面的板子。
+# 2026-10-28 起这两个跨河点由**角落广场**整块盖住（角落桥已拆，中路桥保留），
+# 所以现在这里同时是两个用途：广场的定位依据 + 测试量「跨河点有没有被石面盖住」。
 static func lane_river_crossings() -> Array:
 	var crossings: Array = []
 	for lane in ["top", "bottom"]:

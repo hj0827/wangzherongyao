@@ -144,11 +144,14 @@ func test_straight_runs_are_sampled_densely_enough_to_stay_straight() -> void:
 				var span := along[index] - along[index - 1]
 				lt(span, sampling_limit, "%s 路的 %s 边有 %.1f 米没有航点，拐角会把这段削成弧" % [lane, axis, span])
 
-func test_every_lane_gets_a_bridge_where_it_crosses_the_river() -> void:
+func test_every_river_crossing_sits_on_solid_stone() -> void:
 	# 边路贴边之后必然跨河：河道沿 y = x 一直通到地图两端，L 形边路的拐角
 	# 正好落在上面。如果那里只有一块悬在水上的路面，玩家看到的是
-	# 「一条土路横在河面上」。中路本来就有桥，上下路现在也必须各有一座 ——
-	# 而且桥心必须压在跨河点上，不能凭感觉摆。
+	# 「一条土路横在河面上」。
+	#
+	# 2026-10-28 变了兜底方式：玩家要求「把这个角落全部铺上……不需要那个桥」，
+	# 于是角落不再建桥，改由**角落广场**整块盖住跨河段。契约本身没变：
+	# 每一个跨河点都必须落在石面上（桥面或广场面），不能是悬空路面。
 	var crossings: Array = MapLayout.lane_river_crossings()
 	eq(crossings.size(), 2, "上下路各有一个跨河点")
 	var arena := Arena.new()
@@ -156,26 +159,36 @@ func test_every_lane_gets_a_bridge_where_it_crosses_the_river() -> void:
 	arena.add_child(arena._props_root)
 	arena.call("_build_river")
 	var bridges := 0
+	var plazas := 0
 	for child in arena._props_root.get_children():
-		if str(child.name).begins_with("Bridge"):
+		var node_name := str(child.name)
+		if node_name.begins_with("Bridge"):
 			bridges += 1
-	eq(bridges, 3, "三路各一座桥：中路 + 上路 + 下路")
+		elif node_name.begins_with("CornerPlaza"):
+			plazas += 1
+	eq(bridges, 1, "只剩中路一座桥：边路跨河改由角落广场铺石")
+	eq(plazas, 2, "两个空角落各一块广场")
 	for crossing in crossings:
 		var covered := false
 		for child in arena._props_root.get_children():
-			if str(child.name).begins_with("Bridge") and _bridge_covers(child, crossing.pos):
+			var node_name := str(child.name)
+			if not (node_name.begins_with("Bridge") or node_name.begins_with("CornerPlaza")):
+				continue
+			if _bridge_covers(child, crossing.pos):
 				covered = true
 				break
-		check(covered, "%s 路的跨河点没有落在任何桥面上 —— 那里就是一块悬空的路面" % str(crossing.lane))
-	# 桥不能穿出边界墙：边桥中心离墙只有 10 米出头，桥面贴着兵线走之后任何一角都不能顶进墙里。
+		check(covered, "%s 路的跨河点没有落在任何石面上 —— 那里就是一块悬空的路面" % str(crossing.lane))
+	# 桥和广场都不能穿出边界墙：桥面贴边，广场外沿本身就塞在墙基座下面。
+	# 允许到墙心线（BOUNDARY_CENTER）为止 —— 再往外就顶穿墙身了。
 	for child in arena._props_root.get_children():
 		var node_name := str(child.name)
-		if node_name != "Bridge" and not node_name.begins_with("Bridge_"):
+		if not (node_name.begins_with("Bridge") or node_name.begins_with("CornerPlaza")):
 			continue
 		var node := child as MeshInstance3D
+		var limit := MapLayout.boundary_inner() - 0.5 if node_name.begins_with("Bridge") else MapLayout.BOUNDARY_CENTER
 		for vertex in _bridge_vertices(node):
 			var corner := Vector2(vertex.x, vertex.z)
-			lt(maxf(absf(corner.x), absf(corner.y)), MapLayout.boundary_inner() - 0.5,
+			lt(maxf(absf(corner.x), absf(corner.y)), limit,
 				"%s 的角点 (%s) 顶进了边界墙" % [node_name, str(corner)])
 	arena.free()
 
@@ -230,9 +243,25 @@ func test_edge_lanes_keep_clear_of_objectives_and_camps() -> void:
 				closest = minf(closest, (point as Vector2).distance_to(pit.pos))
 			gt(closest, float(pit.radius) + float(MapData.LANE_HALF_WIDTH) + 0.5,
 				"%s 路压到了首领坑 %s" % [lane, str(pit.id)])
-		for pad in MapLayout.TELEPORT_PADS:
+
+func test_pads_sit_off_the_lane_deep_in_the_corner() -> void:
+	# 传送阵与兵线的关系在 2026-10-28 经历了第二版：
+	#   ① 河岸走廊（离路远，但离角落也远）；
+	#   ② 角落桥正中（压在跨河点上，兵线从阵上穿过）；
+	#   ③ 现在是**角落广场的最角落**：广场把路面盖在下面，兵线在阵旁边的石台上走。
+	# 所以这条要守的是「阵不能盖到路面上去」——广场面比路面高 2cm，
+	# 阵盘压在路面上就是「石台上一块会走位的地砖」，视觉和判定都乱。
+	for pad in MapLayout.TELEPORT_PADS:
+		var from_lane := MapLayout.distance_to_lanes(pad.pos) - MapData.LANE_HALF_WIDTH
+		gt(from_lane, 0.0, "%s 的阵心不能落在兵线路面上（离路缘 %.2f 米）" % [str(pad.id), from_lane])
+		# 每个阵只属于一条边路的拐角 —— 另一条在对面角落，离它几十米远。
+		var far_lane := ""
+		var far := 0.0
+		for lane in ["top", "bottom"]:
 			var closest := INF
-			for point in samples:
+			for point in _samples(str(lane)):
 				closest = minf(closest, (point as Vector2).distance_to(pad.pos))
-			gt(closest, 3.0 + float(MapData.LANE_HALF_WIDTH) + 0.5,
-				"%s 路压到了传送阵 %s" % [lane, str(pad.id)])
+			if closest > far:
+				far = closest
+				far_lane = str(lane)
+		gt(far, 40.0, "%s 不该同时贴两条边路（对面那条 %s 只有 %.1f 米）" % [str(pad.id), far_lane, far])

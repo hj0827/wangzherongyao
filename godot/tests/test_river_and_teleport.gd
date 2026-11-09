@@ -122,38 +122,92 @@ func test_river_snapshot_and_network_carry_reveals() -> void:
 		eq(result.snapshot.river.reveals.blue.size(), 1, "河道视野保留")
 		near(float(result.snapshot.river.reveals.blue[0].radius), 16.0, 0.001, "视野半径保留")
 
-func test_teleport_pads_pair_across_river() -> void:
+func test_corner_plazas_pave_the_two_empty_corners() -> void:
+	# 2026-10-28（玩家：「把这个角落全部铺上……不需要那个桥」）：
+	# 两个空角落整块铺石，角落桥拆掉。三条硬约束：
+	#   ① 广场必须盖住上下路的跨河点 —— 桥没了，那里只剩广场兜底，
+	#      盖不住就是「一条土路悬在河面上」；
+	#   ② 广场外沿必须够到边界墙内表面 —— 差一截就是墙脚一条水缝；
+	#   ③ 两座绕原点 180° 对称（公平性）。
+	var plazas: Array = MapLayout.corner_plazas()
+	eq(plazas.size(), 2, "两个空角落各一块广场")
+	var crossings: Array = MapLayout.lane_river_crossings()
+	eq(crossings.size(), 2, "上下路各有一个跨河点")
+	for plaza in plazas:
+		# 外沿越靠外，绝对值越大：取两块顶点里更靠墙的那个。
+		gt(maxf(absf(float(plaza.min.x)), absf(float(plaza.max.x))), MapLayout.boundary_inner() - 0.5,
+			"广场必须铺到墙脚，否则墙根留一条水缝")
+		gt(maxf(absf(float(plaza.min.y)), absf(float(plaza.max.y))), MapLayout.boundary_inner() - 0.5,
+			"广场必须铺到墙脚，否则墙根留一条水缝")
+	for crossing in crossings:
+		check(MapLayout.inside_corner_plaza(crossing.pos),
+			"%s 路的跨河点必须落在角落广场里（桥拆了，这里只剩广场兜底）" % str(crossing.lane))
+
+	# 只验「跨河点」是不够的：跨河点落在广场上、但广场内沿切进水面时，
+	# 路面仍然会从水上方伸出去一截（把 INNER 改成 46 就是这样，跨河点 47.66 照样在广场里）。
+	# 所以逐个采样兵线：**凡是在水面上方的路面点，都必须落在广场里**。
+	for lane in ["top", "bottom"]:
+		var paved := 0
+		for sample in _lane_samples(str(lane), 0.5):
+			var a := absf(sample.x - sample.y)
+			if a > MapData.RIVER_HALF_WIDTH - 0.5:
+				continue
+			if maxf(absf(sample.x), absf(sample.y)) < 30.0:
+				continue
+			check(MapLayout.inside_corner_plaza(sample),
+				"%s 路在水面上的路面点 %s 没有铺到广场里 —— 桥拆了之后那里是悬空路面" % [str(lane), str(sample)])
+			paved += 1
+		gt(float(paved), 0.0, "%s 路必须真的有一段跨在河上（否则这条断言是空的）" % str(lane))
+
+	# 对称：两块广场互为 180° 取反。
+	var first: Dictionary = plazas[0]
+	var second: Dictionary = plazas[1]
+	near(float(first.min.x), -float(second.max.x), 0.01, "两座广场 x 对称")
+	near(float(first.min.y), -float(second.max.y), 0.01, "两座广场 y 对称")
+
+# 兵线逐 0.5 米采样（跨河段要按采样点量，只看航点会正好跳过水面）。
+func _lane_samples(lane: String, step: float) -> Array:
+	var points: Array = []
+	var path: Array = MapData.lane_path(lane)
+	for index in range(path.size() - 1):
+		var a: Vector2 = path[index]
+		var b: Vector2 = path[index + 1]
+		var length := a.distance_to(b)
+		var count := maxi(int(ceil(length / step)), 1)
+		for i in count:
+			points.append(a.lerp(b, float(i) / float(count)))
+	return points
+
+func test_teleport_pads_sit_deep_in_the_two_corners() -> void:
 	var pads: Array = MapLayout.TELEPORT_PADS
-	eq(pads.size(), 2, "河道两端各一座传送阵")
+	eq(pads.size(), 2, "地图的两个空角落各一座传送阵")
 	var first: Dictionary = pads[0]
 	var second: Dictionary = Teleport.partner_of(str(first.id))
 	check(not second.is_empty(), "传送阵能查到对端")
 	if not second.is_empty():
 		eq(str(Teleport.partner_of(str(second.id)).get("id", "")), str(first.id), "对端关系双向")
-		# 对称口径是**绕地图中心 180°**（-p），不是 y=-x 镜像。
-		# 和营地犯过的是同一个错：mirror 保持 a = x - y 不变，也就是「同一队的半场」。
-		# 用 mirror 配对的结果是两座阵都落在蓝方河岸 —— 红方要过河才能用，
-		# 而这种不对称在俯视图上根本看不出来（两侧各有一座，位置还"挺对称"）。
+		# 对称口径仍然是**绕地图中心 180°**（-p），不是 y=-x 镜像。
+		# 和营地犯过的是同一个错：mirror 会把两座阵都放到同一侧。
 		check((second.pos as Vector2).distance_to(-(first.pos as Vector2)) < 0.01, "两座传送阵绕地图中心 180° 对称")
-		check(
-			signf((second.pos as Vector2).x - (second.pos as Vector2).y)
-				!= signf((first.pos as Vector2).x - (first.pos as Vector2).y),
-			"两座传送阵分处两个半场（a = x - y 异号）"
-		)
+
+	# 2026-10-28 第二版的位置契约（玩家：「将这个传送阵放在最角落里面」）：
+	#   ① 阵心在角落广场里 —— 广场铺到墙脚，阵才有地方站；
+	#   ② 阵心必须真的靠角落：离地图角点不超过 12 米（旧两版分别是 30+ 和 14.6）；
+	#   ③ 阵心必须还站得进去：可走边界 = BOUNDS - 相机边距 - 英雄半径 = 53.65，
+	#      至少留 1 米余量，否则「看得见阵、走不进去」；
+	#   ④ 两座都是中立设施（到两方基地等距）。
+	var walk_limit := MapData.BOUNDS - MapData.CAMERA_WALL_MARGIN - 0.55
 	for pad in pads:
 		var point: Vector2 = pad.pos
-		var from_river := absf(point.x - point.y) * 0.70710678 - MapData.RIVER_HALF_WIDTH
-		check(
-			from_river - MapLayout.PAD_DISC_RADIUS > 0.3,
-			"传送阵盘必须整块落在岸上（离水面 %.2f 米）" % (from_river - MapLayout.PAD_DISC_RADIUS)
-		)
-		# 阵盘也不能压兵线路面：3 厘米厚的实心圆盘盖到柏油上是「贴地塑料片」，
-		# 而且会和路面 z-fighting。
-		var from_lane := MapLayout.distance_to_lanes(point) - MapData.LANE_HALF_WIDTH
-		check(
-			from_lane - MapLayout.PAD_DISC_RADIUS > 0.3,
-			"传送阵盘不压兵线路面（离路缘 %.2f 米）" % (from_lane - MapLayout.PAD_DISC_RADIUS)
-		)
+		check(MapLayout.inside_corner_plaza(point), "%s 必须落在角落广场上" % str(pad.id))
+		var map_corner := Vector2(signf(point.x) * MapData.BOUNDS, signf(point.y) * MapData.BOUNDS)
+		lt(point.distance_to(map_corner), 12.0,
+			"%s 要放在最角落（离地图角点 %.2f 米）" % [str(pad.id), point.distance_to(map_corner)])
+		lt(maxf(absf(point.x), absf(point.y)), walk_limit - 1.0,
+			"%s 必须还给英雄留出走路余量（可走上限 %.2f）" % [str(pad.id), walk_limit])
+		var to_blue := point.distance_to(MapData.BLUE_BASE)
+		var to_red := point.distance_to(MapData.RED_BASE)
+		near(to_blue, to_red, 0.01, "传送阵是中立设施：到两方基地距离必须相等")
 		# 阵心本身要能站人：有墙的地方点不进去，阵就永远用不了。
 		check(not Collision.is_blocked(point, 0.55), "阵心可以站人")
 		check(not Teleport.pad_at(point).is_empty(), "站在阵内能识别传送阵")
@@ -179,10 +233,12 @@ func test_vegetation_keeps_a_canopy_clearance_around_every_pad() -> void:
 		)
 		# 反向对照：远在树冠之外的点至少有一部分是能长东西的 ——
 		# 否则上面的断言只是「这个函数永远返回 false」，等于什么都没测。
+		# 扫描半径取 30 米：阵现在在角落广场里，广场 + 边界留白会把 12 米的环整个吃掉，
+		# 那一圈上「能不能长东西」全都只能是 false，测不出这个函数有没有坏。
 		var clear := 0
 		for i in 36:
 			var angle := TAU * float(i) / 36.0
-			var ring := point + Vector2(cos(angle), sin(angle)) * (MapLayout.PAD_DISC_RADIUS + MapLayout.PAD_CANOPY_CLEARANCE + 6.0)
+			var ring := point + Vector2(cos(angle), sin(angle)) * 30.0
 			if bool(arena.call("_feature_clear", ring, 2.0)):
 				clear += 1
 		gt(float(clear), 0.0, "阵外远处必须还有能长布景的地方：%s" % str(pad.id))
@@ -204,12 +260,18 @@ func test_random_props_keep_clear_of_the_pads() -> void:
 			not arena._feature_clear(rim, 1.0),
 			"阵盘边缘不能长树：%s" % str(pad.id)
 		)
-	# 反例：阵外 8 米必须有布景自由，否则等于把整片野区的植被都关了。
-	check(
-		arena._feature_clear(MapLayout.TELEPORT_PADS[0].pos + Vector2(0.0, 8.0), 0.0)
-			or arena._feature_clear(MapLayout.TELEPORT_PADS[0].pos + Vector2(8.0, 0.0), 0.0),
-		"阵外仍然允许布景"
-	)
+	# 反例：阵外远处必须有布景自由，否则等于把整片野区的植被都关了。
+	# 不写死偏移方向，也不贴着小圈扫：阵挪进角落广场之后，
+	# 阵周 12 米内全是广场石面和墙脚留白，「能不能长东西」永远只能 false。
+	# 扫一圈 30 米：桥外、野区里仍然必须允许布景。
+	var clear := 0
+	for index in 24:
+		var angle := TAU * float(index) / 24.0
+		var probe: Vector2 = MapLayout.TELEPORT_PADS[0].pos \
+			+ Vector2(cos(angle), sin(angle)) * 30.0
+		if arena._feature_clear(probe, 0.0):
+			clear += 1
+	gt(float(clear), 0.0, "阵外仍然允许布景")
 	arena.free()
 
 func test_teleport_channels_to_partner_and_starts_cooldown() -> void:
