@@ -74,6 +74,9 @@ func test_w_and_r_emit_renderable_payload() -> void:
 	var red: Dictionary = sim.get_hero_by_player("p2")
 	red["pos"] = (blue["pos"] as Vector2) + Vector2(2.0, 0.0)
 	sim.consume_events()
+	# 项 2：大招出生未学习，先学上再验"W/R 都产出渲染请求"。
+	# 本用例测的是特效透传，解锁门槛由 test_skill_levels.gd 专门钉。
+	blue["skill_r_level"] = 1
 	SkillSystem.cast_skill(blue, "w", red["pos"], sim)
 	SkillSystem.cast_skill(blue, "r", red["pos"], sim)
 	var requests: Array = SkillFx.requests(sim.consume_events())

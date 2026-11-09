@@ -26,7 +26,18 @@ const FIRST_WAVE_DELAY := 1.0
 const MINION_AGGRO_RANGE := 5.5
 const STRUCTURE_RANGE := 8.0
 const BASE_RANGE := 9.0
-const MAX_LEVEL := 15
+const MAX_LEVEL := HeroDefs.MAX_LEVEL
+# --- 技能等级化（项 2，差距文档 §3.2）-------------------------------------
+# 规则常量的真身在 HeroDefs（sim 与 net_protocol 都 preload 它，两边引用同一组），
+# 这里只做别名，方便 sim 内部读起来顺手。绝不在这两处各写一个数字。
+# Q/W/E 出生 1 级、上限 6 级；R 出生 0 级 = 未学习、上限 3 级。
+# 用 0 而不是"1 级但锁住"：后者会出现「等级 1 却放不出来」的歧义状态，
+# 伤害公式 damage_grow * (level - 1) 还要额外解释一次。
+const MAX_SKILL_LEVEL_NORMAL := HeroDefs.MAX_SKILL_LEVEL_NORMAL
+const MAX_SKILL_LEVEL_ULT := HeroDefs.MAX_SKILL_LEVEL_ULT
+# 大招三档的学习门槛（对标王者 4/7/10）。索引 = 目标等级 - 1。
+const ULT_UNLOCK_LEVELS := HeroDefs.ULT_UNLOCK_LEVELS
+const SKILL_SLOTS := HeroDefs.SKILL_SLOTS
 # 助攻判定窗口：和击杀归属用的是同一个 10 秒口径（见 _kill_entity 的分支 2），
 # 两处不一致会出现「算他击杀、却不给旁边那个一起打的人助攻」。
 const ASSIST_WINDOW := 10.0
@@ -48,6 +59,32 @@ const REVEAL_AFTER_COMBAT := 1.5
 # 比野外脱战回血快 7 倍，且不需要等 8 秒脱战计时。
 const FOUNTAIN_HP_RATE := 0.18
 const FOUNTAIN_MP_RATE := 0.15
+
+# --- 战斗属性（项 1，差距文档 §3.1）--------------------------------------
+# 减伤公式：有效伤害 = raw * K / (K + resist)。resist = K 时恰好减半。
+# K 定在 100：与王者口径一致，护甲 100 免 50%。resist=0 时乘子恒等 1.0，
+# 因此小兵 / 塔 / 旧实体的伤害逐位不变（survivability 里锚死的 near 靠这条不红）。
+const MATCH_MITIGATION_K := 100.0
+# 冷却缩减上限 40%（对标王者），与蓝 buff（×0.8）叠乘。
+const CDR_CAP := 0.4
+# 攻速加成上限（+250%），防止极端叠攻速把普攻间隔压成 0。
+const ATTACK_SPEED_CAP := 2.5
+
+# 有效普攻间隔 = 基础间隔 / (1 + 攻速加成)。缺字段（小兵/塔/野怪/旧实体）恒等原值。
+static func hero_attack_interval(unit: Dictionary) -> float:
+	var base := float(unit.get("attack_interval", 1.0))
+	if base <= 0.0:
+		return base
+	var bonus := float(unit.get("attack_speed", 0.0))
+	if float(unit.get("passive_as_timer", 0.0)) > 0.0:
+		bonus += float(unit.get("passive_as_bonus", 0.0))
+	bonus = clampf(bonus, 0.0, ATTACK_SPEED_CAP)
+	return base / (1.0 + bonus)
+
+# 技能冷却最终系数 = 蓝buff缩放 ×(1 - 钳制后的 CDR)。实例方法，SkillSystem 通过 sim 调用。
+func hero_cooldown_scale(hero: Dictionary) -> float:
+	var cdr := clampf(float(hero.get("cooldown_reduction", 0.0)), 0.0, CDR_CAP)
+	return Jungle.cooldown_scale(hero) * (1.0 - cdr)
 
 const SPAWN_OFFSETS := [0.0, -22.0, 22.0, -44.0, 44.0]
 
@@ -177,6 +214,23 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"attack_damage": float(hero_def.attack_damage),
 		"attack_range": float(hero_def.attack_range),
 		"attack_interval": float(hero_def.attack_interval),
+		# 战斗属性（项 1）。出生值 = 该英雄的基础值；装备与被动只改这些字段，
+		# 结算侧永远从字段读，不再写死常量。
+		"armor": float(hero_def.get("armor", 0.0)),
+		"magic_resist": float(hero_def.get("magic_resist", 0.0)),
+		"base_armor": float(hero_def.get("armor", 0.0)),
+		"base_magic_resist": float(hero_def.get("magic_resist", 0.0)),
+		"cooldown_reduction": 0.0,
+		"attack_speed": 0.0,
+		"base_attack_speed": float(hero_def.get("attack_speed", 0.0)),
+		"crit_damage": 1.5,
+		"base_crit_damage": 1.5,
+		"hp_regen": float(hero_def.get("hp_regen", 0.0)),
+		"mana_regen": float(hero_def.get("mana_regen", 0.0)),
+		"base_hp_regen": float(hero_def.get("hp_regen", 0.0)),
+		"base_mana_regen": float(hero_def.get("mana_regen", 0.0)),
+		"passive_as_bonus": 0.0,
+		"passive_as_timer": 0.0,
 		"attack_cd": 0.0,
 		"kills": 0,
 		"deaths": 0,
@@ -195,6 +249,12 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"skill_w_cd": 0.0,
 		"skill_e_cd": 0.0,
 		"skill_r_cd": 0.0,
+		# 技能等级（项 2）。q/w/e 出生已学 1 级，r 出生 0 级 = 未学习。
+		"skill_q_level": 1,
+		"skill_w_level": 1,
+		"skill_e_level": 1,
+		"skill_r_level": 0,
+		"skill_points": 0,
 		"summoner_spell": "flash",
 		"summoner_cd": 0.0,
 		"attack_mode": "default",
@@ -394,6 +454,9 @@ func set_input(player_id: String, input: Dictionary) -> void:
 			next["buy_item"] = previous["buy_item"]
 		if int(next.get("sell_slot", -1)) < 0 and int(previous.get("sell_slot", -1)) >= 0:
 			next["sell_slot"] = int(previous["sell_slot"])
+		# 加点同理（项 2）：一条移动输入不能把还没被消费的 upgrade_slot 冲掉。
+		if str(next.get("upgrade_slot", "")) == "" and str(previous.get("upgrade_slot", "")) != "":
+			next["upgrade_slot"] = previous["upgrade_slot"]
 	inputs[player_id] = next
 
 func set_player_controller(owner_id: String, controller: String) -> void:
@@ -616,12 +679,20 @@ func _update_hero_timers(dt: float) -> void:
 			entity.shield = 0.0
 		entity.haste_timer = maxf(0.0, float(entity.haste_timer) - dt)
 		entity.slow_timer = maxf(0.0, float(entity.slow_timer) - dt)
+		# 翎羽被动的攻速窗口（项 1.4b）：窗口过了必须把加成清零，否则
+		# passive_as_bonus 变成永久 35% 攻速——字段在、计时也在走、但没人收账，
+		# 是这一类静默失效的标准形态（对照护盾 shield_timer 归零清 shield）。
+		entity.passive_as_timer = maxf(0.0, float(entity.get("passive_as_timer", 0.0)) - dt)
+		if float(entity.passive_as_timer) <= 0.0:
+			entity.passive_as_bonus = 0.0
 		entity["revealed_timer"] = maxf(0.0, float(entity.get("revealed_timer", 0.0)) - dt)
 		if not entity.alive:
 			continue
-		entity.mp = minf(float(entity.max_mp), float(entity.mp) + FIELD_MP_REGEN * dt)
+		# 回复属性化（项 1.6）：基础值 + 装备/被动给的 hp_regen / mana_regen。
+		# 属性默认 0，所以旧单位逐位不变；泉水仍是独立的百分比通道，不受影响。
+		entity.mp = minf(float(entity.max_mp), float(entity.mp) + (FIELD_MP_REGEN + float(entity.get("mana_regen", 0.0))) * dt)
 		if float(entity.hp) < float(entity.max_hp) and float(state.time) - float(entity.last_damage_time) > 8.0:
-			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * FIELD_HP_REGEN * dt)
+			entity.hp = minf(float(entity.max_hp), float(entity.hp) + (float(entity.max_hp) * FIELD_HP_REGEN + float(entity.get("hp_regen", 0.0))) * dt)
 		# 泉水：站在己方基地范围内快速回满，不必等脱战计时。
 		if _in_fountain(entity):
 			entity.hp = minf(float(entity.max_hp), float(entity.hp) + float(entity.max_hp) * FOUNTAIN_HP_RATE * dt)
@@ -646,9 +717,12 @@ func _apply_human_inputs(dt: float) -> void:
 		var seq := int(input.get("seq", 0))
 		var buy_item_id := str(input.get("buy_item", ""))
 		var sell_slot := int(input.get("sell_slot", -1))
+		# 项 2：加点是离散意图，和购买一样"取走即清"，否则下一条纯移动输入会重放它。
+		var upgrade_slot := str(input.get("upgrade_slot", ""))
 		# 意图只消费一次：否则 set_input 的合并逻辑会把旧购买带进下一个输入序列。
 		input["buy_item"] = ""
 		input["sell_slot"] = -1
+		input["upgrade_slot"] = ""
 		if seq > int(entity.get("last_input_seq", -1)):
 			entity["last_input_seq"] = seq
 		# 购买走可靠通道，可能与不可靠的移动输入乱序，所以用独立的购买序号去重，
@@ -663,6 +737,10 @@ func _apply_human_inputs(dt: float) -> void:
 				})
 			if sell_slot >= 0 and ItemShop.sell_item(entity, sell_slot):
 				_emit("sold", {"hero": entity.id, "sell_slot": sell_slot})
+		# 加点与移动同包走不可靠通道，不需要购买那套独立序号去重；
+		# spend_skill_point 内部已保证"被拒不吞点"，重复投递最多是空转一次。
+		if upgrade_slot != "":
+			spend_skill_point(entity, upgrade_slot)
 		if move.length() > 1.0:
 			move = move.normalized()
 		if _tick_channels(entity, input, dt):
@@ -874,9 +952,11 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 	if target.is_empty():
 		return false
 	hero.mp = float(hero.mp) - float(skill.cost)
-	hero.skill_q_cd = float(skill.cooldown) * Jungle.cooldown_scale(hero)
+	hero.skill_q_cd = float(skill.cooldown) * hero_cooldown_scale(hero)
 	var kind := str(skill.kind)
-	var damage: float = float(skill.damage) + float(hero.attack_damage) * 0.5 + float(hero.level - 1) * 8.0
+	var dtype := str(skill.get("damage_type", "physical"))
+	# 项 2：技能基础伤害走"表值 + damage_grow*(技能等级-1)"，与 W/R 路径同一个函数真身。
+	var damage: float = HeroDefs.scaled_damage(hero, "q") + float(hero.attack_damage) * 0.5 + float(hero.level - 1) * 8.0
 	hero.facing = (target.pos - hero.pos).normalized()
 	_emit("skill", {
 		"slot": "q",
@@ -900,11 +980,11 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 			if entity.type != "hero" and entity.type != "minion" and entity.type != "monster":
 				continue
 			if entity.pos.distance_to(target.pos) <= radius:
-				_damage(entity, damage, hero)
+				_damage(entity, damage, hero, dtype)
 				if kind == "slow":
 					entity.slow_timer = maxf(float(entity.get("slow_timer", 0.0)), 2.5)
 	else:
-		_damage(target, damage, hero)
+		_damage(target, damage, hero, dtype)
 	return true
 
 func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
@@ -938,9 +1018,10 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 				continue
 			if entity.pos.distance_to(target.pos) <= 3.0:
 				entity.slow_timer = maxf(float(entity.get("slow_timer", 0.0)), 2.5)
-				_damage(entity, float(skill.damage), hero)
+				# 项 2：E 的伤害也走等级缩放，与 Q/W/R 同源。
+				_damage(entity, HeroDefs.scaled_damage(hero, "e"), hero, str(skill.get("damage_type", "magic")))
 	hero.mp = float(hero.mp) - float(skill.cost)
-	hero.skill_e_cd = float(skill.cooldown) * Jungle.cooldown_scale(hero)
+	hero.skill_e_cd = float(skill.cooldown) * hero_cooldown_scale(hero)
 	_emit("skill", {
 		"slot": "e",
 		"hero": hero.id,
@@ -1004,12 +1085,12 @@ func _try_attack(hero: Dictionary) -> void:
 				return
 		else:
 			return
-	hero.attack_cd = float(hero.attack_interval)
+	hero.attack_cd = hero_attack_interval(hero)
 	hero.facing = (target.pos - hero.pos).normalized()
 	var damage: float = float(hero.attack_damage)
 	var crit := float(hero.get("crit_rate", 0.0)) > 0.0 and _next_random() < float(hero.get("crit_rate", 0.0))
 	if crit:
-		damage *= 1.5
+		damage *= float(hero.get("crit_damage", 1.5))
 	_emit("attack", {
 		"hero": hero.id,
 		"x": float(hero.pos.x),
@@ -1018,7 +1099,7 @@ func _try_attack(hero: Dictionary) -> void:
 		"aim_y": float(target.pos.y),
 		"crit": crit,
 	})
-	_damage(target, damage, hero)
+	_damage(target, damage, hero, "physical")
 	# 被动挂在真实普攻命中上：英雄详情里的描述与实战数值必须同源。
 	SkillSystem.on_hero_attack_hit(hero, target, self)
 
@@ -1036,6 +1117,8 @@ func _update_respawns(dt: float) -> void:
 			entity.shield_timer = 0.0
 			entity.haste_timer = 0.0
 			entity.slow_timer = 0.0
+			entity.passive_as_timer = 0.0
+			entity.passive_as_bonus = 0.0
 			entity.last_damage_time = -999.0
 			entity.last_attacker_id = -1
 			entity.last_attacker_time = -999.0
@@ -1043,16 +1126,16 @@ func _update_respawns(dt: float) -> void:
 			entity.last_hero_attacker_time = -999.0
 			_emit("respawn", {"hero": entity.id, "x": float(entity.pos.x), "y": float(entity.pos.y)})
 
-func apply_damage(entity_id: int, amount: float, source_id: int = -1) -> void:
+func apply_damage(entity_id: int, amount: float, source_id: int = -1, damage_type := "physical") -> void:
 	var target: Dictionary = _entity_by_id(entity_id)
 	if target.is_empty() or not target.alive:
 		return
 	var source: Dictionary = {}
 	if source_id >= 0:
 		source = _entity_by_id(source_id)
-	_damage(target, amount, source)
+	_damage(target, amount, source, damage_type)
 
-func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
+func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type := "physical") -> void:
 	if target.is_empty() or not target.alive or amount <= 0.0:
 		return
 	# 调试无敌：只挡伤害，不挡仇恨。塔和小兵仍然会锁定他，
@@ -1078,6 +1161,22 @@ func _damage(target: Dictionary, amount: float, source: Dictionary) -> void:
 			incoming *= PVE_HERO_DAMAGE_SCALE
 	if not source.is_empty() and str(source.get("type", "")) == "hero":
 		incoming *= Jungle.damage_scale(source) * Objectives.damage_scale(state, str(source.get("team", "")))
+	# —— 分型减伤（项 1，验收表 1.1/1.2）——
+	# 有效伤害 = incoming * K / (K + resist)，resist=K 减半。
+	# 只对英雄生效：小兵/塔/野怪没有抗性字段，维持"原样结算"，
+	#   兵线互殴与推塔节奏因此逐位不变（survivability 锚死的 near 靠这条不红）。
+	# 真实伤害（终结）不读任何抗性。resist=0 时乘子恒等 1.0 = 旧减法。
+	if target.type == "hero":
+		var resist := 0.0
+		match damage_type:
+			"physical":
+				resist = maxf(0.0, float(target.get("armor", 0.0)))
+			"magic":
+				resist = maxf(0.0, float(target.get("magic_resist", 0.0)))
+			_:
+				resist = 0.0
+		if resist > 0.0:
+			incoming *= MATCH_MITIGATION_K / (MATCH_MITIGATION_K + resist)
 	# 交手即暴露：草丛里的英雄一出手/一挨打就短暂显形，否则回放里会出现
 	# 「血条自己掉、伤害来源不可见」的诡异画面。
 	if target.type == "hero" and not source.is_empty() and str(source.get("team", "")) != str(target.get("team", "")):
@@ -1424,10 +1523,63 @@ func _add_xp(hero: Dictionary, amount: float) -> void:
 		ItemShop.recalculate_stats(hero)
 		hero.hp = minf(float(hero.max_hp), float(hero.hp) + float(hero_def.hp_growth))
 		hero.mp = minf(float(hero.max_mp), float(hero.mp) + float(hero_def.mp_growth))
+		# 项 2：每升 1 级给 1 点技能点。1 级（出生）不给，所以发点数发生在升级之后。
+		hero.skill_points = int(hero.get("skill_points", 0)) + 1
+		if bool(config.get("auto_skill_points", true)):
+			_auto_spend(hero)
 		_emit("level_up", {"hero": hero.id, "level": hero.level})
 
 func _xp_needed(level: int) -> float:
 	return 120.0 + float(level - 1) * 90.0
+
+# --- 技能等级化（项 2）-----------------------------------------------------
+
+# 某个技能槽位的等级上限：大招 3 级，其余 6 级。
+static func skill_cap(slot: String) -> int:
+	return MAX_SKILL_LEVEL_ULT if slot == "r" else MAX_SKILL_LEVEL_NORMAL
+
+# 学/升大招需要的英雄等级：0→1 要 4 级，1→2 要 7 级，2→3 要 10 级。
+# 普通技能不设英雄等级门槛（点数本身受等级约束，攒不满就点不动），
+# 只有大招需要，因为"4 级解锁大招"是 MOBA 的核心节奏器。
+static func ult_require_level(current_r_level: int) -> int:
+	if current_r_level < 0 or current_r_level >= ULT_UNLOCK_LEVELS.size():
+		return 9999
+	return int(ULT_UNLOCK_LEVELS[current_r_level])
+
+# 花 1 点技能点升某个槽位。返回 false 时**绝不消耗点数**（非法请求不能吞点）。
+func spend_skill_point(hero: Dictionary, slot: String) -> bool:
+	if hero.is_empty() or not SKILL_SLOTS.has(slot):
+		return false
+	if int(hero.get("skill_points", 0)) <= 0:
+		return false
+	var lv := HeroDefs.skill_level(hero, slot)
+	if lv >= skill_cap(slot):
+		return false
+	if slot == "r" and int(hero.get("level", 1)) < ult_require_level(lv):
+		return false
+	hero["skill_%s_level" % slot] = lv + 1
+	hero["skill_points"] = int(hero.get("skill_points", 0)) - 1
+	_emit("skill_upgrade", {"hero": hero.get("id", -1), "slot": slot, "level": lv + 1})
+	return true
+
+# 自动加点：按英雄预设的逐等级表点技能。表里第 i 项对应"升到 i+2 级"那一次。
+# 表项非法（撞上限/门槛）时退回到"点当前等级最低且合法的技能"，
+# 保证点数不会凭空消失 —— 那正是"点数被吞且不报错"的静默失效形态。
+func _auto_spend(hero: Dictionary) -> void:
+	if int(hero.get("skill_points", 0)) <= 0:
+		return
+	var plan: Array = HeroDefs.get_hero(str(hero.get("hero_type", "blade"))).get("skill_plan", [])
+	var index := int(hero.get("level", 1)) - 2
+	if index >= 0 and index < plan.size():
+		if spend_skill_point(hero, str(plan[index])):
+			return
+	for slot in SKILL_SLOTS:
+		if int(hero.get("skill_points", 0)) <= 0:
+			return
+		if HeroDefs.skill_level(hero, slot) < skill_cap(slot):
+			spend_skill_point(hero, slot)
+			return
+
 
 func _entity_by_id(entity_id: int) -> Dictionary:
 	for entity in state.entities:
@@ -1592,6 +1744,13 @@ func _snapshot_board() -> Dictionary:
 			"max_hp": float(entity.get("max_hp", 0.0)),
 			"speed": float(entity.get("speed", 0.0)),
 			"crit_rate": float(entity.get("crit_rate", 0.0)),
+			# 防御与成长属性（项 1，链路 3）：详情面板要回答"他扛不扛得住"。
+			# 与坐标无关，属于公开战报，不构成透视。
+			"armor": float(entity.get("armor", 0.0)),
+			"magic_resist": float(entity.get("magic_resist", 0.0)),
+			"cooldown_reduction": float(entity.get("cooldown_reduction", 0.0)),
+			"attack_speed": float(entity.get("attack_speed", 0.0)),
+			"crit_damage": float(entity.get("crit_damage", 1.5)),
 			"alive": alive,
 			"respawn_timer": 0.0 if alive else float(entity.get("respawn_timer", 0.0)),
 			"inventory": inventory.duplicate(),
@@ -1688,6 +1847,12 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["skill_w_cd"] = float(entity.get("skill_w_cd", 0.0))
 		data["skill_e_cd"] = float(entity.skill_e_cd)
 		data["skill_r_cd"] = float(entity.get("skill_r_cd", 0.0))
+		# 项 2：技能等级与剩余点数进快照，否则客机技能按钮永远显示未学习（不报错）。
+		data["skill_q_level"] = HeroDefs.skill_level(entity, "q")
+		data["skill_w_level"] = HeroDefs.skill_level(entity, "w")
+		data["skill_e_level"] = HeroDefs.skill_level(entity, "e")
+		data["skill_r_level"] = HeroDefs.skill_level(entity, "r")
+		data["skill_points"] = int(entity.get("skill_points", 0))
 		data["summoner_cd"] = float(entity.get("summoner_cd", 0.0))
 		data["summoner_spell"] = str(entity.get("summoner_spell", "flash"))
 		data["gold"] = int(entity.get("gold", 0))
@@ -1695,6 +1860,14 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["inventory"] = (entity.get("inventory", []) as Array).duplicate()
 		data["ability_power"] = float(entity.get("ability_power", 0.0))
 		data["crit_rate"] = float(entity.get("crit_rate", 0.0))
+		# 战斗属性（项 1，链路 3）：漏一个键 = HUD/详情永远读到默认值且不报错。
+		data["armor"] = float(entity.get("armor", 0.0))
+		data["magic_resist"] = float(entity.get("magic_resist", 0.0))
+		data["cooldown_reduction"] = float(entity.get("cooldown_reduction", 0.0))
+		data["attack_speed"] = float(entity.get("attack_speed", 0.0))
+		data["crit_damage"] = float(entity.get("crit_damage", 1.5))
+		data["hp_regen"] = float(entity.get("hp_regen", 0.0))
+		data["mana_regen"] = float(entity.get("mana_regen", 0.0))
 		data["speed"] = float(entity.speed)
 		data["shield"] = float(entity.shield)
 		data["facing_x"] = float(facing.x)

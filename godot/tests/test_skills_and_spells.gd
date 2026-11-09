@@ -66,6 +66,9 @@ func test_cast_skill_w_and_r_spends_mana_and_starts_cooldown() -> void:
 	lt(float(blue.get("mp", 0.0)), mp_before, "mana spent on w")
 	
 	var mp_after_w: float = float(blue.get("mp", 0.0))
+	# 项 2：大招出生未学习（skill_r_level=0），先学上再验"施法扣蓝进 CD"。
+	# 解锁门槛本身由 test_skill_levels.gd 专门钉，这里不重复测。
+	blue["skill_r_level"] = 1
 	var ok_r: bool = SkillSystem.cast_skill(blue, "r", target_pos, sim)
 	check(ok_r, "cast r should succeed")
 	gt(float(blue.get("skill_r_cd", 0.0)), 0.0, "skill r enters cooldown")

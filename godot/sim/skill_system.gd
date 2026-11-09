@@ -55,6 +55,11 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 		return false
 	var skill: Dictionary = hero_def[slot]
 	var cd_key := "skill_%s_cd" % slot
+	# 项 2：大招必须先"学"才能放。skill_r_level 出生 0 = 未学习，
+	# 自动/手动方案都只在英雄 4 级时才把它点到 1，所以这里判等级就等价于判解锁。
+	# 放在扣蓝/进 CD 之前：锁定时绝不能有副作用（否则空按一次就把蓝和 CD 吃掉）。
+	if slot == "r" and HeroDefs.skill_level(hero, "r") <= 0:
+		return false
 	if float(hero.get(cd_key, 0.0)) > 0.0:
 		return false
 	var cost: float = float(skill.get("cost", 0.0))
@@ -62,11 +67,21 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 		return false
 
 	hero["mp"] = float(hero.get("mp", 0.0)) - cost
-	hero[cd_key] = float(skill.get("cooldown", 5.0)) * Jungle.cooldown_scale(hero)
-	
-	var damage: float = float(skill.get("damage", 0.0))
+	# CDR（项 1.3）：冷却 = 基础 × 蓝buff缩放 × (1-CDR)。CDR 上限与钳制都在 sim 侧，
+	# 这里通过 sim 的实例方法取最终系数，规则只有一个真身。
+	if sim != null and sim.has_method("hero_cooldown_scale"):
+		hero[cd_key] = float(skill.get("cooldown", 5.0)) * sim.hero_cooldown_scale(hero)
+	else:
+		hero[cd_key] = float(skill.get("cooldown", 5.0)) * Jungle.cooldown_scale(hero)
+
+	# 项 2：W/R 走 skill_system，Q/E 走 match_sim，两条路径必须读同一个 scaled_damage，
+	# 否则"只有一半技能会随等级成长"且不报错。
+	var damage: float = HeroDefs.scaled_damage(hero, slot)
 	if damage > 0.0:
 		damage += float(hero.get("ability_power", 0.0)) * 0.3
+	# 伤害分型（项 1.2）：法师的技能是 magic，其余默认 physical；
+	# 缺字段（历史数据/手工构造的字典）按 physical，与旧"不分型"行为连续。
+	var dtype := str(skill.get("damage_type", "physical"))
 	var range_val: float = float(skill.get("range", 5.0))
 	var kind: String = str(skill.get("kind", ""))
 	var hero_pos: Vector2 = hero.get("pos", Vector2.ZERO)
@@ -74,7 +89,7 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 
 	match kind:
 		"spin":
-			_apply_aoe_damage(hero, hero_pos, range_val, damage, sim)
+			_apply_aoe_damage(hero, hero_pos, range_val, damage, sim, dtype)
 		"dash":
 			# 纯位移型（苍刃 E「疾风步」）：向前冲一段，不造成伤害。
 			var dash_dir: Vector2 = (aim - hero_pos).normalized()
@@ -85,7 +100,7 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 			var dash_dest: Vector2 = Collision.move(hero_pos, hero_pos + dash_dir * dash_dist, float(hero.get("radius", 0.55)))
 			hero["pos"] = dash_dest
 			if damage > 0.0:
-				_apply_aoe_damage(hero, dash_dest, 1.8, damage, sim)
+				_apply_aoe_damage(hero, dash_dest, 1.8, damage, sim, dtype)
 		"shield":
 			# 自身护盾型（铁壁 E「守护壁垒」）：护盾值随技能等级/法强线性走。
 			var shield_gain: float = 320.0 + float(skill.get("damage", 0.0)) + float(hero.get("ability_power", 0.0)) * 0.5
@@ -105,7 +120,7 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 			if dir == Vector2.ZERO:
 				dir = facing
 			hero["facing"] = dir
-			_apply_line_damage(hero, hero_pos, dir, range_val, damage, sim, 2.0)
+			_apply_line_damage(hero, hero_pos, dir, range_val, damage, sim, 2.0, dtype)
 		"charge":
 			var dir: Vector2 = (aim - hero_pos).normalized()
 			if dir == Vector2.ZERO:
@@ -114,39 +129,39 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 			var target_pos: Vector2 = hero_pos + dir * range_val
 			target_pos = Collision.move(hero_pos, target_pos, float(hero.get("radius", 0.55)))
 			hero["pos"] = target_pos
-			_apply_aoe_damage(hero, target_pos, 2.5, damage, sim)
+			_apply_aoe_damage(hero, target_pos, 2.5, damage, sim, dtype)
 		"aoe_shot":
 			var target_pos: Vector2 = aim
 			if (target_pos - hero_pos).length() > range_val:
 				target_pos = hero_pos + (target_pos - hero_pos).normalized() * range_val
-			_apply_aoe_damage(hero, target_pos, 2.8, damage, sim)
+			_apply_aoe_damage(hero, target_pos, 2.8, damage, sim, dtype)
 		"leap_slam":
 			var target_pos: Vector2 = aim
 			if (target_pos - hero_pos).length() > range_val:
 				target_pos = hero_pos + (target_pos - hero_pos).normalized() * range_val
 			target_pos = Collision.move(hero_pos, target_pos, float(hero.get("radius", 0.55)))
 			hero["pos"] = target_pos
-			_apply_aoe_damage(hero, target_pos, 3.2, damage, sim)
+			_apply_aoe_damage(hero, target_pos, 3.2, damage, sim, dtype)
 		"meteor_storm":
 			var target_pos: Vector2 = aim
 			if (target_pos - hero_pos).length() > range_val:
 				target_pos = hero_pos + (target_pos - hero_pos).normalized() * range_val
-			_apply_aoe_damage(hero, target_pos, 4.0, damage, sim)
+			_apply_aoe_damage(hero, target_pos, 4.0, damage, sim, dtype)
 		"taunt_aura":
 			hero["shield"] = float(hero.get("shield", 0.0)) + 350.0
 			hero["shield_timer"] = 5.0
-			_apply_aoe_damage(hero, hero_pos, range_val, damage, sim)
+			_apply_aoe_damage(hero, hero_pos, range_val, damage, sim, dtype)
 		"arrow_barrage":
 			var dir: Vector2 = (aim - hero_pos).normalized()
 			if dir == Vector2.ZERO:
 				dir = facing
 			hero["facing"] = dir
-			_apply_cone_damage(hero, hero_pos, dir, range_val, damage, sim)
+			_apply_cone_damage(hero, hero_pos, dir, range_val, damage, sim, dtype)
 		_:
 			if damage > 0.0:
 				var target: Dictionary = _find_target_near(hero, aim, range_val, sim)
 				if not target.is_empty():
-					_deal_damage(hero, target, damage, sim)
+					_deal_damage(hero, target, damage, sim, dtype)
 
 	# 渲染层要靠这些字段出特效：hero_type / kind 决定配方，start_* 是施法瞬间的站位
 	# （冲锋类技能会改 hero.pos，不能拿结束位置当起点），aim 是落点。
@@ -198,7 +213,9 @@ static func cast_summoner_spell(hero: Dictionary, spell_id: String, aim: Vector2
 				return false
 			var missing_hp: float = maxf(0.0, float(enemy.get("max_hp", 1.0)) - float(enemy.get("hp", 0.0)))
 			var true_damage: float = float(spell.get("base_damage", 120.0)) + missing_hp * float(spell.get("missing_hp_pct", 0.14))
-			_deal_damage(hero, enemy, true_damage, sim)
+			# 终结是真实伤害（项 1.2）：描述写「真实伤害」，实现必须走 "true" 分型，
+			# 否则高护甲坦克蹲泉水就能无视斩杀线。
+			_deal_damage(hero, enemy, true_damage, sim, "true")
 		"cleanse":
 			hero["slow_timer"] = 0.0
 			hero["cc_immune_timer"] = float(spell.get("duration", 1.5))
@@ -245,7 +262,12 @@ static func on_hero_attack_hit(attacker: Dictionary, target: Dictionary, sim: Ob
 				stacks = 0
 			attacker["passive_stacks"] = stacks
 		"archer":
+			# 灵动之风：命中敌方英雄后 3 秒内移速与攻速一起提升。
+			# （§5.1 的文案/实现矛盾修正点：以前只有 haste_timer，攻速是空头支票。）
 			attacker["haste_timer"] = 1.5
+			if str(target.get("type", "")) == "hero":
+				attacker["passive_as_bonus"] = 0.35
+				attacker["passive_as_timer"] = 3.0
 		"tank":
 			if float(attacker.get("hp", 1.0)) / maxf(1.0, float(attacker.get("max_hp", 1.0))) < 0.4:
 				attacker["shield"] = float(attacker.get("shield", 0.0)) + 120.0
@@ -294,7 +316,7 @@ static func _find_lowest_hp_ally(hero: Dictionary, max_dist: float, sim: Object)
 				best = e
 	return best
 
-static func _apply_aoe_damage(hero: Dictionary, center: Vector2, radius: float, damage: float, sim: Object) -> void:
+static func _apply_aoe_damage(hero: Dictionary, center: Vector2, radius: float, damage: float, sim: Object, dtype := "physical") -> void:
 	for e in sim.state.entities:
 		if not bool(e.get("alive", true)):
 			continue
@@ -302,9 +324,9 @@ static func _apply_aoe_damage(hero: Dictionary, center: Vector2, radius: float, 
 			continue
 		var pos: Vector2 = e.get("pos", Vector2.ZERO)
 		if (pos - center).length() <= radius:
-			_deal_damage(hero, e, damage, sim)
+			_deal_damage(hero, e, damage, sim, dtype)
 
-static func _apply_line_damage(hero: Dictionary, start: Vector2, dir: Vector2, length: float, damage: float, sim: Object, slow_sec: float) -> void:
+static func _apply_line_damage(hero: Dictionary, start: Vector2, dir: Vector2, length: float, damage: float, sim: Object, slow_sec: float, dtype := "physical") -> void:
 	for e in sim.state.entities:
 		if not bool(e.get("alive", true)):
 			continue
@@ -316,11 +338,11 @@ static func _apply_line_damage(hero: Dictionary, start: Vector2, dir: Vector2, l
 		if proj >= 0.0 and proj <= length:
 			var perp: float = (to_e - dir * proj).length()
 			if perp <= 1.2:
-				_deal_damage(hero, e, damage, sim)
+				_deal_damage(hero, e, damage, sim, dtype)
 				if slow_sec > 0.0:
 					e["slow_timer"] = slow_sec
 
-static func _apply_cone_damage(hero: Dictionary, origin: Vector2, dir: Vector2, range_val: float, damage: float, sim: Object) -> void:
+static func _apply_cone_damage(hero: Dictionary, origin: Vector2, dir: Vector2, range_val: float, damage: float, sim: Object, dtype := "physical") -> void:
 	for e in sim.state.entities:
 		if not bool(e.get("alive", true)):
 			continue
@@ -331,11 +353,11 @@ static func _apply_cone_damage(hero: Dictionary, origin: Vector2, dir: Vector2, 
 		var dist: float = to_e.length()
 		if dist > 0.1 and dist <= range_val:
 			if to_e.normalized().dot(dir) > 0.5:
-				_deal_damage(hero, e, damage, sim)
+				_deal_damage(hero, e, damage, sim, dtype)
 
-static func _deal_damage(attacker: Dictionary, target: Dictionary, amount: float, sim: Object) -> void:
+static func _deal_damage(attacker: Dictionary, target: Dictionary, amount: float, sim: Object, dtype := "physical") -> void:
 	if sim != null and sim.has_method("_damage"):
-		sim._damage(target, amount, attacker)
+		sim._damage(target, amount, attacker, dtype)
 		return
 	var final_damage: float = amount
 	var shield: float = float(target.get("shield", 0.0))

@@ -206,6 +206,15 @@ func _describe(item: Dictionary) -> String:
 		parts.append("+%.1f 移速" % float(item.speed))
 	if float(item.get("crit", 0.0)) > 0.0:
 		parts.append("+%d%% 暴击" % int(float(item.crit) * 100.0))
+	# 项 1：防御装第一次能说清"它减伤"，而不只是"它堆血"。
+	if float(item.get("armor", 0.0)) > 0.0:
+		parts.append("+%d 护甲" % int(item.armor))
+	if float(item.get("magic_resist", 0.0)) > 0.0:
+		parts.append("+%d 魔抗" % int(item.magic_resist))
+	if float(item.get("hp_regen", 0.0)) > 0.0:
+		parts.append("+%d 回血" % int(item.hp_regen))
+	if float(item.get("cooldown_reduction", 0.0)) > 0.0:
+		parts.append("+%d%% 冷却" % int(float(item.cooldown_reduction) * 100.0))
 	return " · ".join(parts)
 
 func set_state(current_gold: int, current_inventory: Array, type_id := "") -> void:

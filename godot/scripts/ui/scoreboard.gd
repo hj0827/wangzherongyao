@@ -25,6 +25,12 @@ const AVATAR_SIZE := 48.0
 const NAME_W := 138.0
 const KDA_W := 100.0
 const ECON_W := 70.0
+# 属性行是 clip_text=true 的定宽 Label：超出可用宽不是换行，而是**从右侧静默裁掉**。
+# 而字符串断言查不出裁切（内容还在，只是看不见），所以这里按实测像素预算降级：
+# 装不下的低优先字段直接不追加，绝不把 输出/承伤/推塔 这种决策字段挤出可视区。
+# 可用宽由 _measure_stats_avail() 从真实节点层级算，不写死数字。
+const STATS_FALLBACK_AVAIL := 520.0
+const STATS_FONT_SIZE := 11
 
 const ROLE_COLORS := {
 	"坦克": Color(0.42, 0.78, 0.74),
@@ -47,6 +53,9 @@ var _gap_label: Label
 var _rate_label: Label
 var _local_owner := ""
 var _signature := ""
+# 属性行 Label 的真实可用宽（px），在 _build() 里从节点层级实测一次。
+# 默认值只在面板没建成时兜底；不能用它当"能塞多少"的许可——超宽会被裁。
+var _stats_avail := STATS_FALLBACK_AVAIL
 
 func setup(touch: bool) -> void:
 	touch_mode = touch
@@ -124,6 +133,32 @@ func _build() -> void:
 	teams.add_child(red_col["frame"] as Control)
 	_red_rows = red_col["rows"] as VBoxContainer
 	_red_total = red_col["total"] as Label
+	_stats_avail = _measure_stats_avail()
+
+# 属性行 Label 的真实可用宽。stats_label 开着 clip_text=true：
+# 超出宽度**不是换行，而是从右侧静默裁掉**，而字符串断言查不出来（内容在、看不见），
+# 这正是本仓库反复踩的「测试绿、界面坏」。所以宽度不靠手推，逐层实测：
+# panel content margin → teams 列间距（两列均分）→ frame margin → row margin。
+func _measure_stats_avail() -> float:
+	if _panel == null:
+		return STATS_FALLBACK_AVAIL
+	var panel_w := float(_panel.offset_right - _panel.offset_left)
+	var ps: StyleBox = _panel.get_theme_stylebox("panel")
+	var column := _panel.get_child(0) as VBoxContainer
+	if column == null or column.get_child_count() < 2:
+		return STATS_FALLBACK_AVAIL
+	var teams := column.get_child(1) as HBoxContainer
+	var frame := teams.get_child(0) as PanelContainer
+	var fs: StyleBox = frame.get_theme_stylebox("panel")
+	var box := frame.get_child(0) as VBoxContainer
+	var rows := box.get_child(2) as VBoxContainer
+	var row := rows.get_child(0) as PanelContainer
+	var rs: StyleBox = row.get_theme_stylebox("panel")
+	var inner := panel_w - ps.get_margin(Side.SIDE_LEFT) - ps.get_margin(Side.SIDE_RIGHT)
+	var frame_w := (inner - float(teams.get_theme_constant("separation"))) / 2.0
+	var avail := frame_w - fs.get_margin(Side.SIDE_LEFT) - fs.get_margin(Side.SIDE_RIGHT)
+	avail -= rs.get_margin(Side.SIDE_LEFT) + rs.get_margin(Side.SIDE_RIGHT)
+	return avail if avail > 0.0 else STATS_FALLBACK_AVAIL
 
 # 一队一列：抬头 + 五行（预先建好，靠 visible 控制，避免每帧 new 节点）+ 合计
 func _make_team_column(team: String) -> Dictionary:
@@ -432,24 +467,73 @@ func _fill_column(rows: VBoxContainer, data: Array, team: String) -> void:
 			(slots[s].cell as Control).visible = false
 
 # 属性行：把「这个人到底强在哪」压成一行。
-# 零值项不占宽度（法师不需要看「法强 0」），但补刀/攻击/生命/移速常显 ——
-# 少了它们，面板就退回成一张只有经济的表。
-func _stats_text(entry: Dictionary) -> String:
-	var parts: Array[String] = []
-	parts.append("补刀 %d" % int(entry.get("cs", 0)))
-	parts.append("攻击 %d" % int(round(float(entry.get("attack_damage", 0.0)))))
+#
+# 这一行开着 clip_text=true：超出可用宽**不是换行，而是从右侧静默裁掉**且不报错，
+# 而字符串断言查不出来（内容还在、只是看不见）——本仓库反复踩的「测试绿、界面坏」。
+# 可用宽实测自节点层级（_stats_avail：桌面 561 / 触屏 531），不靠手推。
+#
+# 因此分两级，结构上保证"永不裁尾"：
+#   常显核心 = 补刀 / 攻击 / 生命 / 移速  +  输出 / 承伤 / 推塔
+#     —— 实测极端位数下也只有 417px，稳进最窄的 531，绝不裁。
+#   可降级项 = 法强 / 暴击 / 护甲 / 魔抗 / 冷却（有值才候选）
+#     —— 按**显示顺序**贪心装填，装不下就整段放弃。
+# 真实出装（pacing_report 15 分钟量级）下五级全显、顺序与加字段前逐字一致；
+# 只有把每一位数都拉满的合成极端行才会开始丢可降级项，而那时被牺牲的也不是决策字段。
+func _stats_parts(entry: Dictionary) -> Array[String]:
+	var font: Font = GameTheme.FONT_REGULAR
+	var sep := " · "
+	# 候选按显示顺序排；第二个元素 = 是否常显。
+	var candidates: Array = []
+	candidates.append(["补刀 %d" % int(entry.get("cs", 0)), true])
+	candidates.append(["攻击 %d" % int(round(float(entry.get("attack_damage", 0.0)))), true])
 	var ap := float(entry.get("ability_power", 0.0))
 	if ap > 0.5:
-		parts.append("法强 %d" % int(round(ap)))
-	parts.append("生命 %d" % int(round(float(entry.get("max_hp", 0.0)))))
-	parts.append("移速 %.1f" % float(entry.get("speed", 0.0)))
+		candidates.append(["法强 %d" % int(round(ap)), false])
+	candidates.append(["生命 %d" % int(round(float(entry.get("max_hp", 0.0)))), true])
+	candidates.append(["移速 %.1f" % float(entry.get("speed", 0.0)), true])
 	var crit := float(entry.get("crit_rate", 0.0))
 	if crit > 0.001:
-		parts.append("暴击 %d%%" % int(round(crit * 100.0)))
-	parts.append("输出 %s" % _amount(float(entry.get("damage_dealt", 0.0))))
-	parts.append("承伤 %s" % _amount(float(entry.get("damage_taken", 0.0))))
-	parts.append("推塔 %d" % int(entry.get("tower_kills", 0)))
-	return " · ".join(parts)
+		candidates.append(["暴击 %d%%" % int(round(crit * 100.0)), false])
+	var armor := float(entry.get("armor", 0.0))
+	if armor > 0.5:
+		candidates.append(["护甲 %d" % int(round(armor)), false])
+	var mr := float(entry.get("magic_resist", 0.0))
+	if mr > 0.5:
+		candidates.append(["魔抗 %d" % int(round(mr)), false])
+	var cdr := float(entry.get("cooldown_reduction", 0.0))
+	if cdr > 0.001:
+		candidates.append(["冷却 %d%%" % int(round(cdr * 100.0)), false])
+	candidates.append(["输出 %s" % _amount(float(entry.get("damage_dealt", 0.0))), true])
+	candidates.append(["承伤 %s" % _amount(float(entry.get("damage_taken", 0.0))), true])
+	candidates.append(["推塔 %d" % int(entry.get("tower_kills", 0)), true])
+
+	# chosen 是候选下标集合，始终按显示顺序排。
+	var chosen: Array = []
+	for i in candidates.size():
+		if bool(candidates[i][1]):
+			chosen.append(i)
+	for i in candidates.size():
+		if bool(candidates[i][1]):
+			continue
+		var trial: Array = chosen.duplicate()
+		trial.append(i)
+		trial.sort()
+		if _w(font, sep.join(_texts_at(candidates, trial))) <= _stats_avail:
+			chosen = trial
+	return _texts_at(candidates, chosen)
+
+# 按候选下标取显示文本。
+static func _texts_at(candidates: Array, indices: Array) -> Array[String]:
+	var out: Array[String] = []
+	for i in indices:
+		out.append(str(candidates[int(i)][0]))
+	return out
+
+func _stats_text(entry: Dictionary) -> String:
+	return " · ".join(_stats_parts(entry))
+
+static func _w(font: Font, text: String) -> float:
+	return font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, STATS_FONT_SIZE).x
 
 func _amount(value: float) -> String:
 	if value >= 1000.0:

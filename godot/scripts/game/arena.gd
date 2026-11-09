@@ -275,6 +275,9 @@ var _queued_teleport := false
 # 只按「当前是否按住」采样就会静默吞掉这一下（技能早已是锁存语义）。
 var _queued_attack := false
 var _pending_purchases: Array[Dictionary] = []
+# 项 2：加点意图同样是即时键，必须锁存（与普攻/技能同一理由：20Hz 采样会吞掉短按）。
+# 空串 = 没有待发的加点。手动模式下由键盘 2/3/4/5 触发。
+var _queued_upgrade := ""
 var _input_seq := 0
 var _local_input := {
 	"move": Vector2.ZERO,
@@ -291,6 +294,7 @@ var _local_input := {
 	"teleport": false,
 	"buy_item": "",
 	"sell_slot": -1,
+	"upgrade_slot": "",
 	"seq": 0,
 }
 var _started_announcement := false
@@ -619,11 +623,18 @@ func _trigger_hit_stop(freeze_duration: float, shake_strength: float = 0.3) -> v
 	_hit_stop.trigger_hit_stop(freeze_duration, shake_strength)
 
 func _on_skill_button(slot: String) -> void:
-	# 按了但放不出来（CD / 蓝不够）必须有声音反馈：手机上玩家看不到 CD 数字时，
+	# 按了但放不出来（CD / 蓝不够 / 大招未学）必须有声音反馈：手机上玩家看不到 CD 数字时，
 	# 「按了没反应」是最容易让人以为游戏卡住的状态。
-	if _skill_blocked(slot):
+	# 判定收进 HeroDefs.skill_block_reason 一处：主机与客机共用同一个函数，
+	# 不会出现一边说冷却、另一边说没蓝（旧版这里和 sim 各写了一份）。
+	var reason := _skill_block_reason(slot)
+	if reason != "":
 		if _audio != null:
 			_audio.play_cue(AudioCues.CUE_DENIED)
+		# 只对"大招未学"额外给文字提示：冷却与缺蓝在键面上已有读数（CD 数字、
+		# 法力不足），再弹中央横幅就是团战里刷屏。而未学是键面读不出"为什么"的那一种。
+		if hud != null and str(reason).contains("解锁"):
+			hud.announce(reason, GameTheme.MUTED, 1.6)
 		return
 	if slot == "q":
 		_queued_q = true
@@ -903,7 +914,7 @@ func _process(delta: float) -> void:
 		_gather_input()
 		_update_local_prediction(delta)
 		_input_timer += delta
-		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.attack or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0:
+		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.attack or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0 or _local_input.upgrade_slot != "":
 			_input_timer = 0.0
 			session.submit_input(_local_input.duplicate())
 			# 每个发出的输入都占一个序列号，服务端逐条确认，预测记录用同一个号。
@@ -1000,20 +1011,42 @@ func _gather_input() -> void:
 	var e_down := Input.is_key_pressed(KEY_E)
 	var r_down := Input.is_key_pressed(KEY_R)
 	var summoner_down := Input.is_key_pressed(KEY_F)
-	if (q_down and not _prev_q) or _queued_q:
-		_local_input.skill_q = true
-		_flash_skill_range("q")
-	if (w_down and not _prev_w) or _queued_w:
-		_local_input.skill_w = true
-		_flash_skill_range("w")
-	if (e_down and not _prev_e) or _queued_e:
-		_local_input.skill_e = true
-		_flash_skill_range("e")
-	if (r_down and not _prev_r) or _queued_r:
-		_local_input.skill_r = true
-		_flash_skill_range("r")
+	# 项 2：Ctrl + 技能键 = 升级该技能（手动加点路径），并且**这一次不施法**。
+	# 用组合键而不是新占 2/3/4/5：数字 1 已经是 W 技能，再排加点会让键位表
+	# 变成"1 是技能、2 是加点"的无规律组合。
+	# ctrl_down 必须在施法分支之前判：否则一次按键会同时耗蓝又耗点。
+	# 锁存队列也一起吞掉 —— 按住 Ctrl 时上一次没发出去的施法不该补发。
+	var ctrl_down := Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)
+	if ctrl_down:
+		if q_down and not _prev_q:
+			_queued_upgrade = "q"
+		elif w_down and not _prev_w:
+			_queued_upgrade = "w"
+		elif e_down and not _prev_e:
+			_queued_upgrade = "e"
+		elif r_down and not _prev_r:
+			_queued_upgrade = "r"
+		# 吞掉待发的施法锁存，保证"只加点不施法"这条承诺成立。
+		_queued_q = false
+		_queued_w = false
+		_queued_e = false
+		_queued_r = false
+	else:
+		if (q_down and not _prev_q) or _queued_q:
+			_local_input.skill_q = true
+			_flash_skill_range("q")
+		if (w_down and not _prev_w) or _queued_w:
+			_local_input.skill_w = true
+			_flash_skill_range("w")
+		if (e_down and not _prev_e) or _queued_e:
+			_local_input.skill_e = true
+			_flash_skill_range("e")
+		if (r_down and not _prev_r) or _queued_r:
+			_local_input.skill_r = true
+			_flash_skill_range("r")
 	if (summoner_down and not _prev_summoner) or _queued_summoner:
 		_local_input.summoner = true
+	_local_input.upgrade_slot = _queued_upgrade
 	_prev_q = q_down
 	_prev_w = w_down
 	_prev_e = e_down
@@ -1160,21 +1193,11 @@ func _refresh_audio_context() -> void:
 	_audio_ctx["team"] = str(hero.get("team", local_team))
 	_audio_ctx["hp_ratio"] = clampf(float(hero.get("hp", max_hp)) / max_hp, 0.0, 1.0)
 
-# 技能是否放不出来。只判 CD 与蓝量 —— 距离/目标由模拟侧决定，
-# 这里判错了也只是多一声「不行」，不会影响真实施法。
-func _skill_blocked(slot: String) -> bool:
-	if slot != "q" and slot != "w" and slot != "e" and slot != "r":
-		return false
-	var hero := _snapshot_local_hero()
-	if hero.is_empty():
-		return false
-	if float(hero.get("skill_" + slot + "_cd", 0.0)) > 0.0:
-		return true
-	var data: Dictionary = HeroDefs.get_hero(str(hero.get("hero_type", local_hero_type)))
-	var skill: Dictionary = data.get(slot, {})
-	if skill.is_empty():
-		return false
-	return float(hero.get("mp", 0.0)) < float(skill.get("cost", 0.0))
+# 技能为什么放不出来。真身在 HeroDefs.skill_block_reason —— 主机与客机共用同一个函数，
+# 不会出现一边说冷却、另一边说没蓝。这里只负责从快照取本地英雄。
+# 只判 CD / 蓝量 / 大招未学 —— 距离与目标由模拟侧决定，判错了也只是多一声「不行」。
+func _skill_block_reason(slot: String) -> String:
+	return HeroDefs.skill_block_reason(_snapshot_local_hero(), slot)
 
 func _consume_skill_queue(advance_seq: bool = true) -> void:
 	_local_input.skill_q = false
@@ -1199,6 +1222,10 @@ func _consume_skill_queue(advance_seq: bool = true) -> void:
 			_input_seq = maxi(_input_seq, int(_local_input.seq) + 1)
 	_local_input.buy_item = ""
 	_local_input.sell_slot = -1
+	# 项 2：加点是即时意图，发送后必须清。sim 侧清的是它自己那份副本，
+	# 这里不清的话下一个 tick 又会把同一条 upgrade_slot 提交一次，点数被连点清空。
+	_local_input.upgrade_slot = ""
+	_queued_upgrade = ""
 	_local_input.seq = _input_seq
 
 # 客机本地预测：用本帧输入立即推进英雄位置，服务端确认后再校正。
