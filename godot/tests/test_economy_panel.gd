@@ -14,6 +14,8 @@ const ItemShop = preload("res://sim/item_shop.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
 
 # 面板一行要有的字段（相对 board 行）。
+# 项 1 的攻防属性并入同一份清单：这条列表同时驱动「board 有字段」与
+# 「过网后还在」两条守卫，漏一个就是客机面板显示 0 且不报错。
 const PANEL_FIELDS := [
 	"assists",
 	"damage_dealt",
@@ -25,6 +27,11 @@ const PANEL_FIELDS := [
 	"speed",
 	"crit_rate",
 	"item_value",
+	"armor",
+	"magic_resist",
+	"cooldown_reduction",
+	"attack_speed",
+	"crit_damage",
 ]
 
 func _duel() -> MatchSim:

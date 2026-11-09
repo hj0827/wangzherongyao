@@ -15,6 +15,13 @@ const MODES := ["duel", "team"]
 const ATTACK_MODES := ["default", "minion", "tower"]
 const SUMMONER_SPELLS := ["flash", "execute", "cleanse", "heal"]
 const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster"]
+# 战斗属性（项 1，链路 4）的入站钳制上限。resist/CDR/攻速都按"非负 + 封顶"清洗，
+# 负值一律钳到 0，杜绝客机伪造"负护甲 = 增伤"这类越界数值。
+const MAX_RESISTANCE := 100000.0
+const MAX_CDR := 1.0
+const MAX_ATTACK_SPEED := 5.0
+const MAX_CRIT_DAMAGE := 10.0
+const MAX_REGEN := 100000.0
 # 压缩帧：1 字节编解码标记 + 4 字节原始长度 + ZSTD 数据。
 # 不压缩的包保持 var_to_bytes 原样，首字节是 Variant 类型号（Dictionary = 27），
 # 与压缩标记 1 天然不冲突，所以两种格式在线上共存、不会误判。
@@ -56,6 +63,7 @@ const EMPTY_INPUT := {
 	"locked_target": -1,
 	"buy_item": "",
 	"sell_slot": -1,
+	"upgrade_slot": "",
 	"seq": 0,
 }
 
@@ -158,6 +166,10 @@ static func sanitize_input(raw: Dictionary) -> Dictionary:
 	input.locked_target = clampi(int(_number(raw.get("locked_target", -1))), -1, 1000000)
 	input.buy_item = _short_string(str(raw.get("buy_item", "")), 32) if raw.get("buy_item") is String else ""
 	input.sell_slot = clampi(int(_number(raw.get("sell_slot", -1))), -1, 5)
+	# 项 2：加点意图是离散输入。非法槽位一律清空（不 clamp 成某个合法值），
+	# 否则客机可以借 "upgrade_slot" 让主机点它自己没权限点的技能。
+	var upgrade_slot := str(raw.get("upgrade_slot", ""))
+	input.upgrade_slot = upgrade_slot if HeroDefs.SKILL_SLOTS.has(upgrade_slot) else ""
 	input.seq = maxi(0, int(_number(raw.get("seq", 0))))
 	return input
 
@@ -333,6 +345,14 @@ static func _sanitize_board(raw: Variant) -> Dictionary:
 					"max_hp": clampf(_number(row.get("max_hp", 0.0)), 0.0, 1000000.0),
 					"speed": clampf(_number(row.get("speed", 0.0)), 0.0, 100.0),
 					"crit_rate": clampf(_number(row.get("crit_rate", 0.0)), 0.0, 5.0),
+					# 项 1：新增 5 个属性的 board 清洗，上限直接复用实体路径的同一批常量，
+					# 不在这里另写数字。（crit_rate 的 5.0 与实体路径的 1.0 是**既有**双口径，
+					# 属验收表 10.2 的待办，本次不顺手改，免得牵动 net_protocol 的既有断言。）
+					"armor": clampf(_number(row.get("armor", 0.0)), 0.0, MAX_RESISTANCE),
+					"magic_resist": clampf(_number(row.get("magic_resist", 0.0)), 0.0, MAX_RESISTANCE),
+					"cooldown_reduction": clampf(_number(row.get("cooldown_reduction", 0.0)), 0.0, MAX_CDR),
+					"attack_speed": clampf(_number(row.get("attack_speed", 0.0)), 0.0, MAX_ATTACK_SPEED),
+					"crit_damage": clampf(_number(row.get("crit_damage", 1.5)), 0.0, MAX_CRIT_DAMAGE),
 					"alive": _flag(row.get("alive", true)),
 					"respawn_timer": clampf(_number(row.get("respawn_timer", 0.0)), 0.0, 600.0),
 					"inventory": inventory,
@@ -391,6 +411,14 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["skill_w_cd"] = clampf(_number(source.get("skill_w_cd", 0.0)), 0.0, 600.0)
 		entity["skill_e_cd"] = clampf(_number(source.get("skill_e_cd", 0.0)), 0.0, 600.0)
 		entity["skill_r_cd"] = clampf(_number(source.get("skill_r_cd", 0.0)), 0.0, 600.0)
+		# 项 2：技能等级与点数过白名单。漏任何一个 = 客机永远显示未学习，且不报错。
+		# 钳制上限引用 HeroDefs 的单一真身（本文件已 preload 它），不另写字面量，
+		# 避免重蹈 crit_rate 那种"两条路径各写一个上限"的口径漂移。
+		entity["skill_q_level"] = clampi(int(_number(source.get("skill_q_level", 1))), 0, HeroDefs.MAX_SKILL_LEVEL_NORMAL)
+		entity["skill_w_level"] = clampi(int(_number(source.get("skill_w_level", 1))), 0, HeroDefs.MAX_SKILL_LEVEL_NORMAL)
+		entity["skill_e_level"] = clampi(int(_number(source.get("skill_e_level", 1))), 0, HeroDefs.MAX_SKILL_LEVEL_NORMAL)
+		entity["skill_r_level"] = clampi(int(_number(source.get("skill_r_level", 0))), 0, HeroDefs.MAX_SKILL_LEVEL_ULT)
+		entity["skill_points"] = clampi(int(_number(source.get("skill_points", 0))), 0, HeroDefs.MAX_SKILL_POINTS)
 		var summoner_spell := str(source.get("summoner_spell", "flash"))
 		if not SUMMONER_SPELLS.has(summoner_spell):
 			summoner_spell = "flash"
@@ -409,6 +437,15 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["inventory"] = inventory
 		entity["ability_power"] = clampf(_number(source.get("ability_power", 0.0)), 0.0, 100000.0)
 		entity["crit_rate"] = clampf(_number(source.get("crit_rate", 0.0)), 0.0, 1.0)
+		# 战斗属性（项 1，链路 4）：漏任何一个键 = 单机全对、联机静默丢。
+		# 数值结算在主机，这些字段主要是给客机 HUD/详情显示；钳制口径与 sim 侧一致。
+		entity["armor"] = clampf(_number(source.get("armor", 0.0)), 0.0, MAX_RESISTANCE)
+		entity["magic_resist"] = clampf(_number(source.get("magic_resist", 0.0)), 0.0, MAX_RESISTANCE)
+		entity["cooldown_reduction"] = clampf(_number(source.get("cooldown_reduction", 0.0)), 0.0, MAX_CDR)
+		entity["attack_speed"] = clampf(_number(source.get("attack_speed", 0.0)), 0.0, MAX_ATTACK_SPEED)
+		entity["crit_damage"] = clampf(_number(source.get("crit_damage", 1.5)), 0.0, MAX_CRIT_DAMAGE)
+		entity["hp_regen"] = clampf(_number(source.get("hp_regen", 0.0)), 0.0, MAX_REGEN)
+		entity["mana_regen"] = clampf(_number(source.get("mana_regen", 0.0)), 0.0, MAX_REGEN)
 		entity["speed"] = clampf(_number(source.get("speed", 0.0)), 0.0, 64.0)
 		entity["shield"] = clampf(_number(source.get("shield", 0.0)), 0.0, 1000000.0)
 		entity["facing_x"] = clampf(_number(source.get("facing_x", 1.0)), -1.0, 1.0)

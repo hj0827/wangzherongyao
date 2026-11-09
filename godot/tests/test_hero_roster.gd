@@ -75,6 +75,11 @@ func test_every_skill_produces_an_observable_effect() -> void:
 			var start: Vector2 = me.get("pos", Vector2.ZERO)
 			foe["pos"] = start + Vector2(1.3, 0.0)
 			foe["facing"] = Vector2.RIGHT
+			# 项 2：大招出生未学习（skill_r_level=0），锁定时 cast 直接返回 false。
+			# 本用例测的是"技能生效"，不是"解锁门槛"（门槛由 test_skill_levels 钉），
+			# 所以先把大招学上再放 —— 这里学的是等级，不是绕过规则。
+			if str(slot) == "r":
+				me["skill_r_level"] = 1
 
 			var mp_before := float(me.get("mp", 0.0))
 			var foe_hp_before := float(foe.get("hp", 0.0))

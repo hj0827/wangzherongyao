@@ -105,9 +105,9 @@ const CANCEL_ZONE_RADIUS := 66.0
 # 现在分成两行、每行只放 4~5 组键位，并且垫一层底板，水面上也读得出来。
 const KEY_HINT_LINES := [
 	"左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师",
-	"B 回城   ·   T 传送   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停",
+	"B 回城   ·   T 传送   ·   Ctrl+技能 升级   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停",
 ]
-const KEY_HINTS := "左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师   ·   B 回城   ·   T 传送   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停"
+const KEY_HINTS := "左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师   ·   B 回城   ·   T 传送   ·   Ctrl+技能 升级   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停"
 
 ## 触屏端攻击模式的三个圆按钮。id 与 AttackCluster.MODES 是同一套 attack_mode 值
 ## （sim 只认 id），label 缩短到两个字：76px 的圆里三个字会挤成一条。
@@ -1168,6 +1168,10 @@ func update_snapshot(data: Dictionary) -> void:
 		role_text += " [回城中...]"
 	if bool(local.get("teleporting", false)):
 		role_text += " [传送中...]"
+	# 项 2：剩余技能点。0 点时 caption 是空串，不会常驻一句"技能点 0"。
+	var points_caption := skill_points_caption(local)
+	if points_caption != "":
+		role_text += " [%s]" % points_caption
 	_role_label.text = role_text
 	var alive := bool(local.get("alive", true))
 	_apply_skill_state(_skill_q, local, hero_def.q, "skill_q_cd", mp, not alive)
@@ -1208,13 +1212,25 @@ func update_snapshot(data: Dictionary) -> void:
 func _apply_skill_state(button: SkillButton, local: Dictionary, skill_def: Dictionary, cd_key: String, mp: float, dead: bool) -> void:
 	if button == null:
 		return
+	# 项 2：等级从快照读（skill_<slot>_level），漏传就会显示不出成长。
+	# slot 用 cd_key 反推（"skill_q_cd" -> "q"），避免调用方再传一遍、两处可能不一致。
+	var slot := str(cd_key).trim_prefix("skill_").trim_suffix("_cd")
 	button.set_state(
 		float(local.get(cd_key, 0.0)),
 		float(skill_def.get("cooldown", 1.0)),
 		str(skill_def.get("name", "技能")),
 		mp >= float(skill_def.get("cost", 0.0)),
-		dead
+		dead,
+		int(local.get("skill_%s_level" % slot, 1))
 	)
+
+## 剩余技能点读数（项 2，链路 6）。静态函数便于宽度/内容守卫直接调用。
+## 0 点返回空串：不占文案位，否则状态卡上常驻一句"技能点 0"是纯噪声。
+static func skill_points_caption(local: Dictionary) -> String:
+	var points := int(local.get("skill_points", 0))
+	if points <= 0:
+		return ""
+	return "技能点 %d" % points
 
 func _find_local_hero(data: Dictionary) -> Dictionary:
 	for entity in data.get("entities", []):
