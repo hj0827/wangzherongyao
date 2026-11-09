@@ -96,11 +96,20 @@ var inputs: Dictionary = {}
 var kill_log: Array[Dictionary] = []
 var _announcer := CombatAnnouncer.new()
 # 固定种子的线性同余，保证暴击判定在主机模拟里可复现，也不依赖引擎随机源。
-var _rng_state := 0x2F6E2B1
+# config 可用 "seed" 改初始值（项 6 的多 seed 抽样要用）。默认值保持不变，
+# 所以不传 seed 的对局逐位等于历史行为 —— 既有测试的数值断言因此不受影响。
+const DEFAULT_RNG_SEED := 0x2F6E2B1
+var _rng_state := DEFAULT_RNG_SEED
 
 func _init(match_config: Dictionary) -> void:
 	config = match_config.duplicate(true)
 	mode = str(config.get("mode", "duel"))
+	# 项 6：允许按 seed 做多样本抽样。值必须落在 LCG 的正整数域里，
+	# 否则 0 会让所有随机数退化成同一个常数（暴击永远不触发/永远触发）。
+	var raw_seed := int(config.get("seed", DEFAULT_RNG_SEED))
+	_rng_state = raw_seed & 0x7FFFFFFF
+	if _rng_state == 0:
+		_rng_state = DEFAULT_RNG_SEED
 	if mode != "team":
 		mode = "duel"
 	state = {
@@ -165,10 +174,24 @@ func _setup_teams() -> void:
 		human_counts[team] += 1
 
 	if bot_fill:
+		# 项 6：config 可用 "bot_comp" 指定阵容（每队同一个列表），用于节奏抽样里
+		# 覆盖"双前排/全脆皮/缺刺客"这类极端组合。不传时退回历史行为
+		# （BOT_TYPES 按下标取），所以既有对局逐位不变。
+		var comp: Array = []
+		var raw_comp: Variant = config.get("bot_comp", null)
+		if raw_comp is Array and not (raw_comp as Array).is_empty():
+			for entry in (raw_comp as Array):
+				var candidate := str(entry)
+				if HeroDefs.is_valid(candidate):
+					comp.append(candidate)
 		for team in ["blue", "red"]:
 			while slots[team] < per_team:
-				var pool: Array = HeroDefs.BOT_TYPES
-				var hero_type: String = str(pool[slots[team] % pool.size()])
+				var hero_type := ""
+				if not comp.is_empty():
+					hero_type = str(comp[slots[team] % comp.size()])
+				else:
+					var pool: Array = HeroDefs.BOT_TYPES
+					hero_type = str(pool[slots[team] % pool.size()])
 				var owner_id := "bot_%d" % (bot_counter + 1)
 				var display_name := "AI·" + str(HeroDefs.get_hero(hero_type).name)
 				_spawn_hero(owner_id, display_name, team, "bot", hero_type, slots[team])
