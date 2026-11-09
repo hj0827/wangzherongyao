@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>烽火峡谷 · BGM 制作包（Suno）</title>
+<style>
+  :root{
+    --bg:#14161a; --card:#1c1f26; --card2:#20242c; --line:#2b303b;
+    --text:#e6e8ec; --muted:#98a1b0; --gold:#d9a441; --gold-dim:#8a6b2c;
+    --blue:#6fa8dc; --red:#d9756b; --green:#79c08a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:40px 24px 80px; background:var(--bg); color:var(--text);
+    font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+    line-height:1.7; font-size:15px;
+  }
+  .wrap{max-width:920px;margin:0 auto}
+  h1{font-size:28px;margin:0 0 6px;letter-spacing:2px;color:var(--gold)}
+  .sub{color:var(--muted);font-size:14px;margin-bottom:32px}
+  h2{font-size:19px;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);color:var(--gold)}
+  h3{font-size:15px;margin:0 0 4px;color:var(--text)}
+  p{margin:10px 0}
+  code{font-family:"Cascadia Code",Consolas,monospace;font-size:13px;background:#000;padding:1px 5px;border-radius:3px;color:#cfd6e2}
+  .note{border-left:3px solid var(--gold-dim);background:#1a1d23;padding:12px 16px;margin:18px 0;color:var(--muted);font-size:14px}
+  .note b{color:var(--text)}
+  .warn{border-left:3px solid var(--red)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:18px 20px;margin:14px 0}
+  .card-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+  .slot{font-family:Consolas,monospace;font-size:12px;color:var(--gold);background:#2a2318;border:1px solid var(--gold-dim);padding:2px 8px;border-radius:4px}
+  .tag{font-size:12px;color:var(--muted);border:1px solid var(--line);padding:1px 7px;border-radius:10px}
+  .tag.req{color:var(--green);border-color:#3c5a45}
+  .tag.opt{color:var(--blue);border-color:#2f4557}
+  .meta{font-size:13px;color:var(--muted);margin:0 0 12px}
+  .meta b{color:var(--text);font-weight:600}
+  .field{margin:10px 0}
+  .field-label{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:5px;letter-spacing:.5px}
+  pre{
+    margin:0;background:#0d0f12;border:1px solid var(--line);border-radius:6px;
+    padding:12px 14px;font-family:"Cascadia Code",Consolas,monospace;font-size:12.5px;
+    line-height:1.65;color:#cfd6e2;white-space:pre-wrap;word-break:break-word;
+  }
+  button{
+    background:#2a2318;color:var(--gold);border:1px solid var(--gold-dim);
+    border-radius:4px;padding:2px 10px;font-size:12px;cursor:pointer;
+    font-family:inherit;transition:.15s;
+  }
+  button:hover{background:#3a2f1c}
+  button.ok{background:#1f3327;color:var(--green);border-color:#3c5a45}
+  .steps{display:flex;flex-direction:column;gap:0;margin:18px 0}
+  .step{display:flex;gap:14px;padding:14px 0;border-bottom:1px dashed var(--line)}
+  .step:last-child{border-bottom:none}
+  .num{
+    flex:0 0 26px;height:26px;border-radius:50%;background:#2a2318;color:var(--gold);
+    border:1px solid var(--gold-dim);display:flex;align-items:center;justify-content:center;
+    font-size:13px;font-family:Consolas,monospace;margin-top:2px;
+  }
+  .step-body{flex:1}
+  .step-body b{color:var(--text)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:14px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:500;font-size:12px;letter-spacing:.5px}
+  td code{font-size:12px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+  .kbd{font-family:Consolas,monospace;font-size:12px;background:#2a2318;color:var(--gold);padding:1px 6px;border-radius:3px;border:1px solid var(--gold-dim)}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  .foot{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);color:#5f6878;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>烽 火 峡 谷 · BGM 制作包</h1>
+<div class="sub">Suno 提示词 · 循环剪辑 · Godot 接入 &nbsp;|&nbsp; 2026-10-31</div>
+
+<div class="note warn">
+<b>先说清楚：这份文档不能替你操作 Suno。</b><br>
+当前环境是 Windows，浏览器自动化不可用；而且 Suno 生成需要登录你的账号、在队列里等、挑版本。所以这里给的是<b>打开 Suno 后直接粘贴的东西</b>，以及成品拿到手之后必须做的加工步骤。<br><br>
+现状：<code>godot/scripts/game/bgm_synth.gd</code> 已经在跑 5 条<b>代码合成</b>的曲子（16kHz 单声道，正弦波叠噪声）。功能是完整的——循环无缝、能分层——但音色就是「能用」。换成 Suno 成品是真实升级，前提是把下面几个约束照顾到。
+</div>
+
+<h2>一、这个游戏到底需要几首</h2>
+
+<p>代码里只有 5 个音乐槽位（<code>TRACK_MENU / TRACK_BATTLE / TRACK_BATTLE_STEM / TRACK_VICTORY / TRACK_DEFEAT</code>）。其中 <code>battle_stem</code> 不是独立一首，是战斗曲的<b>强度叠加层</b>——同一 BPM、同一小节数、同一起点，团战时把它的音量推上来。</p>
+
+<table>
+  <tr><th>优先级</th><th>槽位</th><th>用在哪</th><th>必需</th></tr>
+  <tr><td>P0</td><td><code>menu</code></td><td>主菜单 / 大厅</td><td>必需</td></tr>
+  <tr><td>P0</td><td><code>battle</code></td><td>对局内（对线、游走）</td><td>必需</td></tr>
+  <tr><td>P1</td><td><code>battle_intense</code></td><td>团战高潮（替代 stem）</td><td>强烈建议</td></tr>
+  <tr><td>P0</td><td><code>victory</code></td><td>胜利结算</td><td>必需（剪 5~8 秒）</td></tr>
+  <tr><td>P0</td><td><code>defeat</code></td><td>失败结算</td><td>必需（剪 5~8 秒）</td></tr>
+  <tr><td>P2</td><td><code>hero_select</code></td><td>选英雄（现在复用菜单曲）</td><td>可选</td></tr>
+  <tr><td>P2</td><td><code>loading</code></td><td>进战场加载</td><td>可选</td></tr>
+</table>
+
+<div class="note">
+<b>先做 5 首就够。</b> P2 那两首等主线跑通了再说——选人界面现在只有几秒，多一首歌的收益远不如把战斗曲做好。
+</div>
+
+<h2>二、粘贴清单</h2>
+
+<p>每张卡里「Style」填到 Custom 模式的 <span class="kbd">Style of Music</span>，「Exclude」填到 <span class="kbd">Exclude Styles</span>，<span class="kbd">Instrumental</span> 开关<b>打开</b>。Suno 的界面常改版，字段名可能略有出入，但这两段文字本身在哪都能用。</p>
+
+<div class="card">
+  <div class="card-head">
+    <span class="slot">menu</span>
+    <h3>主菜单 / 大厅</h3>
+    <span class="tag req">P0 必需</span>
+  </div>
+  <p class="meta"><b>76 BPM</b> · A 小调五声 · 循环 <b>8 小节 = 25.26 秒</b>（也可做 16 小节 = 50.5 秒）<br>
+  情绪：肃穆、辽阔、有一点苍凉。不要激动，玩家会在这页停留很久。现有合成曲的骨架是「低频铺底 + 稀疏拨弦 + 整段风声」——保留这个留白感。</p>
+
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>epic Chinese fantasy orchestral, 76 BPM, guzheng and erhu lead, bamboo flute, low string drone, distant war drums, solemn and contemplative, wide cinematic reverb, sparse arrangement with lots of space, wind ambience, instrumental</pre>
+  </div>
+
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, rap, spoken word, EDM, electric guitar, trap, fade out, lo-fi, jazz</pre>
+  </div>
+
+  <p class="meta">歌名建议：<code>烽火峡谷 - 主菜单</code>。挑版本标准：<b>开头 4 秒要能直接当循环起点</b>（不要渐入的人声或长音飘入），中段不要有明显「段落切换」（段落切换的地方剪循环会露）。</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <span class="slot">battle</span>
+    <h3>对局 · 对线期</h3>
+    <span class="tag req">P0 必需</span>
+  </div>
+  <p class="meta"><b>100 BPM</b> · A 小调 · 循环 <b>16 小节 = 38.4 秒</b><br>
+  情绪：紧绷、持续推进、不煽情。这是玩家听得最久的一首（一局 10 分钟起），<b>重复度是核心指标</b>——宁可单调也不要花哨，旋律一花就会烦。低频要有稳定的八分音符推进，中高频靠拨弦和镲片提亮。</p>
+
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>tense Chinese war music, 100 BPM, steady taiko and war drum groove, staccato low string ostinato on eighth notes, pipa tremolo accents, dark minor key, restrained heroic mood, tight dry mix, hypnotic repetition, instrumental loop</pre>
+  </div>
+
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, rap, big orchestral climax, key change, tempo change, fade out, breakdown, silence</pre>
+  </div>
+
+  <p class="meta">歌名建议：<code>烽火峡谷 - 战斗</code>。<b>「key change / tempo change / breakdown」必须排除</b>——Suno 很爱在副歌后升个调或掉一段，那种地方剪循环必炸。</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <span class="slot">battle_intense</span>
+    <h3>对局 · 团战高潮</h3>
+    <span class="tag opt">P1 强烈建议</span>
+  </div>
+  <p class="meta">同 <b>100 BPM</b>、同调。它替代原来的 <code>battle_stem</code>。<br>
+  情绪：同一首曲子的「更用力版本」——鼓加密、加铜管和齐奏旋律。注意：<b>不要写成另一首歌</b>，要能跟 <code>battle</code> 交叉淡入。</p>
+
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>intense Chinese battle music, 100 BPM, double-time taiko, driving war drums, brass stabs, erhu and dizi in unison melody, dissonant string clusters, heroic climax, high energy, tight mix, instrumental loop</pre>
+  </div>
+
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, rap, tempo change, key change, fade out, ambient intro, long build up</pre>
+  </div>
+
+  <div class="note">
+    <b>怎么让它跟 <code>battle</code> 是一家人：</b>在 Suno 里用第一首的 <span class="kbd">Extend</span> 或 <span class="kbd">Cover</span> 作为基底再改风格，比重新生成一首更容易保持调性和律动一致。如果两次生成调性对不上（听起来和声打架），就放弃「两层叠加」，改走下面第三节的 A 方案。
+  </div>
+</div>
+
+<div class="grid2">
+<div class="card">
+  <div class="card-head">
+    <span class="slot">victory</span>
+    <h3>胜利</h3>
+    <span class="tag req">P0</span>
+  </div>
+  <p class="meta">生成 15~25 秒，<b>只剪前 5~8 秒</b>。Suno 做不出 5 秒的曲子，所以你要的是「一个漂亮的开头」。<br>
+  现有合成版是上行号角 + 大调钟声收束，可以直接沿用这个语汇。</p>
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>short triumphant Chinese orchestral sting, ascending horn call, single taiko hit, bright gong crash, major key resolution, celebratory, wide reverb, instrumental</pre>
+  </div>
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, fade out, long intro, ambient, sad</pre>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <span class="slot">defeat</span>
+    <h3>失败</h3>
+    <span class="tag req">P0</span>
+  </div>
+  <p class="meta">同样生成 15~25 秒，剪 5~8 秒。下行三音 + 低频闷响，不解释。</p>
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>short somber Chinese defeat sting, low drum hit, descending erhu phrase, dissonant low strings, mournful, dark, sparse, instrumental</pre>
+  </div>
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, fade out, triumphant, upbeat, major key, long intro</pre>
+  </div>
+</div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <span class="slot">hero_select</span>
+    <h3>选英雄（可选）</h3>
+    <span class="tag opt">P2 可选</span>
+  </div>
+  <p class="meta"><b>90 BPM</b> · 循环 8 小节 = 21.3 秒。要有「蓄势」感，玩家在这里挑人、看技能、读被动。</p>
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>heroic Chinese fantasy character select theme, 90 BPM, pulsing staccato strings, guzheng arpeggios, subtle taiko, building anticipation, confident, instrumental loop</pre>
+  </div>
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, fade out, tempo change, key change</pre>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <span class="slot">loading</span>
+    <h3>进战场加载（可选）</h3>
+    <span class="tag opt">P2 可选</span>
+  </div>
+  <p class="meta">10~15 秒即可，一次性的，不用循环。跟 <code>battle</code> 的调性要能顺滑接上（所以也用 A 小调）。</p>
+  <div class="field">
+    <div class="field-label"><span>STYLE OF MUSIC</span><button data-copy>复制</button></div>
+<pre>short atmospheric Chinese loading transition, 100 BPM implied pulse, wind ambience, distant bells, low string drone, rising tension, cinematic, instrumental</pre>
+  </div>
+  <div class="field">
+    <div class="field-label"><span>EXCLUDE STYLES</span><button data-copy>复制</button></div>
+<pre>vocals, singing, choir, fade out, full arrangement, drums solo</pre>
+  </div>
+</div>
+
+<h2>三、Suno 成品不能直接用，必须过这三关</h2>
+
+<div class="note warn">
+<b>第一关：循环。</b> Suno 生成的歌有前奏、有收尾、结尾还爱淡出——<b>直接塞进游戏循环会每圈「咔」一下再突然断</b>。现有合成曲之所以没这个问题，是因为 <code>bgm_synth.gd::_finish()</code> 做了「把尾巴折回开头」（<code>_fold</code>）：多渲染一段尾音，再逐采样加回到开头，接缝两侧就连续了。成品文件必须做同样的事。
+</div>
+
+<div class="note warn">
+<b>第二关：时长要按小节算，不是按秒。</b> 循环点必须落在小节线上，否则循环回来鼓点会错位——听感是「节奏突然绊了一下」，很难描述但一定听得出来。
+</div>
+
+<div class="note warn">
+<b>第三关：两层强度的对齐。</b> 原来的 <code>battle</code> + <code>battle_stem</code> 是<b>同一次合成</b>出来的，逐采样对齐，所以叠着播天衣无缝。Suno 给不了 stem（分轨），两次生成也保证不了同 BPM 同调。所以只能二选一：
+</div>
+
+<table>
+  <tr><th>方案</th><th>做法</th><th>代价</th></tr>
+  <tr>
+    <td><b>A（推荐）</b><br>单曲 + 滤波</td>
+    <td>只用 <code>battle</code> 一首。团战时把它的<b>低通滤波器</b>从 ~800Hz 开到 20kHz，音量微抬。</td>
+    <td>需要加一条 AudioBus + LowPassFilter，改 <code>_start_stem</code>。强度变化不如换曲明显，但零对齐风险。</td>
+  </tr>
+  <tr>
+    <td><b>B</b><br>双曲交叉淡入</td>
+    <td>两个播放器，<code>battle</code> 和 <code>battle_intense</code> 同时播（一个静音），热度上来时 2 秒交叉淡化。</td>
+    <td>两首必须实测 BPM 一致（用 Audacity 的 Change Tempo 拉正）。律动相位对不上时，交叉那 2 秒会有轻微「打架」。</td>
+  </tr>
+</table>
+
+<p>不管走哪个方案，<b>BPM 都要实测再校正</b>：Suno 标称 100 BPM 实际常落在 98~102。在 Audacity 里用「Analyze → Beat Finder」或手动数 16 小节总时长反推，然后用 <span class="kbd">Effect → Change Tempo</span>（保音高）拉到精确值。</p>
+
+<h2>四、剪辑流水线</h2>
+
+<div class="steps">
+  <div class="step"><div class="num">1</div><div class="step-body">
+    <b>下载最高音质。</b> 免费号只能拿 MP3；付费号可以下 WAV。能下 WAV 就下 WAV——MP3 已经压过一轮，再转 OGG 是二次损失。
+  </div></div>
+
+  <div class="step"><div class="num">2</div><div class="step-body">
+    <b>测 BPM 并校正。</b> 目标 100.00（战斗）/ 76.00（菜单）。校正后再往下走，顺序不能反。
+  </div></div>
+
+  <div class="step"><div class="num">3</div><div class="step-body">
+    <b>找一个小节对齐的干净区间。</b> 100 BPM 一小节 2.4 秒 → 16 小节 = <b>38.400 秒</b>；76 BPM 一小节 3.158 秒 → 8 小节 = <b>25.263 秒</b>。<br>
+    在 Audacity 里用「选择 → 时间」直接输入起止秒数，起点对齐一个<b>重拍瞬态</b>（看波形上第一记鼓）。挑段落时避开：段落切换处、加花密集处、任何有淡入淡出的地方。
+  </div></div>
+
+  <div class="step"><div class="num">4</div><div class="step-body">
+    <b>折尾（关键一步）。</b> 选中区间<b>之后</b>的 1~2 秒尾音 → 复制 → 回到文件开头 → <span class="kbd">Effect → Mix Paste</span>（不是普通粘贴，要混音叠加）。这样尾音的残响会自然延续到循环开头，跟 <code>_fold()</code> 是同一件事。<br>
+    然后把长度精确裁到 38.400 / 25.263 秒。
+  </div></div>
+
+  <div class="step"><div class="num">5</div><div class="step-body">
+    <b>响度对齐。</b> <span class="kbd">Effect → Loudness Normalization</span>，目标 <b>-17 LUFS</b>（整合响度），峰值不超过 -1 dBFS。<br>
+    为什么是 -17：代码里合成曲按 RMS 0.14 归一（≈ -17 dBFS RMS），音乐总线还要再压 10dB 让位给音效。按这个值归一，切歌时不会出现「音量被调小了」的错觉。
+  </div></div>
+
+  <div class="step"><div class="num">6</div><div class="step-body">
+    <b>导出。</b> <span class="kbd">OGG Vorbis</span>，质量 6~7，立体声 44.1kHz。文件名用小写+下划线：<code>bgm_menu.ogg</code>、<code>bgm_battle.ogg</code>……<br>
+    放进 <code>godot/assets/audio/bgm/</code>（这个目录现在还不存在，要新建）。
+  </div></div>
+
+  <div class="step"><div class="num">7</div><div class="step-body">
+    <b>在 Godot 里开循环。</b> 选中 .ogg → 导入面板 → 勾 <span class="kbd">Loop</span>，<span class="kbd">Loop Offset</span> 填 0，<span class="kbd">Loop End</span> 留空（等于全长）。<b>不勾这个，音乐播完就停。</b>
+  </div></div>
+</div>
+
+<h2>五、接入代码：三个必改点</h2>
+
+<p>现在的播放链路是 <code>AudioDirector.play_music()</code> → <code>BgmSynth.track()</code>。改成「优先读文件、没有就回落到合成曲」最稳，这样半成品状态下游戏永远有声音。</p>
+
+<div class="field">
+  <div class="field-label"><span>scripts/game/audio_director.gd</span></div>
+<pre>const MUSIC_FILES := {
+    "menu":    preload("res://assets/audio/bgm/bgm_menu.ogg"),
+    "battle":  preload("res://assets/audio/bgm/bgm_battle.ogg"),
+    "victory": preload("res://assets/audio/bgm/bgm_victory.ogg"),
+    "defeat":  preload("res://assets/audio/bgm/bgm_defeat.ogg"),
+}
+
+static func _stream_for(track_name: String) -> AudioStream:
+    if MUSIC_FILES.has(track_name):
+        return MUSIC_FILES[track_name]
+    return BgmSynth.track(track_name)   # 缺文件就回落到合成曲</pre>
+</div>
+
+<div class="note warn">
+<b>必改点 1 —— <code>audio_director.gd</code> 第 129 行：</b><br>
+<code>if stream.loop_mode == AudioStreamWAV.LOOP_FORWARD:</code><br>
+<code>loop_mode</code> 是 <code>AudioStreamWAV</code> 才有的属性。<b>Ogg 走的是 <code>AudioStreamOggVorbis</code>，读这个属性会直接报错</b>（Invalid get index），不是静默失效——但一样会崩在这一行。改成一个不关心类型的判断：<br>
+<code>if track_name != TRACK_VICTORY and track_name != TRACK_DEFEAT:</code><br>
+或者干脆抽一个 <code>static func loops(track_name) -&gt; bool</code>，让「哪几首循环」只有一处真身。
+</div>
+
+<div class="note warn">
+<b>必改点 2 —— 强度层：</b><code>_start_stem()</code>（第 168~180 行）现在固定去取 <code>BgmSynth.track(MUSIC_STEM)</code>。走 A 方案就把它换成「给 <code>_music</code> 挂 LowPassFilter 并随热度改 cutoff」；走 B 方案就再加一个播放器，<code>_start_stem</code> 改成同时起播 <code>battle_intense</code> 并保持静音。两种都要动 <code>set_combat_heat()</code> 的目标值。
+</div>
+
+<div class="note warn">
+<b>必改点 3 —— 测试不会红，这才是坑。</b><br>
+查过了：<code>tests/test_audio_system.gd</code> 里 5 条音频断言（第 268~315 行）全部<b>直接调 <code>BgmSynth.track()</code> 测合成器本身</b>——长度对不对、高频占比够不够、胜利/失败听感差得开不开。另外 3 条（337~344 行）是源码守卫，只查 <code>play_music()</code> 有没有被调用。<br><br>
+只要你把合成器留着当兜底（上面的写法就是），<b>换文件这件事没有任何一条测试会发现</b>。文件路径写错、<code>.import</code> 没勾 Loop、Ogg 加载失败静默回落——测试全绿，游戏里没声音。<br><br>
+所以改完必须自己补一条守卫，至少钉住「<code>_stream_for("battle")</code> 返回的不是 <code>AudioStreamWAV</code>」或者「返回的 stream 长度等于文件实测长度」。这是本仓库硬规则第 4 条的老问题：<b>文件在 + 测试绿 ≠ 功能在跑</b>。
+</div>
+
+<h2>六、授权（这条别跳过）</h2>
+
+<div class="note warn">
+<b>Suno 免费档生成的曲子不能商用。</b> 只有 Pro / Premier 付费档才带商业使用权。这个项目有 Android 导出预设（<code>com.fenghuoxiagu.game</code>）、有公开 GitHub 仓库——一旦要上架、要收费、要放进宣传片，免费档的曲子就是隐患。<br><br>
+另外 Suno 的条款里，作品的版权归属和使用范围在不同档位、不同时期都调整过。<b>真要发布前，去官网当前条款核对一遍，别信我这段转述。</b> 建议把每首曲子的「生成档位 + 生成日期 + 提示词」记在 <code>docs/bgm/CREDITS.md</code> 里——这既是合规记录，也是以后想重做时能复现的唯一线索。
+</div>
+
+<h2>七、动手顺序</h2>
+
+<ul>
+  <li><b>先做 <code>battle</code> 一首</b>，剪好、接进游戏、跑一局听 10 分钟。这首是 90% 的听感，也是唯一一首「好不好」靠长时间试听才能判断的。</li>
+  <li>再做 <code>menu</code>，然后是胜利/失败两个短句（半小时能搞定）。</li>
+  <li><b>最后</b>才碰 <code>battle_intense</code>——它依赖 <code>battle</code> 定下来的 BPM 和调性，顺序反了要重做。</li>
+  <li>每首接进去之后跑一次 <code>godot --headless --path godot --script res://tests/run_tests.gd</code>，确认没有因为资源加载失败把别的用例带红。</li>
+</ul>
+
+<div class="foot">
+烽火峡谷 · BGM 制作包 &nbsp;·&nbsp; 提示词按 <code>bgm_synth.gd</code> 现有谱面参数反推（BPM / 调性 / 小节数 / 情绪），不是通用模板<br>
+改动建议基于 <code>audio_director.gd</code> 与 <code>bgm_synth.gd</code> 当前实现，若这两个文件被并行会话改过，接之前重读一遍
+</div>
+
+</div>
+
+<script>
+document.querySelectorAll('button[data-copy]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var pre = btn.closest('.field').querySelector('pre');
+    var text = pre.textContent;
+    var done = function () {
+      btn.textContent = '已复制';
+      btn.classList.add('ok');
+      setTimeout(function () {
+        btn.textContent = '复制';
+        btn.classList.remove('ok');
+      }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+    } else {
+      fallback(text, done);
+    }
+  });
+});
+
+function fallback(text, done) {
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) {}
+  document.body.removeChild(ta);
+}
+</script>
+</body>
+</html>

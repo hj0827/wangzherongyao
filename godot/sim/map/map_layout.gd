@@ -34,44 +34,172 @@ const BUSHES := [
 	{"id": "bush_bottom_outer", "pos": Vector2(-18.0, 36.0), "radius": 3.4},
 ]
 
-# 野区墙体（2026-10-25 重做）。
-#
-# 坐标用两个量描述最省事：a = x - y（垂直河道，蓝方正）、b = x + y（沿河道，也是离中路多远）。
-# - a = 0 是河道中心线；a > 0 在蓝方半场，a < 0 在红方半场。
-# - b = 0 是中路中心线；b < 0 是上野，b > 0 是下野。
-#
-# 两类墙分工：
-# 1. 中路走廊墙（b 恒定）：贴着中路两侧各一条，中间留 9 米以上净宽。这是「中路是有墙的走廊」
-#    这件事唯一说得清的地方，也是最像 MOBA 野区的那一眼。
-# 2. 河道岸壁（a 恒定）：河两岸各有两段，把 buff 营地兜成半封闭的窝，逼迫从窄口绕进来。
+# 直墙：中路走廊 + 深野区分隔。**不含** buff 营地围栏（那部分由 CAMP_RINGS 生成）。
 #
 # 全部关于 y = -x 成对定义（mirror(p) = (-p.y, -p.x)）：
 # 蓝上 ↔ 蓝下、红上 ↔ 红下。test_jungle_walls 会校验每一段都有孪生兄弟。
 #
 # 避让是硬约束，不是审美：小兵沿折线直走 + 滑墙、不寻路，墙压进路面就是永久堵车；
 # 墙盖住营地/草丛/首领坑就是把那里变成不可进入的石头堆。
-const WALLS := [
+const STRAIGHT_WALLS := [
 	# --- 中路走廊（b = ∓13，离路中心 9.2 米）---------------------------------
 	{"id": "wall_blue_mid_corridor_top", "a": Vector2(2.5, -15.5), "b": Vector2(14.5, -27.5)},
 	{"id": "wall_blue_mid_corridor_bottom", "a": Vector2(15.5, -2.5), "b": Vector2(27.5, -14.5)},
 	# --- 蓝方深野区：与原有墙平行的第二道（b = -37），夹出一条 4 米净宽的走廊 ---
 	{"id": "wall_blue_deep_top", "a": Vector2(-7.5, -29.5), "b": Vector2(-1.5, -35.5)},
 	{"id": "wall_blue_deep_bottom", "a": Vector2(29.5, 7.5), "b": Vector2(35.5, 1.5)},
-	# --- 蓝 buff 坑围墙（a = 18：营地就在河岸边，只能往里让出一个身位）---------
-	{"id": "wall_blue_buff_ring_top", "a": Vector2(-5.0, -23.0), "b": Vector2(-11.0, -29.0)},
-	{"id": "wall_blue_buff_ring_bottom", "a": Vector2(23.0, 5.0), "b": Vector2(29.0, 11.0)},
-	# --- 红方野区：两个 buff 营地都紧贴中路（b = ∓16），放不下整条中廊墙，
-	# 改成围营地的一对平行短墙（b = ∓11 / ∓21），开口朝河道与基地两侧。-----------
-	{"id": "wall_red_upper_ring_mid_side", "a": Vector2(-14.5, 3.5), "b": Vector2(-20.5, 9.5)},
-	{"id": "wall_red_upper_ring_river_side", "a": Vector2(-19.5, -1.5), "b": Vector2(-25.5, 4.5)},
-	{"id": "wall_red_lower_ring_mid_side", "a": Vector2(-3.5, 14.5), "b": Vector2(-9.5, 20.5)},
-	{"id": "wall_red_lower_ring_river_side", "a": Vector2(1.5, 19.5), "b": Vector2(-4.5, 25.5)},
-	# --- 野区深处的隔断（原有 4 段，保留）------------------------------------
-	{"id": "wall_top_west", "a": Vector2(8.0, -36.0), "b": Vector2(-4.0, -26.0)},
-	{"id": "wall_bottom_west", "a": Vector2(36.0, -8.0), "b": Vector2(26.0, 4.0)},
-	{"id": "wall_top_east", "a": Vector2(-20.0, -8.0), "b": Vector2(-28.0, 2.0)},
-	{"id": "wall_bottom_east", "a": Vector2(8.0, 20.0), "b": Vector2(-2.0, 28.0)},
+	# --- 野区深处的隔断 ------------------------------------------------------
+	# 这两道原本一直伸到 buff 营地边上（原 a 端 (-4,-26) / (26,4)），
+	# 和新的围栏是同一个位置上的两块石头：两个盒体互相穿插，交点处碰撞法线来回翻。
+	# 现在从围栏表面外 1.4 米处截断，保留它们作为深野区隔断的作用。
+	{"id": "wall_top_west", "a": Vector2(8.0, -36.0), "b": Vector2(3.0, -31.8)},
+	{"id": "wall_bottom_west", "a": Vector2(36.0, -8.0), "b": Vector2(31.8, -3.0)},
+	# wall_top_east / wall_bottom_east 已整段并入红方两座 buff 围栏：它们原来是
+	# 红 buff 的「平行短墙」，位置和围栏完全重合，留着只会剩下的 1.4 米石墩。
 ]
+
+# --- buff 营地的不规则石壁围栏（2026-11-02）----------------------------------
+#
+# 玩家原话（附王者荣耀截图）：「红蓝buff要有这种不规则的墙围起来」。
+# 截图里王者峡谷的红/蓝 buff 是一个由**乱石围成的窝**：墙线鼓凸、内凹、带缺口，
+# 不是两段平行直墙。原来的实现正是「一对平行短墙」，俯视一眼是两块摆正的板子。
+#
+# 实现口径：
+# 1. 每座 buff 营地定义一条**折线**，顶点用「营地局部极坐标」给：角度（0° = +x，
+#    逆时针，可以超过 360）+ 半径。写极坐标而不是绝对 xy，是因为营地会挪、
+#    半场要镜像 —— 半径表挪营地时不用重算，镜像也只是角度取反。
+# 2. 折线是**开口**的：首尾之间那一段不放墙，就是进出的口子。
+#    开口一律朝河道那一侧，因为河岸坡本来就圈不进去（地形高度在那里掉到 -0.6）。
+# 3. 半径不是拍脑袋：每个顶点都过了探针（tools/probe_ring_fit.gd），
+#    同时满足地形平坦、不压兵线、不盖营地/草丛/首领坑/传送阵、与保留石壁留出净宽。
+# 4. 蓝方半场两座定义形状，红方半场两座由 mirror() 得到 —— 与其它地形数据同一套对称。
+#
+# 半径的**起伏**是这条数据存在的理由：4.35（贴着法阵盘边）~ 7.00（往深野区凸出一块）。
+# 一条等距圆弧俯视读起来还是「围栏」；有鼓有收、段与段之间还拐着弯，才读成山体。
+const CAMP_RINGS := [
+	{
+		"id": "ring_blue_buff_blue_side",
+		"camp": "blue_buff_blue_side",
+		"points": [
+			[195.0, 4.70], [230.0, 6.15], [265.0, 6.00], [300.0, 6.75],
+			[335.0, 4.85], [10.0, 5.75], [45.0, 4.70], [80.0, 4.90],
+		],
+	},
+	{
+		"id": "ring_blue_buff_red_side",
+		"camp": "blue_buff_red_side",
+		"points": [
+			[60.0, 5.20], [85.0, 6.40], [110.0, 6.90], [135.0, 6.40],
+			[160.0, 6.20], [185.0, 6.80], [210.0, 5.90], [235.0, 5.60],
+			[250.0, 4.90],
+		],
+	},
+]
+
+# 营地 → 围栏（**世界坐标**）。
+#
+# 返回 {"id", "camp", "mirrored", "points": Array[Vector2]}，找不到返回空字典
+# （小野点与首领坑没有围栏）。
+#
+# 红方半场那两座也能查到：CAMP_RINGS 只定义蓝方两座的形状，红方两座是它的镜像，
+# 所以查不到时反查「哪座蓝方营地的镜像落在它身上」，再把顶点整条 mirror 过去。
+static func camp_ring(camp_id: String) -> Dictionary:
+	for ring in CAMP_RINGS:
+		if str(ring.get("camp", "")) == camp_id:
+			return {"id": str(ring.id), "camp": camp_id, "mirrored": false, "points": ring_points(ring)}
+	for ring in CAMP_RINGS:
+		if _mirror_camp_id(str(ring.get("camp", ""))) != camp_id:
+			continue
+		var points: Array = []
+		for point in ring_points(ring):
+			points.append(mirror(point))
+		return {"id": str(ring.id), "camp": camp_id, "mirrored": true, "points": points}
+	return {}
+
+# 围栏顶点的世界坐标（只换算 CAMP_RINGS 里定义的那两座，即蓝方半场）。
+static func ring_points(ring: Dictionary) -> Array:
+	var camp := _camp_by_id(str(ring.get("camp", "")))
+	if camp.is_empty():
+		return []
+	var center: Vector2 = camp.pos
+	var points: Array = []
+	for entry in ring.get("points", []):
+		var angle := deg_to_rad(float(entry[0]))
+		points.append(center + Vector2(cos(angle), sin(angle)) * float(entry[1]))
+	return points
+
+static func _camp_by_id(camp_id: String) -> Dictionary:
+	for camp in CAMPS:
+		if str(camp.get("id", "")) == camp_id:
+			return camp
+	return {}
+
+# 所有环（蓝方定义 + 红方镜像）展开成与 WALLS 同构的墙段。
+#
+# 返回 [{"id", "a", "b", "ring", "camp", "index", "mirrored"}, ...]。
+# id 形如 `ring_blue_buff_blue_side_3`、`ring_blue_buff_blue_side_3_r`：
+# 墙体节点、岩脊、小地图、测试都靠这个 id 找人，所以它必须稳定且唯一。
+#
+# 用什么对称：**关于 y = -x 的镜像**（mirror(p) = (-p.y, -p.x)），与 WALLS 同口径。
+# 四座 buff 营地在镜像下正好两两成对：
+#   蓝方蓝 buff (-1,-23) ↔ 红方蓝 buff (23,1)
+#   蓝方红 buff (6,27)   ↔ 红方红 buff (-27,-6)
+# 所以「蓝方半场定义形状、镜像出红方」不会挪错营地，test_jungle_walls
+# 的镜像孪生校验也直接过。换成 180° 旋转（-p）会把环塞到隔壁营地头上。
+static func camp_ring_walls() -> Array:
+	var walls: Array = []
+	for ring in CAMP_RINGS:
+		var points := ring_points(ring)
+		if points.size() < 2:
+			continue
+		var base := str(ring.get("id", "ring"))
+		for index in range(points.size() - 1):
+			walls.append({
+				"id": "%s_%d" % [base, index],
+				"a": points[index],
+				"b": points[index + 1],
+				"ring": base,
+				"camp": str(ring.get("camp", "")),
+				"index": index,
+				"mirrored": false,
+			})
+			walls.append({
+				"id": "%s_%d_r" % [base, index],
+				"a": mirror(points[index]),
+				"b": mirror(points[index + 1]),
+				"ring": base,
+				"camp": str(_mirror_camp_id(str(ring.get("camp", "")))),
+				"index": index,
+				"mirrored": true,
+			})
+	return walls
+
+# 碰撞 / 视野 / 小地图 / 渲染都只认这一份墙列表：
+# 直墙（STRAIGHT_WALLS）+ buff 营地围栏（CAMP_RINGS 展开）。
+#
+# 为什么是 static var 而不是 const：围栏顶点是极坐标，要读 CAMPS 里的营地位置才能
+# 换算出世界坐标，const 求值阶段读不到。static var 在脚本加载时求值一次，
+# 之后所有读取都是同一个数组实例（没有每帧重算）。
+#
+# **不要往这个数组里 push**：它是共享实例，改一次会污染整局。
+# 需要变体请 duplicate()。
+static var WALLS: Array = _build_walls()
+
+static func _build_walls() -> Array:
+	var walls: Array = STRAIGHT_WALLS.duplicate(true)
+	walls.append_array(camp_ring_walls())
+	return walls
+
+# 镜像后落在哪座营地（`blue_buff_blue_side` ↔ `red_buff_blue_side`）。
+static func _mirror_camp_id(camp_id: String) -> String:
+	var camp := _camp_by_id(camp_id)
+	if camp.is_empty():
+		return ""
+	var turned := mirror(camp.pos)
+	for other in CAMPS:
+		if (other.pos as Vector2).distance_to(turned) < 0.01:
+			return str(other.get("id", ""))
+	return ""
 
 # 野区：**每个半场 6 个野点**，对齐王者峡谷的野怪分布。
 #
@@ -173,39 +301,18 @@ const TELEPORT_PADS := [
 ]
 
 # --- 角落广场 ---------------------------------------------------------------
-# 两个空角落整块铺石（2026-10-28，玩家：「把这个角落全部铺上……不需要那个桥」）。
-#
-# 之前那里是「石桥 + 桥外一片水 + 一圈边界乱石」：斜俯视能看见桥与墙之间那个水窟窿。
-# 改成整块广场之后角落是一个完整石面，阵放到最角落，角落桥不再建。
-#
-# 几何口径（两条都被 test_river_and_teleport 钉住）：
-#   - INNER = 40：必须**盖住上下路的跨河点**。跨河段沿路 ±(桥长/2)=±6.4 米，
-#     最远到 (43.1, 43.1)，40 留出 3 米余量，拆桥之后路面不会悬在水上；
-#   - OUTER = 58.6：塞进边界墙基座下面（墙内表面 58.0），墙脚不留缝。
-# 两座按**角落符号**取（+1/+1 与 -1/-1），天然绕原点 180° 对称。
+# 2026-10-31 玩家反馈（附截图）：「不需要这个桥，只需要路即可」。
+# 边路角落不再铺设桥梁或广场平台，路面在平地上直接贯通，包含完整路缘石。
+# 保留 corner_plazas() 与 inside_corner_plaza() 接口（返回空数组/false）以兼容已有调用。
 const CORNER_PLAZA_INNER := 40.0
 const CORNER_PLAZA_OUTER := 58.6
 const CORNER_PLAZA_SIGNS := [Vector2(1.0, 1.0), Vector2(-1.0, -1.0)]
 
 static func corner_plazas() -> Array:
-	var plazas: Array = []
-	for sign_point in CORNER_PLAZA_SIGNS:
-		var corner: Vector2 = sign_point
-		var near_point := corner * CORNER_PLAZA_INNER
-		var far_point := corner * CORNER_PLAZA_OUTER
-		plazas.append({
-			"corner": corner,
-			"min": Vector2(minf(near_point.x, far_point.x), minf(near_point.y, far_point.y)),
-			"max": Vector2(maxf(near_point.x, far_point.x), maxf(near_point.y, far_point.y)),
-		})
-	return plazas
+	return []
 
 # 点是否落在某块角落广场上（margin > 0 表示向外扩，给布景避让用）。
-static func inside_corner_plaza(point: Vector2, margin := 0.0) -> bool:
-	for plaza in corner_plazas():
-		if point.x >= float(plaza.min.x) - margin and point.x <= float(plaza.max.x) + margin \
-				and point.y >= float(plaza.min.y) - margin and point.y <= float(plaza.max.y) + margin:
-			return true
+static func inside_corner_plaza(_point: Vector2, _margin := 0.0) -> bool:
 	return false
 
 # --- 边界城墙 -------------------------------------------------------------
@@ -303,29 +410,35 @@ const END_MAX_RADIUS := 1.15
 const END_LANE_MARGIN := 0.2        # 石面离兵线路面至少留这么多
 const END_AREA_MARGIN := 0.15       # 石面离营地 / 首领坑 / 传送阵边缘至少留这么多
 
-# 返回 [{"id", "wall", "end", "pos", "outward", "radius"}, ...]，一段墙两个端头。
+# 返回 [{"id", "wall", "end", "pos", "outward", "radius"}, ...]，**每个墙端一个**。
+#
+# 为什么要按位置去重：buff 围栏是一条折线，相邻两段的端点是**同一个墙角**
+# （`ring_x_2:b` 与 `ring_x_3:a` 坐标完全相同）。不去重的话，那里会叠两块
+# 位置一致、朝向不同的露头石 —— 完美重合导致 z-fighting，俯视是一块抖动的石头。
+# 去重后墙角只有一块石头，刚好把折线外侧那个楔形缺口堵住。
 static func wall_ends() -> Array:
 	var ends: Array = []
+	var seen := {}
 	for wall in WALLS:
 		var a: Vector2 = wall.a
 		var b: Vector2 = wall.b
 		var axis := (b - a).normalized()
-		ends.append({
-			"id": "%s:a" % str(wall.id),
-			"wall": str(wall.id),
-			"end": "a",
-			"pos": a,
-			"outward": -axis,
-			"radius": wall_end_radius(a),
-		})
-		ends.append({
-			"id": "%s:b" % str(wall.id),
-			"wall": str(wall.id),
-			"end": "b",
-			"pos": b,
-			"outward": axis,
-			"radius": wall_end_radius(b),
-		})
+		for side in ["a", "b"]:
+			var point: Vector2 = a if side == "a" else b
+			# 5 厘米取整：折线顶点的两份拷贝来自同一次三角函数计算，本来就逐位相等，
+			# 取整只是防将来有人手动粘了两份略有差异的坐标。
+			var key := "%d_%d" % [roundi(point.x * 20.0), roundi(point.y * 20.0)]
+			if seen.has(key):
+				continue
+			seen[key] = true
+			ends.append({
+				"id": "%s:%s" % [str(wall.id), side],
+				"wall": str(wall.id),
+				"end": side,
+				"pos": point,
+				"outward": -axis if side == "a" else axis,
+				"radius": wall_end_radius(point),
+			})
 	return ends
 
 # 这个位置最大能放多大的石头：取「离最近的兵线路面 / 营地 / 首领坑 / 传送阵还剩多少」。

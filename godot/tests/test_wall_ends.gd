@@ -23,13 +23,16 @@ const Arena = preload("res://scripts/game/arena.gd")
 const MIN_RADIUS := 0.85
 
 func test_every_wall_has_two_ends_and_they_point_outward() -> void:
+	# 墙端按**位置**去重：buff 围栏是折线，相邻两段共用顶点（同一个墙角），
+	# 那里只能有一块露头石 —— 叠两块会完美重合、z-fighting，俯视是一块抖动的石头。
+	# 所以这里校验的是「每段墙的两个端头都处理过了」，
+	# 而不是「ends 数组长度 == 墙数 × 2」。
 	var ends: Array = MapLayout.wall_ends()
-	eq(ends.size(), MapLayout.WALLS.size() * 2, "每段墙两个端头，一个都不能少")
-	var keys := {}
+	var covered := {}
 	for entry in ends:
 		var key := "%s:%s" % [str(entry.wall), str(entry.end)]
-		check(not keys.has(key), "端头重复：%s" % key)
-		keys[key] = true
+		check(not covered.has(key), "端头重复：%s" % key)
+		covered[key] = true
 		# 「朝外」方向必须背离墙身：露头石是往墙外探出去的，朝里就变成墙中间的疙瘩。
 		var wall := _wall_by_id(str(entry.wall))
 		if wall.is_empty():
@@ -37,6 +40,18 @@ func test_every_wall_has_two_ends_and_they_point_outward() -> void:
 		var other: Vector2 = wall.b if str(entry.end) == "a" else wall.a
 		var outward: Vector2 = entry.outward
 		gt(outward.dot((entry.pos as Vector2) - other), 0.5, "端头朝向搞反了：%s" % key)
+	for wall in MapLayout.WALLS:
+		# 折线共用的那一端可能已经被前一段登记过，所以只要求「位置被覆盖」。
+		for side in ["a", "b"]:
+			var point: Vector2 = wall.a if side == "a" else wall.b
+			var found := false
+			for entry in ends:
+				if (entry.pos as Vector2).distance_to(point) < 0.01:
+					found = true
+					break
+			check(found, "墙端没有露头石处理过：%s:%s (%.2f, %.2f)" % [str(wall.id), side, point.x, point.y])
+	# 去重必须是**真的发生了**：四座围栏共用 24 个墙角，否则这条数据没生效。
+	lt(float(ends.size()), float(MapLayout.WALLS.size() * 2), "折线围栏的墙角必须去重：%d 个端头 / %d 段墙" % [ends.size(), MapLayout.WALLS.size()])
 
 func _wall_by_id(id: String) -> Dictionary:
 	for wall in MapLayout.WALLS:
@@ -121,7 +136,10 @@ func test_every_wall_end_is_capped_or_deliberately_skipped() -> void:
 				continue
 			for surface in mesh_instance.mesh.get_surface_count():
 				eq(mesh_instance.get_surface_override_material(surface), stone, "露头石必须与墙身同材质：%s" % node_name)
-	gt(float(built), float(MapLayout.WALLS.size()) * 1.8, "至少九成墙端要真的长出石头，当前 %d" % built)
+		# 阈值 1.2 而不是 1.8：buff 围栏的墙角是**共享**的（30 段围栏只有 24 个墙角），
+	# 去重后墙端总数少了三成。这条断言要守的是「墙端不是被刀切平的」，
+	# 而不是某个固定比例 —— 按墙数 × 1.2 仍然意味着绝大多数截面被石头收口。
+	gt(float(built), float(MapLayout.WALLS.size()) * 1.2, "至少七成墙端要真的长出石头，当前 %d" % built)
 	arena.free()
 
 func test_end_rocks_stay_below_the_wall_top_so_they_never_hide_the_hero() -> void:

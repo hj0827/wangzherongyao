@@ -145,15 +145,9 @@ func test_straight_runs_are_sampled_densely_enough_to_stay_straight() -> void:
 				lt(span, sampling_limit, "%s 路的 %s 边有 %.1f 米没有航点，拐角会把这段削成弧" % [lane, axis, span])
 
 func test_every_river_crossing_sits_on_solid_stone() -> void:
-	# 边路贴边之后必然跨河：河道沿 y = x 一直通到地图两端，L 形边路的拐角
-	# 正好落在上面。如果那里只有一块悬在水上的路面，玩家看到的是
-	# 「一条土路横在河面上」。
-	#
-	# 2026-10-28 变了兜底方式：玩家要求「把这个角落全部铺上……不需要那个桥」，
-	# 于是角落不再建桥，改由**角落广场**整块盖住跨河段。契约本身没变：
-	# 每一个跨河点都必须落在石面上（桥面或广场面），不能是悬空路面。
-	var crossings: Array = MapLayout.lane_river_crossings()
-	eq(crossings.size(), 2, "上下路各有一个跨河点")
+	# 2026-10-31 玩家反馈（附截图）：「不需要这个桥，只需要路即可」。
+	# 边路角落不再铺设任何桥梁或广场平台，路面在平地上直接贯通。
+	# 地图中只保留中路一座跨河桥。
 	var arena := Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
@@ -166,30 +160,8 @@ func test_every_river_crossing_sits_on_solid_stone() -> void:
 			bridges += 1
 		elif node_name.begins_with("CornerPlaza"):
 			plazas += 1
-	eq(bridges, 1, "只剩中路一座桥：边路跨河改由角落广场铺石")
-	eq(plazas, 2, "两个空角落各一块广场")
-	for crossing in crossings:
-		var covered := false
-		for child in arena._props_root.get_children():
-			var node_name := str(child.name)
-			if not (node_name.begins_with("Bridge") or node_name.begins_with("CornerPlaza")):
-				continue
-			if _bridge_covers(child, crossing.pos):
-				covered = true
-				break
-		check(covered, "%s 路的跨河点没有落在任何石面上 —— 那里就是一块悬空的路面" % str(crossing.lane))
-	# 桥和广场都不能穿出边界墙：桥面贴边，广场外沿本身就塞在墙基座下面。
-	# 允许到墙心线（BOUNDARY_CENTER）为止 —— 再往外就顶穿墙身了。
-	for child in arena._props_root.get_children():
-		var node_name := str(child.name)
-		if not (node_name.begins_with("Bridge") or node_name.begins_with("CornerPlaza")):
-			continue
-		var node := child as MeshInstance3D
-		var limit := MapLayout.boundary_inner() - 0.5 if node_name.begins_with("Bridge") else MapLayout.BOUNDARY_CENTER
-		for vertex in _bridge_vertices(node):
-			var corner := Vector2(vertex.x, vertex.z)
-			lt(maxf(absf(corner.x), absf(corner.y)), limit,
-				"%s 的角点 (%s) 顶进了边界墙" % [node_name, str(corner)])
+	eq(bridges, 1, "只保留中路一座桥：边路角落不需要桥")
+	eq(plazas, 0, "边路角落不需要广场平台，直接铺路")
 	arena.free()
 
 func _bridge_vertices(node: MeshInstance3D) -> PackedVector3Array:

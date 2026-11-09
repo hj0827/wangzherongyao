@@ -187,16 +187,84 @@ func test_walls_are_dense_enough_and_short_enough_to_shape_a_jungle() -> void:
 func test_walls_do_not_cross_each_other() -> void:
 	# 两道墙交叉 = 两个盒子互相穿模，俯视看是一坨歪掉的多边形，
 	# 而且交点处的碰撞法线会来回翻转，贴上去会抖。
+	#
+	# 但「共享端点」不算交叉：buff 营地的围栏是一条**折线**，相邻两段
+	# 本来就共用顶点 —— 那是同一个墙角，不是两块石头互相插进去。
+	# Geometry2D.segment_intersects_segment 对共享端点也会返回交点，
+	# 所以这里必须自己区分「端点相接」与「中途穿过」。
 	var crossed := 0
 	for i in MapLayout.WALLS.size():
 		for j in range(i + 1, MapLayout.WALLS.size()):
 			var first: Dictionary = MapLayout.WALLS[i]
 			var second: Dictionary = MapLayout.WALLS[j]
 			var hit: Variant = Geometry2D.segment_intersects_segment(first.a, first.b, second.a, second.b)
-			if hit != null:
-				check(false, "墙与墙交叉穿模：%s × %s" % [str(first.id), str(second.id)])
-				crossed += 1
+			if hit == null:
+				continue
+			var point: Vector2 = hit
+			var at_first_end: bool = point.distance_to(first.a) < 0.01 or point.distance_to(first.b) < 0.01
+			var at_second_end: bool = point.distance_to(second.a) < 0.01 or point.distance_to(second.b) < 0.01
+			if at_first_end and at_second_end:
+				continue
+			check(false, "墙与墙交叉穿模：%s × %s @ (%.2f, %.2f)" % [str(first.id), str(second.id), point.x, point.y])
+			crossed += 1
 	eq(crossed, 0, "墙体之间不能交叉")
+
+func test_buff_camps_are_enclosed_by_rings_not_parallel_slabs() -> void:
+	# 2026-11-02 玩家原话（附王者截图）：「红蓝buff要有这种不规则的墙围起来」。
+	# 上一版是「一对平行短墙」，俯视一眼是两块摆正的板子，读不出 MOBA 野区的窝。
+	#
+	# 契约：
+	# 1. 四座 buff 营地各有一条围栏，且围栏顶点数 ≥ 6（少于 6 个顶点拼不出不规则形状）；
+	# 2. 半径必须有起伏（max/min ≥ 1.2）：等距圆弧还是「围栏」，不是山体；
+	# 3. 围栏必须**开口**：首尾不相连，留一个 5 米以上的进出通道；
+	# 4. 围栏内表面要够宽：英雄能贴着怪站（≥ 营地半径 + 英雄半径）；
+	# 5. 围栏的每一段都真的进了 WALLS（有碰撞），不是画在旁边的装饰。
+	for camp in MapLayout.CAMPS:
+		var buff := str(camp.get("buff", ""))
+		if buff == "":
+			continue
+		var ring: Dictionary = MapLayout.camp_ring(str(camp.id))
+		check(not ring.is_empty(), "buff 营地必须有围栏：" + str(camp.id))
+		if ring.is_empty():
+			continue
+		var points: Array = ring.points
+		gt(float(points.size()), 5.0, "围栏顶点太少，拼不出不规则形状：%s（%d 个）" % [str(camp.id), points.size()])
+		var radii: Array[float] = []
+		for point in points:
+			radii.append((point as Vector2).distance_to(camp.pos))
+		var spread: float = radii.max() / maxf(radii.min(), 0.001)
+		gt(spread, 1.2, "围栏半径必须起伏，等距圆弧还是「围栏」不是山体：%s（%.2f 倍）" % [str(camp.id), spread])
+		var mouth := (points[0] as Vector2).distance_to(points[points.size() - 1])
+		gt(mouth, 5.0, "围栏必须留出进出通道：%s（只有 %.2f 米）" % [str(camp.id), mouth])
+		var inner: float = radii.min() - MapLayout.WALL_THICKNESS * 0.5
+		gt(inner, float(camp.radius) + 0.55, "围栏内表面太窄，英雄贴不到怪：%s（%.2f 米）" % [str(camp.id), inner])
+		# 每一段都要在 WALLS 里（碰撞、视野、小地图、渲染都只认 WALLS）。
+		var registered := 0
+		for index in range(points.size() - 1):
+			for wall in MapLayout.WALLS:
+				if str(wall.get("ring", "")) != str(ring.id) or int(wall.get("index", -1)) != index:
+					continue
+				registered += 1
+				break
+		eq(registered, points.size() - 1, "围栏的每一段都必须进 WALLS：%s" % str(camp.id))
+
+func test_every_ring_segment_has_a_mirror_twin() -> void:
+	# 围栏的红方那两座是从蓝方镜像出来的，两边必须逐段对上。
+	# 单独写一条：test_map_layout 只校验 a 点，这里把两端一起校验。
+	var keys := {}
+	for wall in MapLayout.WALLS:
+		keys["%s|%s" % [_key(wall.a), _key(wall.b)]] = true
+	var checked := 0
+	for wall in MapLayout.WALLS:
+		if not wall.has("ring"):
+			continue
+		checked += 1
+		var a: Vector2 = MapLayout.mirror(wall.a)
+		var b: Vector2 = MapLayout.mirror(wall.b)
+		var straight: bool = keys.has("%s|%s" % [_key(a), _key(b)])
+		var swapped: bool = keys.has("%s|%s" % [_key(b), _key(a)])
+		check(straight or swapped, "围栏墙段缺少 y=-x 镜像孪生：%s" % str(wall.id))
+	gt(float(checked), 15.0, "四座 buff 营地加起来至少 16 段围栏（含镜像）")
 
 func test_walls_are_tall_enough_to_read_as_a_rock_face() -> void:
 	# 1.7 米的墙在 51° 俯视下只剩一条石坎，读不出「这是墙」。

@@ -123,47 +123,15 @@ func test_river_snapshot_and_network_carry_reveals() -> void:
 		near(float(result.snapshot.river.reveals.blue[0].radius), 16.0, 0.001, "视野半径保留")
 
 func test_corner_plazas_pave_the_two_empty_corners() -> void:
-	# 2026-10-28（玩家：「把这个角落全部铺上……不需要那个桥」）：
-	# 两个空角落整块铺石，角落桥拆掉。三条硬约束：
-	#   ① 广场必须盖住上下路的跨河点 —— 桥没了，那里只剩广场兜底，
-	#      盖不住就是「一条土路悬在河面上」；
-	#   ② 广场外沿必须够到边界墙内表面 —— 差一截就是墙脚一条水缝；
-	#   ③ 两座绕原点 180° 对称（公平性）。
+	# 2026-10-31 玩家反馈（附截图）：「不需要这个桥，只需要路即可」。
+	# 边路角落不再铺设桥梁或广场平台，路面在平地上直接贯通。
+	# corner_plazas() 接口返回空，不再生成 CornerPlaza 节点。
 	var plazas: Array = MapLayout.corner_plazas()
-	eq(plazas.size(), 2, "两个空角落各一块广场")
+	eq(plazas.size(), 0, "角落广场已移除，不再铺设石质平台")
 	var crossings: Array = MapLayout.lane_river_crossings()
-	eq(crossings.size(), 2, "上下路各有一个跨河点")
-	for plaza in plazas:
-		# 外沿越靠外，绝对值越大：取两块顶点里更靠墙的那个。
-		gt(maxf(absf(float(plaza.min.x)), absf(float(plaza.max.x))), MapLayout.boundary_inner() - 0.5,
-			"广场必须铺到墙脚，否则墙根留一条水缝")
-		gt(maxf(absf(float(plaza.min.y)), absf(float(plaza.max.y))), MapLayout.boundary_inner() - 0.5,
-			"广场必须铺到墙脚，否则墙根留一条水缝")
 	for crossing in crossings:
-		check(MapLayout.inside_corner_plaza(crossing.pos),
-			"%s 路的跨河点必须落在角落广场里（桥拆了，这里只剩广场兜底）" % str(crossing.lane))
-
-	# 只验「跨河点」是不够的：跨河点落在广场上、但广场内沿切进水面时，
-	# 路面仍然会从水上方伸出去一截（把 INNER 改成 46 就是这样，跨河点 47.66 照样在广场里）。
-	# 所以逐个采样兵线：**凡是在水面上方的路面点，都必须落在广场里**。
-	for lane in ["top", "bottom"]:
-		var paved := 0
-		for sample in _lane_samples(str(lane), 0.5):
-			var a := absf(sample.x - sample.y)
-			if a > MapData.RIVER_HALF_WIDTH - 0.5:
-				continue
-			if maxf(absf(sample.x), absf(sample.y)) < 30.0:
-				continue
-			check(MapLayout.inside_corner_plaza(sample),
-				"%s 路在水面上的路面点 %s 没有铺到广场里 —— 桥拆了之后那里是悬空路面" % [str(lane), str(sample)])
-			paved += 1
-		gt(float(paved), 0.0, "%s 路必须真的有一段跨在河上（否则这条断言是空的）" % str(lane))
-
-	# 对称：两块广场互为 180° 取反。
-	var first: Dictionary = plazas[0]
-	var second: Dictionary = plazas[1]
-	near(float(first.min.x), -float(second.max.x), 0.01, "两座广场 x 对称")
-	near(float(first.min.y), -float(second.max.y), 0.01, "两座广场 y 对称")
+		check(not MapLayout.inside_corner_plaza(crossing.pos),
+			"跨河点不再标记在角落广场上")
 
 # 兵线逐 0.5 米采样（跨河段要按采样点量，只看航点会正好跳过水面）。
 func _lane_samples(lane: String, step: float) -> Array:
@@ -190,16 +158,16 @@ func test_teleport_pads_sit_deep_in_the_two_corners() -> void:
 		# 和营地犯过的是同一个错：mirror 会把两座阵都放到同一侧。
 		check((second.pos as Vector2).distance_to(-(first.pos as Vector2)) < 0.01, "两座传送阵绕地图中心 180° 对称")
 
-	# 2026-10-28 第二版的位置契约（玩家：「将这个传送阵放在最角落里面」）：
-	#   ① 阵心在角落广场里 —— 广场铺到墙脚，阵才有地方站；
-	#   ② 阵心必须真的靠角落：离地图角点不超过 12 米（旧两版分别是 30+ 和 14.6）；
+	# 2026-10-31 第三版的位置契约（玩家：「不需要这个桥，只需要路即可」）：
+	#   ① 阵心在平地角落里 —— 坐在地面草面上；
+	#   ② 阵心必须真的靠角落：离地图角点不超过 12 米；
 	#   ③ 阵心必须还站得进去：可走边界 = BOUNDS - 相机边距 - 英雄半径 = 53.65，
 	#      至少留 1 米余量，否则「看得见阵、走不进去」；
 	#   ④ 两座都是中立设施（到两方基地等距）。
 	var walk_limit := MapData.BOUNDS - MapData.CAMERA_WALL_MARGIN - 0.55
 	for pad in pads:
 		var point: Vector2 = pad.pos
-		check(MapLayout.inside_corner_plaza(point), "%s 必须落在角落广场上" % str(pad.id))
+		check(not MapLayout.inside_corner_plaza(point), "%s 位于平地草面，不再落在角落广场上" % str(pad.id))
 		var map_corner := Vector2(signf(point.x) * MapData.BOUNDS, signf(point.y) * MapData.BOUNDS)
 		lt(point.distance_to(map_corner), 12.0,
 			"%s 要放在最角落（离地图角点 %.2f 米）" % [str(pad.id), point.distance_to(map_corner)])

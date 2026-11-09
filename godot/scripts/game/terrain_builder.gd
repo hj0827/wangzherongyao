@@ -16,6 +16,8 @@ const CELLS := 128           # 每边格数 → 2.03m 一格
 const RIVER_HALF := 9.0      # 河道半宽，与 MapData.RIVER_HALF_WIDTH 同源
 const RIVER_BED := -1.45     # 河床相对高度（水面在 -0.42，水深约 1m）
 const RIVER_SLOPE := 4.5     # 河岸过渡宽度
+const RIVER_LENGTH_HALF := 50.0  # 河道半长：两端在 (±35, ±35) 附近自然收口，不切穿边路角落
+const RIVER_END_SLOPE := 6.0     # 河道端头过渡宽度
 const PLAY_HALF := 60.0      # 抬升起点。必须 > MapData.BOUNDS(58)：
                              # 单位最远能走到 58，地形提前抬升会把人埋进坡里。
 const HILL_FULL := 92.0      # 到这里达到完整丘陵高度
@@ -45,7 +47,10 @@ func height_at(x: float, z: float) -> float:
 
 	# 河床：河心最深，到岸线附近平滑回到 0，形成真实的河岸坡
 	var bed := 1.0 - smoothstep(RIVER_HALF - 2.0, RIVER_HALF + RIVER_SLOPE, river_d)
-	var h := RIVER_BED * bed
+	# 两端向岸上收坡：边路角落是完整的陆地，路面在平地上走，不需要跨河桥
+	var river_along := absf(x + z) * 0.70710678
+	var along_factor := 1.0 - smoothstep(RIVER_LENGTH_HALF - RIVER_END_SLOPE, RIVER_LENGTH_HALF, river_along)
+	var h := RIVER_BED * bed * along_factor
 
 	# 丘陵：只在可玩区外抬升；边界线用噪声扰动，避免方盒子感
 	var edge := maxf(absf(x), absf(z)) + _ridge.get_noise_2d(x, z) * 5.5
@@ -141,7 +146,9 @@ void fragment() {
 	vec3 sand  = d1 * vec3(1.04, 0.96, 0.80);
 	vec3 rock  = d1 * vec3(0.62, 0.63, 0.66);
 
-	float bank = smoothstep(river_half + 5.0, river_half - 2.0, river_d);
+	float river_along = abs(wpos.x + wpos.z) * 0.70710678;
+	float along_factor = 1.0 - smoothstep(44.0, 50.0, river_along);
+	float bank = smoothstep(river_half + 5.0, river_half - 2.0, river_d) * along_factor;
 	float rocky = smoothstep(0.30, 0.62, slope);
 
 	vec3 col = mix(grass, dirt, smoothstep(0.40, 0.62, g3.r) * 0.52 + smoothstep(0.62, 0.88, g1.g) * 0.22);

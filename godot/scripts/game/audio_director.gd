@@ -17,7 +17,7 @@ extends Node
 #   打起来时推 STEM 的音量，就是「同一首曲子更紧张」，不会破拍也不会断层。
 
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
-const BgmSynth = preload("res://scripts/game/bgm_synth.gd")
+const BgmLibrary = preload("res://scripts/game/bgm_library.gd")
 const AudioPlan = preload("res://scripts/game/audio_plan.gd")
 
 const MUSIC_MENU := "menu"
@@ -121,16 +121,15 @@ func play_music(track_name: String) -> void:
 	if track_name == "" or _track == track_name:
 		return
 	_track = track_name
-	var stream := BgmSynth.track(track_name)
+	# 曲库优先给下载好的成品 OGG，缺失才回落 BgmSynth 的合成曲。
+	# 循环标记由曲库按轨道设定（AudioStreamOggVorbis 没有 loop_mode，
+	# 别在这里判断子类属性）。
+	var stream := BgmLibrary.track(track_name)
 	if stream == null:
 		return
 	_music.stream = stream
 	_music.volume_db = SILENT_DB
-	if stream.loop_mode == AudioStreamWAV.LOOP_FORWARD:
-		_music.play()
-	else:
-		# 结算音（胜利/失败）是一次性的：播完就停，不留空转。
-		_music.play()
+	_music.play()
 	_music_target = MUSIC_DB
 	_start_stem(track_name == MUSIC_BATTLE)
 
@@ -171,8 +170,10 @@ func _start_stem(enabled: bool) -> void:
 		if _stem.playing:
 			_stem.stop()
 		return
-	var stream := BgmSynth.track(MUSIC_STEM)
+	var stream := BgmLibrary.track(MUSIC_STEM)
 	if stream == null:
+		# battle 已换成成品曲时曲库不提供合成 stem —— 两首不同调性的曲子
+		# 叠播是噪音不是紧张感。此时热度只靠主曲音量表达。
 		return
 	_stem.stream = stream
 	_stem.volume_db = SILENT_DB

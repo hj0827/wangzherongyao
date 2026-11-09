@@ -13,6 +13,7 @@ const ModelUtils = preload("res://scripts/game/model_utils.gd")
 const TowerVisual = preload("res://scripts/game/tower_visual.gd")
 const TerrainBuilder = preload("res://scripts/game/terrain_builder.gd")
 const ArenaLook = preload("res://scripts/game/arena_look.gd")
+const OcclusionFade = preload("res://scripts/game/occlusion_fade.gd")
 const GrassField = preload("res://scripts/game/grass_field.gd")
 const BushField = preload("res://scripts/game/bush_field.gd")
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
@@ -2011,10 +2012,6 @@ func _build_lane_edges() -> void:
 			# 俯视看就是桥面镶了一圈牙 —— 桥段的路缘石必须让位。
 			if _inside_bridge_window(float(stone.get("arc", 0.0)), windows):
 				continue
-			# 角落广场同理：广场面（0.075）压在路缘石顶（0.18）之下，
-			# 石头会从石面里冒出半截 —— 广场里的路缘石一律不铺。
-			if MapLayout.inside_corner_plaza(stone.pos):
-				continue
 			stones.append(stone)
 	if stones.is_empty():
 		return
@@ -2085,8 +2082,8 @@ func _build_river() -> void:
 	var river := MeshInstance3D.new()
 	river.name = "River"
 	var plane := PlaneMesh.new()
-	# 长度远超地图，两端沉进雾里，看不到水面尽头
-	plane.size = Vector2(320.0, 17.4)
+	# 河道长 98 米（两端到 ±49m），在端头河岸下自然收口，不切入边路
+	plane.size = Vector2(98.0, 17.4)
 	river.mesh = plane
 	# 长边要贴着河道中心线（y = x）：局部 +X 经 -45° 旋转后指向 (1,0,1)。
 	river.rotation.y = -PI * 0.25
@@ -2156,11 +2153,10 @@ __OUTSIDE_APPLY__
 	river.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(river)
 
-	# 2026-10-28：边路的两个跨河角落改成**整块铺石**（玩家：「把这个角落全部铺上……
-	# 不需要那个桥」）。角落桥不再建 —— 广场已经把跨河段整段盖住，
-	# 桥的护栏/桥墩/接坡留在广场底下反而会露出半截。
+	# 2026-10-31 玩家反馈（附截图）：「不需要这个桥，只需要路即可」。
+	# 边路角落不再铺设桥梁或广场，路面在平地上直接贯通（包含路缘石）。
+	# 只保留中路主桥。
 	_build_bridge("mid", Vector2.ZERO, BRIDGE_SPAN_MID)
-	_build_corner_plazas()
 
 # 角落广场：两个空角落整块铺石（数据在 MapLayout.corner_plazas()）。
 #
@@ -2652,15 +2648,14 @@ func _build_map_features() -> void:
 		var pad_color := Color(0.4, 0.82, 0.92)
 		# 盘半径走 MapLayout 的唯一真身：传送判定用的是同一个数，
 		# 画大 / 画小都会变成「看着在阵里、按了没反应」。
-		# 高度必须压在广场面**之上**：阵落在角落广场里，广场面 y = BRIDGE_DECK_Y(0.075)，
-		# 沿用野区那套 0.04 会被广场整个盖住 —— 阵还在，画面上什么都没有。
+		# 阵坐在平地草面上（0.04）
 		_add_map_disc(
 			pad.pos, MapLayout.PAD_DISC_RADIUS,
 			Color(pad_color.r, pad_color.g, pad_color.b, 0.2), pad_color,
-			BRIDGE_DECK_Y + 0.02
+			0.04
 		)
 		# 图腾柱朝角落里立（离阵心 4.2 米，在阵盘 3.0 之外）：
-		# 站在广场上、不压阵眼，也不立在路面正中挡小兵。
+		# 站在草地上、不压阵眼，也不立在路面正中挡小兵。
 		_add_map_totem(pad.pos + Vector2(pad.get("totem", Vector2(0.0, -2.8))), 2.6, pad_color)
 
 # 岩脊单块：fit_scene 先把高度对齐，再在水平方向拉伸成更宽的岩块。
@@ -3350,6 +3345,12 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 			var crystal_shield: Node3D = record.get("crystal_shield")
 			if crystal_shield:
 				crystal_shield.visible = float(entity.get("shield", 0.0)) > 0.0
+			# 水晶让路：英雄（就是相机焦点）靠近时，把挡视线的柱身与宝石淡出去，
+			# 否则英雄进了泉水在屏幕上只剩一顶帽子。没有本地英雄时保持实心。
+			if not viewer.is_empty():
+				var hero_point := Vector2(float(viewer.get("x", 0.0)), float(viewer.get("y", 0.0)))
+				var crystal_point := Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0)))
+				OcclusionFade.apply(record, hero_point.distance_to(crystal_point))
 		var hp := float(entity.get("hp", 0.0))
 		var max_hp := maxf(1.0, float(entity.get("max_hp", 1.0)))
 		var ratio := clampf(hp / max_hp, 0.0, 1.0)
@@ -3529,6 +3530,9 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	var halo_node: MeshInstance3D = null
 	var glow_node: MeshInstance3D = null
 	var no_shadow_parts: Array = []
+	# 英雄走近时要让路的部件，见 scripts/game/occlusion_fade.gd。
+	# 只收「立体、挡人」的那几件；贴地圆盘 dais 故意不收。
+	var crystal_fade_parts: Array = []
 	if entity_type == "base":
 		var stone := StandardMaterial3D.new()
 		stone.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
@@ -3545,6 +3549,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		dais.mesh = dais_mesh
 		dais.material_override = stone
 		dais.position.y = 0.18
+		dais.name = "dais"
 		base_group.add_child(dais)
 		var pedestal := MeshInstance3D.new()
 		var pedestal_mesh := CylinderMesh.new()
@@ -3553,9 +3558,13 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		pedestal_mesh.height = 1.2
 		pedestal_mesh.radial_segments = 8
 		pedestal.mesh = pedestal_mesh
-		pedestal.material_override = stone
+		# 柱身要能单独淡出，不能和 dais 共用材质 —— 共用的话英雄一靠近，
+		# 连贴地圆盘一起变透明，玩家就找不到水晶在哪了。
+		pedestal.material_override = stone.duplicate()
 		pedestal.position.y = 0.95
 		base_group.add_child(pedestal)
+		pedestal.name = "pedestal"
+		crystal_fade_parts.append(pedestal)
 		spin_node = Node3D.new()
 		spin_node.position.y = 3.55
 		var gem := MeshInstance3D.new()
@@ -3570,10 +3579,16 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		gem_material.albedo_color = team_color
 		gem_material.emission_enabled = true
 		gem_material.emission = team_color
-		gem_material.emission_energy_multiplier = 2.6
+		# 2.6 会把整颗宝石烧成一块纯白（截图 shots/occ_z21_under.png），
+		# 白团比英雄大一圈，玩家根本分不清哪个是自己。1.5 保留发光但不糊形。
+		gem_material.emission_energy_multiplier = 1.5
 		gem_material.roughness = 0.15
 		gem.material_override = gem_material
+		gem.name = "gem"
+		# 自发光体在地面上投一块多边形实心黑影，俯视下像塌了个坑，还正好压在英雄身上。
+		gem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		spin_node.add_child(gem)
+		crystal_fade_parts.append(gem)
 		var halo := MeshInstance3D.new()
 		var halo_torus := TorusMesh.new()
 		halo_torus.inner_radius = 1.9
@@ -3586,14 +3601,23 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		halo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		halo_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		halo_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		halo_material.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.5)
+		# 0.5 的加法混合光圈叠在过曝的宝石上，读起来是一整团白雾。
+		halo_material.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.34)
 		halo_material.emission_enabled = true
 		halo_material.emission = team_color
 		halo_material.emission_energy_multiplier = 1.4
 		halo.material_override = halo_material
 		halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		halo.name = "halo"
 		spin_node.add_child(halo)
+		crystal_fade_parts.append(halo)
 		base_group.add_child(spin_node)
+		# 这几件常驻 ALPHA 档，靠 albedo.a 淡进淡出。
+		# 运行时切 transparency 会重建渲染管线，逐帧切就是卡顿 —— 别改成按需切换。
+		for part in crystal_fade_parts:
+			var fade_mat := (part as MeshInstance3D).material_override as StandardMaterial3D
+			if fade_mat != null and fade_mat.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED:
+				fade_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		model = base_group
 		bar_height = 7.4
 		bar_width = 6.0
@@ -3769,6 +3793,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		"spin": spin_node,
 		"shield": shield,
 		"crystal_shield": crystal_shield,
+		"crystal_fade_parts": crystal_fade_parts,
 		"range_ring": range_ring,
 		"range_mat": range_mat,
 		"range_band": range_band,
