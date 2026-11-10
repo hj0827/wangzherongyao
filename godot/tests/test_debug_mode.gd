@@ -150,7 +150,9 @@ func test_arena_exposes_every_debug_panel_command() -> void:
 		check(arena.has_method(method), "DebugPanel 调用的方法必须存在：" + method)
 	# 面板用 _call(has_method) 静默跳过不存在的接口，源码守卫是唯一能抓住漏接线的测试。
 	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
-	check(has_live_line(source, "KEY_F3"), "F3 必须接线到调试面板")
+	# 开关键本身（F3 / physical_keycode / Ctrl+Shift+D）的判定收在 DebugPanel.matches_toggle_key 里，
+	# 这里只钉「Arena 必须走那个判定」，键码细节由 test_toggle_key_... 逐条验。
+	check(has_live_line(source, "DebugPanelScript.matches_toggle_key"), "开关键必须接线到调试面板")
 	check(has_live_line(source, "_build_debug_panel()"), "战场构建时必须装配调试面板")
 	check(has_live_line(source, "_trigger_hit_stop"), "顿帧触发要经过可关闭的包装")
 	arena.free()
@@ -197,6 +199,57 @@ func test_debug_panel_has_a_touch_entry_for_real_devices() -> void:
 	var desktop_arena := Arena.new()
 	var desktop_panel = DebugPanel.new()
 	desktop_panel.setup(desktop_arena)
-	check(not desktop_panel._toggle.visible, "键鼠模式不显示 DEV 键，F3 已经够用")
+	# 2026-11-10 玩家反馈「F3 调不出调试面板」后改的口径：键鼠端也保留 DEV 入口。
+	# 原设计「键鼠有 F3 就不挂常驻键」在两种真实情况下失效：笔记本 Fn 锁把 F3 变成
+	# 音量/亮度键（系统根本不交给游戏），以及中文输入法把 keycode 吃掉。
+	# 面板只存在于调试构建里，所以这颗键不会污染正式包。
+	check(desktop_panel._toggle.visible, "键鼠模式也必须保留一个点得到的 DEV 入口")
+	var desktop_rect := Rect2(desktop_panel._toggle.position, desktop_panel._toggle.size)
+	var desktop_zones := HudLayout.zones(Vector2(1600.0, 900.0), false)
+	check(not desktop_rect.intersects(desktop_zones["minimap"]), "DEV 入口不能压住小地图")
+	check(not desktop_rect.intersects(desktop_zones["hero"]), "DEV 入口不能压住状态卡")
 	desktop_panel.free()
 	desktop_arena.free()
+
+func test_toggle_key_accepts_physical_keycode_and_a_fallback_chord() -> void:
+	# 症状「按 F3 完全没反应、也不报错」的两个真实成因，各配一条断言。
+	var by_keycode := InputEventKey.new()
+	by_keycode.pressed = true
+	by_keycode.keycode = KEY_F3
+	check(DebugPanel.matches_toggle_key(by_keycode), "常规 F3 必须能开面板")
+
+	var by_physical := InputEventKey.new()
+	by_physical.pressed = true
+	by_physical.physical_keycode = KEY_F3
+	check(DebugPanel.matches_toggle_key(by_physical), "输入法/非美式布局下 keycode 会是 0，必须认 physical_keycode")
+
+	var chord := InputEventKey.new()
+	chord.pressed = true
+	chord.keycode = KEY_D
+	chord.ctrl_pressed = true
+	chord.shift_pressed = true
+	check(DebugPanel.matches_toggle_key(chord), "笔记本把 F3 变成媒体键时，必须有一条不依赖功能键的备用路径")
+
+	var released := InputEventKey.new()
+	released.pressed = false
+	released.keycode = KEY_F3
+	check(not DebugPanel.matches_toggle_key(released), "松开 F3 不能触发")
+
+	var plain_d := InputEventKey.new()
+	plain_d.pressed = true
+	plain_d.keycode = KEY_D
+	check(not DebugPanel.matches_toggle_key(plain_d), "裸 D 不能被吃掉（那是走位/技能键）")
+
+	var escape := InputEventKey.new()
+	escape.pressed = true
+	escape.keycode = KEY_ESCAPE
+	check(not DebugPanel.matches_toggle_key(escape), "Esc 仍归暂停菜单")
+	check(not DebugPanel.matches_toggle_key(InputEventMouseButton.new()), "鼠标事件不能被当成开面板")
+
+func test_debug_panel_wiring_uses_the_shared_matcher_and_explains_itself() -> void:
+	var arena_source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	check(has_live_line(arena_source, "matches_toggle_key"), "F3 判定必须走 DebugPanel.matches_toggle_key（否则物理键码与备用键又不认了）")
+	check(has_live_line(arena_source, "_debug_disabled_reason"), "按了没反应时必须能把原因打到控制台")
+	var panel_source := FileAccess.get_file_as_string("res://scripts/ui/debug_panel.gd")
+	check(panel_source.contains("physical_keycode == KEY_F3"), "判定里必须同时看 physical_keycode")
+	check(has_live_line(panel_source, "KEY_D"), "备用组合键必须接线")

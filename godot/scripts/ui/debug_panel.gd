@@ -43,6 +43,24 @@ func _ready() -> void:
 func toggle() -> void:
 	set_open(not root.visible)
 
+## 打开/收起调试面板的按键判定（唯一真身，Arena 只调用它）。
+##
+## 为什么要同时认 `physical_keycode`：中文输入法或非美式布局下，功能键经常只填
+## `physical_keycode`、`keycode` 是 0。只比 `keycode == KEY_F3` 的症状就是
+## **「按 F3 完全没反应，也不报错」** —— 极难自查。
+##
+## 为什么还要一条 `Ctrl+Shift+D`：很多笔记本的 F3 被 Fn 锁成了音量/亮度键，
+## 系统层面就不会把 F3 交给游戏，代码再怎么写也收不到。备用组合键是唯一出路。
+static func matches_toggle_key(event: InputEvent) -> bool:
+	if not (event is InputEventKey):
+		return false
+	var key := event as InputEventKey
+	if not key.pressed or key.echo:
+		return false
+	if key.keycode == KEY_F3 or key.physical_keycode == KEY_F3:
+		return true
+	return key.ctrl_pressed and key.shift_pressed and key.keycode == KEY_D
+
 func set_open(value: bool) -> void:
 	if root == null:
 		return
@@ -83,11 +101,14 @@ func _build() -> void:
 	_toggle = TouchActionButton.new()
 	_toggle.name = "DebugToggle"
 	_toggle.label = "DEV"
-	_toggle.hint = "" if _is_touch() else "F3"
+	_toggle.hint = "F3 / Ctrl+Shift+D" if not _is_touch() else ""
 	_toggle.accent = Color(0.84, 0.66, 0.34)
 	_toggle.touch_mode = _is_touch()
-	# 键鼠端有 F3，不必在画面里多挂一颗常驻键；真机才是没有它打不开。
-	_toggle.visible = _is_touch()
+	# 键鼠端也**保留**这颗入口（2026-11-10 玩家反馈「F3 调不出调试面板」后改的）。
+	# 原设计是「键鼠有 F3 就不挂常驻键」，但 F3 在真机上真的可能收不到：
+	# 笔记本 Fn 锁把 F3 变成音量/亮度键（系统层面就不交给游戏）、中文输入法把
+	# keycode 吃掉。面板本身只在调试构建里存在，所以这颗键不会污染正式包画面。
+	_toggle.visible = true
 	_toggle.pressed.connect(toggle)
 	host.add_child(_toggle)
 

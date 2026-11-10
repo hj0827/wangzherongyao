@@ -240,6 +240,9 @@ var _pending_events: Array = []
 var _paused := false
 # 开发者调试（F3）。时间倍率只作用于主机模拟，表现层仍按真实时间走。
 var _debug_panel = null
+# 调试面板为什么不可用（按了开关键没反应时打到控制台），以及「只解释一次」。
+var _debug_disabled_reason := ""
+var _debug_explained := false
 var _debug_time_scale := 1.0
 var _debug_paused := false
 var _debug_reveal := false
@@ -524,20 +527,26 @@ func _build_hud() -> void:
 	layer.add_child(hud)
 
 func _debug_enabled() -> bool:
-	# 正式包默认不开；调试构建、`--dev` 启动参数、或配置显式打开时才有 F3。
+	# 正式包默认不开；调试构建、`--dev` 启动参数、或配置显式打开时才有面板。
 	if OS.is_debug_build():
 		return true
 	if OS.get_cmdline_args().has("--dev"):
 		return true
-	return bool(config.get("debug_panel", false))
+	if bool(config.get("debug_panel", false)):
+		return true
+	# 未启用时记下原因：玩家/开发者按了键没反应时，控制台必须能回答「为什么」。
+	_debug_disabled_reason = "正式包默认关闭调试面板；用 run.cmd --dev 启动，或在比赛配置里写 debug_panel=true"
+	return false
 
 func _build_debug_panel() -> void:
 	if not _debug_enabled():
+		print("[调试面板] 未启用：", _debug_disabled_reason)
 		return
 	_debug_panel = DebugPanelScript.new()
 	_debug_panel.name = "DebugPanel"
 	add_child(_debug_panel)
 	_debug_panel.setup(self)
+	print("[调试面板] 已就绪：F3（或 Ctrl+Shift+D）", "；触屏另有左上角 DEV 键" if touch_mode else "")
 
 # --- 调试面板接口 -----------------------------------------------------------
 # 面板只负责发命令，所有校验都在这里：客机没有 sim，一律静默忽略。
@@ -751,10 +760,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				_set_move_target(_mouse_ground)
 	if event is InputEventKey:
 		var key := event as InputEventKey
-		if key.pressed and not key.echo and key.keycode == KEY_F3:
+		if DebugPanelScript.matches_toggle_key(key):
 			if _debug_panel != null:
 				_debug_panel.toggle()
-				get_viewport().set_input_as_handled()
+			elif not _debug_explained:
+				# 「按了没反应」是最难自查的一类问题：把原因打一次到控制台。
+				_debug_explained = true
+				print("[调试面板] 按了开关键但面板不可用：", _debug_disabled_reason)
+			get_viewport().set_input_as_handled()
 		elif key.pressed and not key.echo and key.keycode == KEY_ESCAPE:
 			_toggle_pause()
 		elif key.pressed and not key.echo and key.keycode == KEY_SPACE:
