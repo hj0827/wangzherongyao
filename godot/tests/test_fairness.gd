@@ -94,8 +94,101 @@ func test_resync_never_pushes_an_entity_out_of_its_path() -> void:
 
 # ---------------------------------------------------------------- 公平性指标
 
-func test_mirror_match_economy_stays_close() -> void:
-	# 这是 6b 的核心验收：同阵容镜像局，双方经济不该有数量级差距。
+# ---------------------------------------------------------------- 地图几何事实
+
+func test_top_and_bottom_lanes_are_equal_length() -> void:
+	# top 与 bottom 必须等长、等"远离中心"程度，否则两条边路的推进难度不同。
+	# 实测两条路总长都是 189.843、离中心最远都是 67.401。
+	# 注意：它们**不是严格镜像**（逐点差恒为 4.0m，采样偏移），
+	# 所以不能断言"bottom == mirror(top)"，只能断言长度与外包络相等。
+	var top: Array = MapData.lane_path("top")
+	var bottom: Array = MapData.lane_path("bottom")
+	eq(top.size(), bottom.size(), "两条边路的路径点数必须相同")
+	var top_len := _polyline_length(top)
+	var bottom_len := _polyline_length(bottom)
+	near(top_len, bottom_len, 0.01, "两条边路必须等长（top=%.3f bottom=%.3f）" % [top_len, bottom_len])
+	var top_far := _max_radius(top)
+	var bottom_far := _max_radius(bottom)
+	near(top_far, bottom_far, 0.01, "两条边路的最大离心距必须相同")
+
+# ---------------------------------------------------------------- 经济对称（6b 核心）
+
+func test_mirror_cs_gap_stays_small_across_seeds() -> void:
+	# 6b 修复效果的**核心回归**：镜像局前 300 秒的补刀差必须小。
+	#
+	# 修复前是恒定的 **+19**（红方领先 19 刀，5 个不同 seed 完全一致 ——
+	# seed 都不影响它，说明那是纯结构性的）。
+	# 修复后 8 个 seed 实测为 0,-1,-4,0,-1,-2,-1,0（多数在 ±4 以内）。
+	#
+	# 为什么用"CS 差"而不是"胜率"做守卫：胜率要跑满整局、样本小、噪声大；
+	# CS 差在 300 秒就能测出，且修复前是**恒定值**，判据非常稳。
+	# 这里只跑 2 个 seed 控制耗时（各 300 秒），阈值取 12。
+	var gaps: Array = []
+	for seed_value in [0x2F6E2B1, 0x2F6E2B1 + 7919]:
+		var sim := _team_match(int(seed_value))
+		var dt := 1.0 / MatchSim.TICK_RATE
+		for i in 300:
+			sim.tick(dt)
+			sim.consume_events()
+		var cs := {"blue": 0, "red": 0}
+		for e in sim.state.entities:
+			if str(e.get("type", "")) == "hero":
+				cs[str(e.get("team", ""))] = int(cs[str(e.get("team", ""))]) + int(e.get("cs", 0))
+		gaps.append(int(cs["red"]) - int(cs["blue"]))
+	for i in gaps.size():
+		lt(absf(float(gaps[i])), 12.0,
+			"seed #%d 的镜像局 CS 差应小于 12（实测 %+d，修复前恒为 +19）" % [i, int(gaps[i])])
+
+func test_hero_entry_distance_is_symmetric_across_sides() -> void:	# 6b 的核心对称性断言：同名英雄在蓝红两侧，到各自第一个 waypoint 的距离
+	# 必须基本相等。修复前实测 tank 20.83 vs 32.36（差 11.5m）、
+	# assassin 4.52 vs 29.55（差 25m），原因是固定弧长阈值 12m 落进了
+	# 间距不均的路径点（相邻段从 8.94m 到 16.0m）。
+	#
+	# 现在改成"取离起步落点最近的路径点"，差距降到 0.3~4.4m。
+	# 剩下的残差是**路径点离散化的固有极限**（两侧最近的路径点分属不同间距的段），
+	# 不是算法缺陷 —— 所以阈值取 6m，并在注释里写明为什么不能再收紧。
+	var sim := _team_match()
+	var blue: Dictionary = {}
+	var red: Dictionary = {}
+	for e in sim.state.entities:
+		if str(e.get("type", "")) != "hero":
+			continue
+		var key := "%s|%s" % [str(e.get("hero_type", "")), str(e.get("lane", ""))]
+		if str(e.get("team", "")) == "blue":
+			blue[key] = e
+		else:
+			red[key] = e
+	gt(blue.size(), 0, "前置条件：蓝方必须有英雄")
+	for key in blue:
+		if not red.has(key):
+			continue
+		var b: Dictionary = blue[key]
+		var r: Dictionary = red[key]
+		var bd := _distance_to_waypoint(b)
+		var rd := _distance_to_waypoint(r)
+		lt(absf(bd - rd), 6.0,
+			"%s 两侧到首个 waypoint 的距离应接近（blue=%.2f red=%.2f）" % [key, bd, rd])
+
+func _polyline_length(path: Array) -> float:
+	var total := 0.0
+	for i in range(1, path.size()):
+		total += (path[i] as Vector2).distance_to(path[i - 1])
+	return total
+
+func _max_radius(path: Array) -> float:
+	var far := 0.0
+	for p in path:
+		far = maxf(far, (p as Vector2).length())
+	return far
+
+func _distance_to_waypoint(e: Dictionary) -> float:
+	var path: Array = e.get("path", [])
+	var idx := int(e.get("path_index", 0))
+	if idx < 0 or idx >= path.size():
+		return 0.0
+	return (e.get("pos", Vector2.ZERO) as Vector2).distance_to(path[idx])
+
+func test_mirror_match_economy_stays_close() -> void:	# 这是 6b 的核心验收：同阵容镜像局，双方经济不该有数量级差距。
 	# 修复前实测蓝方 CS 78~83、红方 104~110（差约 30%），且红方 9/10 获胜。
 	# 修复后差距降到个位数百分比。
 	#

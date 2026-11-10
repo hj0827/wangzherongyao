@@ -296,7 +296,7 @@
 | 4 | 硬控四件套 | 🟨 进行中（4.1/4.2/4.4 ✅；节奏前移转6b） | ✅ | ✅ | ✅ | 🔶 双路截图✅ / **状态环画面未拍到** | [item04](acceptance-evidence/item04-20261110/README.md) · [截图](acceptance-evidence/visual-item34-20261110/README.md) | 2026-11-10 |
 | 5 | 召唤师技能可选 | ⬜ 未开始 | | | | | | |
 | 6 | 兵线节奏标定 | 🟨 进行中（6.2/6.5 ✅；**实测证明塔血量非单调、调参不可行，转 6b 行为 AI**） | ✅ | ✅ | ✅ | 🔶 工具就绪 / 真机一并验 | [item06](acceptance-evidence/item06-20261110/README.md) · [6b修复](acceptance-evidence/item6b-fix1-20261110/README.md) | 2026-11-10 |
-| 6b | 对局公平性 | 🟨 进行中（修好 3 个真 bug；**镜像 10/10 红方胜仍未解决**） | 🔶 | 🔶 | 🔶 | 🔶 规则层已证对称 / 行为层待查 | [第2轮调查](acceptance-evidence/item6b-round2-20261110/README.md) | 2026-11-10 |
+| 6b | 对局公平性 | 🟨 进行中（**结构性偏向已消除**：CS 差 +19恒定→±4抖动；胜率 10:0→3:9 未达标） | 🔶 | 🔶 | ✅ | 🔶 击杀已对等(54:54) / 胜率待平 | [第3轮](acceptance-evidence/item6b-round3-20261110/README.md) · [第2轮](acceptance-evidence/item6b-round2-20261110/README.md) | 2026-11-10 |
 | 7 | 安全区适配 | ⬜ 未开始 | | | | | | |
 | 8 | 画质分级+设置+持久化 | ⬜ 未开始 | | | | | | |
 | 9 | RTT/自适应/重连 | ⬜ 未开始 | | | | | | |

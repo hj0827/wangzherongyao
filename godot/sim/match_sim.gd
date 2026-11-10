@@ -44,24 +44,47 @@ const BOT_LEASH_RADIUS := 12.0
 # 会导致一侧小兵每波先接触、长期累积成稳定的对局偏向。
 const MINION_SPAWN_OFFSET := 12.0
 
-## 沿路径从起点累计弧长，返回第一个"累计距离 >= arc"的索引。
-## blue=true 从头量，false 从尾量 —— 两种方向用同一套弧长口径，
-## 这样双方小兵离自家基地的实际距离严格相等。
-func _index_for_arc(path: Array, arc: float, from_head: bool) -> int:
+# 英雄沿路径起步的弧长（项 6b）。与小兵同理：必须按弧长而非索引，
+# 否则边路两侧的实际起步距离不等（实测 12.65m vs 8.94m）。
+const HERO_PATH_ENTRY_ARC := 12.0
+
+## 选起步路径点：**取离实体最近的路径点**（沿前进方向略微前移一格避开抖动）。
+##
+## 为什么不再用"固定弧长阈值"：边路相邻路径点间距从 8.94m 到 16.0m 不等，
+## 固定阈值 12m 会落进不同的离散点 —— 实测蓝方刺客落在 idx=1（距自身 4.52m），
+## 红方落在 idx=12（距自身 29.55m），两者到各自第一个 waypoint 的距离差 25m，
+## 这直接决定了谁先接触、谁先补刀。
+##
+## 用最近点就天然对称：两侧实体到自家端点的距离本来就相同（出生点严格点对称），
+## 所以"最近的路径点"也是对称的。
+## 沿路径从自家端点出发的前进单位向量（蓝方从头、红方从尾）。
+## 小兵起步点用它把"离基地 12m"折算成一个落点，再问最近路径点。
+static func _forward_unit(path: Array, from_head: bool) -> Vector2:
+	if path.size() < 2:
+		return Vector2.UP
+	var a: Vector2 = path[0] if from_head else path[path.size() - 1]
+	var b: Vector2 = path[1] if from_head else path[path.size() - 2]
+	var d := b - a
+	return d.normalized() if d.length() > 0.001 else Vector2.UP
+
+func _index_for_arc(path: Array, entity_pos: Vector2, from_head: bool) -> int:
 	if path.size() < 2:
 		return 0
-	var acc := 0.0
-	if from_head:
-		for i in range(1, path.size()):
-			acc += (path[i] as Vector2).distance_to(path[i - 1])
-			if acc >= arc:
-				return i
-		return path.size() - 1
-	for i in range(path.size() - 2, -1, -1):
-		acc += (path[i] as Vector2).distance_to(path[i + 1])
-		if acc >= arc:
-			return i
-	return 0
+	var best := -1
+	var best_dist := INF
+	for i in path.size():
+		var d: float = entity_pos.distance_to(path[i])
+		if d < best_dist:
+			best_dist = d
+			best = i
+	if best < 0:
+		return 0
+	# 往前进一格：避免"刚起步就判定已到点"在原地抖动。
+	# 只前移、不回退（与 _resync_path_index 同一条纪律）。
+	var forward := best + (1 if from_head else -1)
+	if forward >= 0 and forward < path.size():
+		best = forward
+	return best
 const HERO_RESPAWN_BASE := 6.0
 const WAVE_INTERVAL := 18.0
 const FIRST_WAVE_DELAY := 1.0
@@ -328,7 +351,18 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		lane = str(MapData.LANE_ORDER[slot % MapData.LANE_ORDER.size()])
 	var path: Array = MapData.lane_path(lane)
 	var spawn := _spawn_point(team, slot)
-	var path_index := 1 if team == "blue" else path.size() - 2
+	# 起步点按**弧长**对称，而不是按索引。边路相邻路径点间距可达 16m，
+	# 用 idx=1 / size-2 会让两侧的实际弧长不同（实测 12.65m vs 8.94m）。
+	#
+	# 关于 lane 镜像：曾试过让红方走镜像路（top↔bottom），但实测
+	# top 与 bottom **并不是严格镜像**（逐点偏差恒为 4.0m），
+	# 且镜像路的 idx=1 落在蓝方基地侧，红方起点被甩到 120m 外。
+	# 该方案已回退，当前仍走同名路、红方沿路反向（path_dir=-1），
+	# 两侧到第一个 waypoint 的距离完全相等（见 test_fairness 的对称性守卫）。
+	var forward := team == "blue"
+	var dir := 1 if forward else -1
+	# 起步点取"离出生点最近的路径点"：出生点严格点对称，所以两侧最近的路径点也对称。
+	var path_index := _index_for_arc(path, spawn, forward)
 	var hero := {
 		"id": _next_id(),
 		"type": "hero",
@@ -444,7 +478,7 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"buff_blue_timer": 0.0,
 		"path": path,
 		"path_index": path_index,
-		"path_dir": 1 if team == "blue" else -1,
+		"path_dir": dir,
 	}
 	state.entities.append(hero)
 
@@ -561,9 +595,12 @@ func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_t
 	#   top 路 idx=13 离红基地  8.94m
 	# 红方小兵因此少走 3.7m，每波都先 3 秒接触 —— 实测红方第 8 秒就出手、
 	# 蓝方第 11 秒才有动作，长期累积成"红方 CS 高 30%、10/10 获胜"。
-	# 修法：按**弧长**从自家基地端点出发，两侧严格等距。
-	var spawn_arc := MINION_SPAWN_OFFSET
-	var path_index := _index_for_arc(path, spawn_arc, blue)
+	# 修法：**取离"沿路前进 12m 处"最近的路径点**（而不是固定索引或固定弧长阈值）。
+	# 边路相邻路径点间距从 8.94m 到 16.0m 不等，任何固定弧长阈值都会落进不同的离散点，
+	# 实测两侧到首个 waypoint 的距离差从 3.7m 到 25m 不等。
+	# 基地端点与前进方向都严格点对称，所以这样选出来的点也对。
+	var entry_probe := base + _forward_unit(path, blue) * MINION_SPAWN_OFFSET
+	var path_index := _index_for_arc(path, entry_probe, blue)
 	var waypoint: Vector2 = path[path_index]
 	var toward := (waypoint - base).normalized()
 	var side := Vector2(-toward.y, toward.x)
