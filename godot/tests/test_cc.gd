@@ -419,26 +419,36 @@ func test_minion_vs_minion_hits_do_not_flood_the_wire() -> void:
 	# 否则"省事件"可能变成"不打伤害"）。
 	#
 	# 采样要点：mid 路全长约 130m，双方小兵速度约 4.4 m/s，各走 65m 需要约 15 秒
-	# **纯移动**，但小兵要绕塔、会被塔打、还会停下来互殴，实际首次交战接近 25~30 秒。
-	# 所以这里给 60 秒（1800 tick），并累计"曾经有没有残血"而不是判断某一帧。
-	var sim := MatchSim.new({"mode": "team", "humans": [], "bot_fill": true, "bot_ai": true})
+	# **纯移动**，加上绕塔/被塔打/停下来互殴，实际首次交战接近 25~30 秒。
+	#
+	# 这里不跑满 60 秒（会让整个回归套件慢到不可用），而是**把两个小兵直接摆到一起**：
+	# 判断"小兵打小兵是否静音 hit"只需要它们真的在互相攻击，不需要复现整条兵线。
+	var sim := MatchSim.new({"mode": "duel", "humans": [], "bot_fill": false})
 	var dt := 1.0 / MatchSim.TICK_RATE
+	var blue := {
+		"id": 9001, "type": "minion", "team": "blue", "lane": "mid",
+		"pos": Vector2(0.0, 0.0), "radius": 0.5, "hp": 500.0, "max_hp": 500.0, "alive": true,
+		"speed": 4.4, "attack_damage": 20.0, "attack_range": 2.5, "attack_interval": 1.0,
+		"attack_cd": 0.0, "minion_type": "melee", "path": [Vector2(0.0, 0.0)], "path_index": 0,
+		"path_dir": 1,
+	}
+	var red := blue.duplicate(true)
+	red["id"] = 9002
+	red["team"] = "red"
+	red["pos"] = Vector2(1.2, 0.0)
+	sim.state.entities.append(blue)
+	sim.state.entities.append(red)
 	var minion_to_minion := 0
 	var ever_damaged := false
-	for i in 1800:
+	for i in 120:
 		sim.tick(dt)
 		for ev in sim.consume_events():
 			if str(ev.get("type", "")) != "hit":
 				continue
 			if str(ev.get("target_type", "")) == "minion" and str(ev.get("source_type", "")) == "minion":
 				minion_to_minion += 1
-		if not ever_damaged:
-			for e in sim.state.entities:
-				if str(e.get("type", "")) != "minion":
-					continue
-				if float(e.get("hp", 0.0)) < float(e.get("max_hp", 1.0)) - 0.5:
-					ever_damaged = true
-					break
+		if float(blue.get("hp", 500.0)) < 499.5 or float(red.get("hp", 500.0)) < 499.5:
+			ever_damaged = true
 	eq(minion_to_minion, 0, "小兵打小兵不应广播 hit（伤害仍要照常结算）")
 	eq(ever_damaged, true, "静音事件不代表静音伤害：小兵必须真的在掉血")
 

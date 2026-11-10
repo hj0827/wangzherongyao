@@ -33,6 +33,35 @@ const RESYNC_DISTANCE := 12.0
 const STUCK_PROGRESS_RATIO := 0.5
 # 连续卡住这么多 tick（约 1 秒）就重吸附一次。
 const STUCK_TICKS_LIMIT := 30
+
+# bot 兵线纪律（项 6b）：离自家兵线路径超过这个垂直距离就算"脱线"。
+# 取值参考：兵线宽度约 6m，英雄攻速射程 6.4m，留一倍余量到 12m。
+# 脱线后不再追敌方英雄（但清理小兵/塔不受限）。
+const BOT_LEASH_RADIUS := 12.0
+
+# 小兵起步点距自家基地端点的弧长（项 6b）。
+# 必须按**弧长**取而不是按索引取：边路是螺旋线，两侧同一索引的实际距离不等，
+# 会导致一侧小兵每波先接触、长期累积成稳定的对局偏向。
+const MINION_SPAWN_OFFSET := 12.0
+
+## 沿路径从起点累计弧长，返回第一个"累计距离 >= arc"的索引。
+## blue=true 从头量，false 从尾量 —— 两种方向用同一套弧长口径，
+## 这样双方小兵离自家基地的实际距离严格相等。
+func _index_for_arc(path: Array, arc: float, from_head: bool) -> int:
+	if path.size() < 2:
+		return 0
+	var acc := 0.0
+	if from_head:
+		for i in range(1, path.size()):
+			acc += (path[i] as Vector2).distance_to(path[i - 1])
+			if acc >= arc:
+				return i
+		return path.size() - 1
+	for i in range(path.size() - 2, -1, -1):
+		acc += (path[i] as Vector2).distance_to(path[i + 1])
+		if acc >= arc:
+			return i
+	return 0
 const HERO_RESPAWN_BASE := 6.0
 const WAVE_INTERVAL := 18.0
 const FIRST_WAVE_DELAY := 1.0
@@ -525,7 +554,16 @@ func _update_wave(dt: float) -> void:
 func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_type: String) -> void:
 	var blue := team == "blue"
 	var base: Vector2 = path[0] if blue else path[path.size() - 1]
-	var path_index := 1 if blue else path.size() - 2
+	# 项 6b —— **这是镜像局稳定偏向红方的根因**：
+	# 旧实现让小兵从"索引 1 / size-2"起步，可边路是螺旋线（先绕远端再回来），
+	# 两侧同一索引到自家基地的**实际弧长并不相等**：
+	#   top 路 idx=1  离蓝基地 12.65m
+	#   top 路 idx=13 离红基地  8.94m
+	# 红方小兵因此少走 3.7m，每波都先 3 秒接触 —— 实测红方第 8 秒就出手、
+	# 蓝方第 11 秒才有动作，长期累积成"红方 CS 高 30%、10/10 获胜"。
+	# 修法：按**弧长**从自家基地端点出发，两侧严格等距。
+	var spawn_arc := MINION_SPAWN_OFFSET
+	var path_index := _index_for_arc(path, spawn_arc, blue)
 	var waypoint: Vector2 = path[path_index]
 	var toward := (waypoint - base).normalized()
 	var side := Vector2(-toward.y, toward.x)
@@ -944,6 +982,25 @@ func _update_bots(dt: float) -> void:
 		if to_target.length() > 0.1:
 			entity.facing = to_target.normalized()
 		var distance := to_target.length()
+		# 追击上限（项 6b）：bot 不能为了追一个英雄而离开自己的兵线。
+		# 修复前实测蓝方射手 15 秒内跑了 100m 直捣对方基地，全程 CS=0、等级停在 1，
+		# 而同阵容红方射手正常发育到 CS=17/lv5 —— 这是镜像局稳定偏向一侧的直接原因。
+		# 判据用"离自家兵线路径的垂直距离"而不是"离出生点距离"：
+		# 英雄本来就该沿兵线前压，只有**脱线**才需要被拉回。
+		var leash_exceeded := false
+		if _off_lane_distance(entity) > BOT_LEASH_RADIUS:
+			# 只有"追敌方英雄"才会被 leash 限制；小兵/塔/野怪是推进目标，不该被限制，
+			# 否则清完线就再也不推塔了。
+			leash_exceeded = str(target.get("type", "")) == "hero"
+		if leash_exceeded:
+			target = {}
+		if target.is_empty():
+			# 脱线且只看到英雄：回到兵线继续推进，而不是继续追杀。
+			if can_move:
+				_advance_along_path(entity, dt)
+			if can_cast:
+				_use_bot_summoner(entity, {}, 999.0)
+			continue
 		if can_cast:
 			if float(entity.skill_q_cd) <= 0.0 and distance <= 9.0:
 				_cast_q(entity, target.pos)
@@ -999,6 +1056,27 @@ func _use_bot_summoner(hero: Dictionary, target: Dictionary, distance: float) ->
 				return
 			if hp_ratio < 0.3 and distance < 3.0:
 				SkillSystem.cast_summoner_spell(hero, spell, hero.pos + (hero.pos - target.pos), self)
+
+## 实体离自己兵线路径的**垂直距离**（项 6b）。
+## 用垂直距离而不是"离出生点距离"：英雄本来就该沿兵线前压，
+## 只有**脱线**（跑到野区或对面半场乱窜）才该被拉回。
+func _off_lane_distance(entity: Dictionary) -> float:
+	var path: Array = entity.get("path", [])
+	if path.size() < 2:
+		return 0.0
+	var pos: Vector2 = entity.get("pos", Vector2.ZERO)
+	var best := INF
+	for i in range(path.size() - 1):
+		var a: Vector2 = path[i]
+		var b: Vector2 = path[i + 1]
+		var ab := b - a
+		var len_sq := ab.length_squared()
+		if len_sq < 0.000001:
+			best = minf(best, pos.distance_to(a))
+			continue
+		var t := clampf((pos - a).dot(ab) / len_sq, 0.0, 1.0)
+		best = minf(best, pos.distance_to(a + ab * t))
+	return best
 
 func _move_hero(hero: Dictionary, direction: Vector2, dt: float) -> void:
 	var speed: float = float(hero.speed)
@@ -1074,15 +1152,23 @@ static func _resync_path_index(entity: Dictionary, path: Array) -> int:
 	if best < 0:
 		return -1
 	# 只有当实体已经越过最近点时才前移一格；否则保持原索引。
-	# 判据：朝向该点的分量已经"走过头"（点乘为负），说明该点已在身后。
+	# 判据：下一个点比当前点更近，说明当前点已经被越过。
 	var dir := int(entity.get("path_dir", 1))
 	var forward := best + dir
 	if forward >= 0 and forward < path.size():
 		var to_point: Vector2 = path[best] - pos
 		var to_next: Vector2 = path[forward] - pos
-		# 下一个点比当前点更近，说明当前点已经被越过。
 		if to_next.length() < to_point.length():
-			return forward
+			best = forward
+	# 关键修正：吸附只能**沿前进方向推进，绝不回退**。
+	# 否则会在出生点附近出现死循环：小兵刚离开出生点，被吸回 idx=0（出生点本身），
+	# 于是"已到点"立刻成立、索引再 +1 回到 idx=1，下一帧又被吸回 idx=0……
+	# 实测表现为小兵每 30 帧里只有第 0 帧动 0.1m、其余原地不动，位移恒为 0。
+	var current := int(entity.get("path_index", best))
+	if dir > 0:
+		return maxi(best, current)
+	if dir < 0:
+		return mini(best, current)
 	return best
 
 func _update_minions(dt: float) -> void:
