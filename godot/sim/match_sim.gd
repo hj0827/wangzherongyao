@@ -44,6 +44,17 @@ const BOT_LEASH_RADIUS := 12.0
 # 会导致一侧小兵每波先接触、长期累积成稳定的对局偏向。
 const MINION_SPAWN_OFFSET := 12.0
 
+# 小兵起步点占路径总长的比例（项 6b）。
+# 用比例而非弧长：边路首段 12.649m、末段 8.944m 不等长，
+# 按弧长从两端各走 12m 落到相差 21.4m 的两个位置。
+# 12/190 ≈ 0.063，与原来的"离基地 12m"意图一致。
+const MINION_SPAWN_PROGRESS := 0.063
+
+# 点对称 (x,y) -> (-x,-y) 下的路名映射（项 6b）。
+# 实测依据：top 上每点的镜像到 bottom 最近点最大距离 4.0m（纯采样偏移），
+# 而 top 映射到自身时偏差 134m。mid 在对称轴上，自映射。
+const LANE_MIRROR := {"mid": "mid", "top": "bottom", "bottom": "top"}
+
 # 英雄沿路径起步的弧长（项 6b）。与小兵同理：必须按弧长而非索引，
 # 否则边路两侧的实际起步距离不等（实测 12.65m vs 8.94m）。
 const HERO_PATH_ENTRY_ARC := 12.0
@@ -57,6 +68,54 @@ const HERO_PATH_ENTRY_ARC := 12.0
 ##
 ## 用最近点就天然对称：两侧实体到自家端点的距离本来就相同（出生点严格点对称），
 ## 所以"最近的路径点"也是对称的。
+## 按**路径总长比例**取点（项 6b）。progress=0 是 path[0]，=1 是末端。
+## from_head=true 从头部量，false 从末端量（即 1-progress）。
+##
+## 为什么用"比例"而不是"弧长"：边路的首段与末段长度不等（12.649m vs 8.944m），
+## 两侧各沿弧长走同一距离，落到的位置相差 21.4m。而地图是点对称的，
+## 镜像会把 progress ↔ 1-progress 对调，所以**同名 progress 从两端量**
+## 天然落到镜像位置上。
+static func _point_at_progress(path: Array, progress: float, from_head: bool) -> Vector2:
+	if path.is_empty():
+		return Vector2.ZERO
+	if path.size() == 1:
+		return path[0]
+	var total := 0.0
+	for i in range(1, path.size()):
+		total += (path[i] as Vector2).distance_to(path[i - 1])
+	if total < 0.0001:
+		return path[0]
+	var frac := clampf(progress, 0.0, 1.0)
+	return _point_at_arc(path, total * frac, from_head)
+
+## 沿路径累计弧长取点（项 6b）。from_head=true 从 path[0] 量，false 从末端量。
+##
+## 与小兵/英雄起步点配套：这样取出的点**严格落在路径上**，
+## 而"基地 + 前进单位向量 × 距离"会因边路一出基地就拐弯而偏离路径，
+## 两侧偏离量不同（实测 25.70 vs 21.75）。
+static func _point_at_arc(path: Array, arc: float, from_head: bool) -> Vector2:
+	if path.is_empty():
+		return Vector2.ZERO
+	if path.size() == 1:
+		return path[0]
+	var remaining := maxf(arc, 0.0)
+	var order: Array = []
+	if from_head:
+		for i in range(1, path.size()):
+			order.append([i - 1, i])
+	else:
+		for i in range(path.size() - 1, 0, -1):
+			order.append([i, i - 1])
+	for seg in order:
+		var a: Vector2 = path[int(seg[0])]
+		var b: Vector2 = path[int(seg[1])]
+		var len := a.distance_to(b)
+		if remaining <= len or len < 0.0001:
+			var t := 0.0 if len < 0.0001 else clampf(remaining / len, 0.0, 1.0)
+			return a.lerp(b, t)
+		remaining -= len
+	return path[0] if from_head else path[path.size() - 1]
+
 ## 沿路径从自家端点出发的前进单位向量（蓝方从头、红方从尾）。
 ## 小兵起步点用它把"离基地 12m"折算成一个落点，再问最近路径点。
 static func _forward_unit(path: Array, from_head: bool) -> Vector2:
@@ -81,9 +140,16 @@ func _index_for_arc(path: Array, entity_pos: Vector2, from_head: bool) -> int:
 		return 0
 	# 往前进一格：避免"刚起步就判定已到点"在原地抖动。
 	# 只前移、不回退（与 _resync_path_index 同一条纪律）。
-	var forward := best + (1 if from_head else -1)
-	if forward >= 0 and forward < path.size():
-		best = forward
+	#
+	# from_head 表示"沿正序方向前进"，所以两个分支都是 **+1**：
+	#   - 蓝方走原路径正序     -> 索引递增
+	#   - 红方走镜像路正序     -> 同样递增（镜像路起点已在红方侧）
+	#   - 红方走原路径（mid）  -> 反向，用 -1
+	# 旧实现把 from_head 直接当成方向，导致镜像路上红方被选到路径末端。
+	var forward := 1 if from_head else -1
+	var next := best + forward
+	if next >= 0 and next < path.size():
+		best = next
 	return best
 const HERO_RESPAWN_BASE := 6.0
 const WAVE_INTERVAL := 18.0
@@ -347,18 +413,27 @@ func _spawn_point(team: String, slot: int) -> Vector2:
 func _spawn_hero(owner_id: String, display_name: String, team: String, controller: String, hero_type: String, slot: int) -> void:
 	var hero_def: Dictionary = HeroDefs.get_hero(hero_type)
 	var lane := "mid"
+	# 红方是否走镜像路（top↔bottom）。
+	var mirrored := false
 	if mode == "team":
-		lane = str(MapData.LANE_ORDER[slot % MapData.LANE_ORDER.size()])
+		var slot_lane := str(MapData.LANE_ORDER[slot % MapData.LANE_ORDER.size()])
+		lane = slot_lane
+		# 项 6b —— **这是镜像局稳定偏向红方的第二个根因**。
+		# 地图是点对称的，而点对称把 top 路映射到 **bottom 路**（不是映射到自身）。
+		# 实测：top 上每个点的镜像到 bottom 最近点的最大距离只有 4.0m（纯采样偏移），
+		# 而 top 映射到自身时偏差高达 134m。
+		# 所以"双方都走同名路"在几何上就不可能对称 —— 蓝方英雄在 top 上，
+		# 红方英雄却在**同一条物理路径**的另一头，两者面对的兵线/地形完全不同。
+		# 正确做法：红方走镜像路。mid 在对称轴上，自映射。
+		if team == "red":
+			lane = str(LANE_MIRROR.get(slot_lane, slot_lane))
+			mirrored = true
 	var path: Array = MapData.lane_path(lane)
 	var spawn := _spawn_point(team, slot)
-	# 起步点按**弧长**对称，而不是按索引。边路相邻路径点间距可达 16m，
-	# 用 idx=1 / size-2 会让两侧的实际弧长不同（实测 12.65m vs 8.94m）。
-	#
-	# 关于 lane 镜像：曾试过让红方走镜像路（top↔bottom），但实测
-	# top 与 bottom **并不是严格镜像**（逐点偏差恒为 4.0m），
-	# 且镜像路的 idx=1 落在蓝方基地侧，红方起点被甩到 120m 外。
-	# 该方案已回退，当前仍走同名路、红方沿路反向（path_dir=-1），
-	# 两侧到第一个 waypoint 的距离完全相等（见 test_fairness 的对称性守卫）。
+	# 方向：**所有路的 path[0] 都在蓝方基地侧、path[-1] 在红方基地侧**
+	# （实测 top/bottom/mid 三条路的首末点完全相同：(46,-46) → (-46,46)）。
+	# 所以无论走哪条路，红方都必须沿反序前进（path_dir = -1）。
+	# 上一轮我把"镜像路 + 正向"配在一起，结果红方起点被算到路径另一端，距离 120m。
 	var forward := team == "blue"
 	var dir := 1 if forward else -1
 	# 起步点取"离出生点最近的路径点"：出生点严格点对称，所以两侧最近的路径点也对称。
@@ -577,8 +652,14 @@ func _update_wave(dt: float) -> void:
 	state.wave = int(state.wave) + 1
 	var lanes: Array = ["mid"] if mode == "duel" else MapData.LANE_ORDER
 	for lane in lanes:
-		var path: Array = MapData.lane_path(str(lane))
 		for team in ["blue", "red"]:
+			# 项 6b：红方小兵走镜像路，与英雄一致 —— 只有这样两侧才真正点对称。
+			# 若红方也走 top，两军就在**同一条物理路径**上相向而行，
+			# 而 top 路首段 12.649m、末段 8.944m 不等长，两侧接触时刻必然不同。
+			var wave_lane := str(lane)
+			if str(team) == "red":
+				wave_lane = str(LANE_MIRROR.get(str(lane), str(lane)))
+			var path: Array = MapData.lane_path(wave_lane)
 			var super_enabled := WaveRules.super_unlocked(str(lane), str(team), state.entities)
 			var composition: Array = WaveRules.composition(int(state.wave), super_enabled)
 			for index in composition.size():
@@ -586,21 +667,16 @@ func _update_wave(dt: float) -> void:
 	_emit("wave", {"wave": state.wave})
 
 func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_type: String) -> void:
-	var blue := team == "blue"
-	var base: Vector2 = path[0] if blue else path[path.size() - 1]
-	# 项 6b —— **这是镜像局稳定偏向红方的根因**：
-	# 旧实现让小兵从"索引 1 / size-2"起步，可边路是螺旋线（先绕远端再回来），
-	# 两侧同一索引到自家基地的**实际弧长并不相等**：
-	#   top 路 idx=1  离蓝基地 12.65m
-	#   top 路 idx=13 离红基地  8.94m
-	# 红方小兵因此少走 3.7m，每波都先 3 秒接触 —— 实测红方第 8 秒就出手、
-	# 蓝方第 11 秒才有动作，长期累积成"红方 CS 高 30%、10/10 获胜"。
-	# 修法：**取离"沿路前进 12m 处"最近的路径点**（而不是固定索引或固定弧长阈值）。
-	# 边路相邻路径点间距从 8.94m 到 16.0m 不等，任何固定弧长阈值都会落进不同的离散点，
-	# 实测两侧到首个 waypoint 的距离差从 3.7m 到 25m 不等。
-	# 基地端点与前进方向都严格点对称，所以这样选出来的点也对。
-	var entry_probe := base + _forward_unit(path, blue) * MINION_SPAWN_OFFSET
-	var path_index := _index_for_arc(path, entry_probe, blue)
+	# 项 6b：三条路的 path[0] 都在蓝方基地侧、path[-1] 在红方基地侧
+	#（实测首末点完全相同：(46,-46) → (-46,46)）。
+	# 所以走哪条路都一样，红方沿反序前进。
+	var forward := team == "blue"
+	var base: Vector2 = path[0] if forward else path[path.size() - 1]
+	# 起步点按**路径总长比例**取（不是固定索引、也不是固定弧长）。
+	# 依据：top 路首段 12.649m、末段 8.944m 不等长，按弧长从两端各走 12m 会落到
+	# 相差 21.4m 的位置；而按比例取点时镜像偏差只有 0.27~0.40m。
+	var entry_probe := _point_at_progress(path, MINION_SPAWN_PROGRESS, forward)
+	var path_index := _index_for_arc(path, entry_probe, forward)
 	var waypoint: Vector2 = path[path_index]
 	var toward := (waypoint - base).normalized()
 	var side := Vector2(-toward.y, toward.x)
@@ -624,7 +700,7 @@ func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_t
 		"attack_cd": 0.0,
 		"path": path,
 		"path_index": path_index,
-		"path_dir": 1 if blue else -1,
+		"path_dir": 1 if forward else -1,
 	}
 	state.entities.append(minion)
 

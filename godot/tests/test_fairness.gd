@@ -139,14 +139,53 @@ func test_mirror_cs_gap_stays_small_across_seeds() -> void:
 		lt(absf(float(gaps[i])), 12.0,
 			"seed #%d 的镜像局 CS 差应小于 12（实测 %+d，修复前恒为 +19）" % [i, int(gaps[i])])
 
-func test_hero_entry_distance_is_symmetric_across_sides() -> void:	# 6b 的核心对称性断言：同名英雄在蓝红两侧，到各自第一个 waypoint 的距离
+func test_all_lanes_run_from_blue_base_to_red_base() -> void:
+	# 项 6b 的关键事实：**三条路的 path[0] 都在蓝方基地侧、path[-1] 在红方基地侧**。
+	# 这决定了"红方必须沿反序前进"——我曾误以为镜像路会把起点换到红方侧，
+	# 结果红方起点被算到路径另一端（距自身 120m），镜像局直接翻转成蓝方 10/10 全胜。
+	# 这条守卫把该前提钉死，避免再次搞反方向。
+	for lane in ["mid", "top", "bottom"]:
+		var path: Array = MapData.lane_path(lane)
+		gt(path.size(), 1, "%s 路必须至少有两个点" % lane)
+		near((path[0] as Vector2).distance_to(Vector2(46.0, -46.0)), 0.01, 0.01,
+			"%s 路的起点必须在蓝方基地 (46,-46)" % lane)
+		near((path[path.size() - 1] as Vector2).distance_to(Vector2(-46.0, 46.0)), 0.01, 0.01,
+			"%s 路的终点必须在红方基地 (-46,46)" % lane)
+
+func test_red_side_walks_mirrored_side_lanes() -> void:
+	# 红方在边路上必须走**镜像路**（top↔bottom），
+	# 因为点对称把 top 映射到 bottom（top 映射到自身时偏差 134m）。
+	# mid 在对称轴上，双方同路。
+	var sim := _team_match()
+	var blue_lane: Dictionary = {}
+	for e in sim.state.entities:
+		if str(e.get("type", "")) != "hero":
+			continue
+		if str(e.get("team", "")) == "blue":
+			blue_lane[str(e.get("hero_type", ""))] = str(e.get("lane", ""))
+	gt(blue_lane.size(), 0, "前置条件：蓝方必须有英雄")
+	for e in sim.state.entities:
+		if str(e.get("type", "")) != "hero" or str(e.get("team", "")) != "red":
+			continue
+		var ht := str(e.get("hero_type", ""))
+		if not blue_lane.has(ht):
+			continue
+		var bl := str(blue_lane[ht])
+		var rl := str(e.get("lane", ""))
+		if bl == "mid":
+			eq(rl, "mid", "%s 在 mid（对称轴上），双方应同路" % ht)
+		else:
+			var expected := "bottom" if bl == "top" else "top"
+			eq(rl, expected, "%s 蓝方在 %s，红方应走镜像路 %s（实际 %s）" % [ht, bl, expected, rl])
+
+func test_hero_entry_distance_is_symmetric_across_sides() -> void:
+	# 6b 的核心对称性断言：同名英雄在蓝红两侧，到各自第一个 waypoint 的距离
 	# 必须基本相等。修复前实测 tank 20.83 vs 32.36（差 11.5m）、
 	# assassin 4.52 vs 29.55（差 25m），原因是固定弧长阈值 12m 落进了
 	# 间距不均的路径点（相邻段从 8.94m 到 16.0m）。
 	#
-	# 现在改成"取离起步落点最近的路径点"，差距降到 0.3~4.4m。
-	# 剩下的残差是**路径点离散化的固有极限**（两侧最近的路径点分属不同间距的段），
-	# 不是算法缺陷 —— 所以阈值取 6m，并在注释里写明为什么不能再收紧。
+	# 现在红方走镜像路 + 取最近路径点，mid 完全相等、边路差 2~4m。
+	# 残差是**路径点离散化的固有极限**，不是算法缺陷 —— 阈值取 6m。
 	var sim := _team_match()
 	var blue: Dictionary = {}
 	var red: Dictionary = {}
