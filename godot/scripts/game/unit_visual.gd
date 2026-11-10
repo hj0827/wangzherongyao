@@ -77,6 +77,8 @@ const HERO_SETUPS := {
 		"weapon": preload("res://assets/weapons/Claymore.glb"),
 		"body_scale": Vector3(1.06, 1.0, 1.02),
 		"weapon_scale": 0.28,
+		"accent": Color(1.0, 0.72, 0.30),
+		"weapon_tint_amount": 0.30,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -91,6 +93,8 @@ const HERO_SETUPS := {
 		"weapon": preload("res://assets/weapons/Scythe.glb"),
 		"body_scale": Vector3(0.96, 1.0, 0.96),
 		"weapon_scale": 0.30,
+		"accent": Color(0.62, 0.50, 1.0),
+		"weapon_tint_amount": 0.35,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -105,6 +109,8 @@ const HERO_SETUPS := {
 		"weapon": preload("res://assets/weapons/Hammer_Double.glb"),
 		"body_scale": Vector3(1.18, 1.0, 1.10),
 		"weapon_scale": 0.35,
+		"accent": Color(0.40, 0.85, 0.80),
+		"weapon_tint_amount": 0.28,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -119,6 +125,8 @@ const HERO_SETUPS := {
 		"weapon": preload("res://assets/weapons/Bow_Wooden2.glb"),
 		"body_scale": Vector3(0.90, 1.0, 0.92),
 		"weapon_scale": 0.31,
+		"accent": Color(0.55, 0.95, 0.50),
+		"weapon_tint_amount": 0.32,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_l",
@@ -133,6 +141,8 @@ const HERO_SETUPS := {
 		"weapon": preload("res://assets/weapons/Dagger.glb"),
 		"body_scale": Vector3(0.84, 1.0, 0.88),
 		"weapon_scale": 0.24,
+		"accent": Color(0.88, 0.42, 0.72),
+		"weapon_tint_amount": 0.34,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -613,13 +623,7 @@ func _build_river_spirit() -> void:
 	model_root = root
 	add_child(root)
 	_capture_model_rest_pose()
-	var body := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.62
-	sphere.height = 1.24
-	sphere.radial_segments = 20
-	sphere.rings = 12
-	body.mesh = sphere
+
 	var body_material := StandardMaterial3D.new()
 	body_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	body_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -627,10 +631,123 @@ func _build_river_spirit() -> void:
 	body_material.emission_enabled = true
 	body_material.emission = Color(0.38, 0.82, 0.96)
 	body_material.emission_energy_multiplier = 1.8
+	var fin_material := StandardMaterial3D.new()
+	fin_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	fin_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	fin_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	fin_material.albedo_color = Color(0.55, 0.92, 1.0, 0.55)
+	fin_material.emission_enabled = true
+	fin_material.emission = Color(0.45, 0.88, 1.0)
+	fin_material.emission_energy_multiplier = 1.2
+	fin_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var eye_material := StandardMaterial3D.new()
+	eye_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	eye_material.albedo_color = Color(0.95, 1.0, 1.0)
+	eye_material.emission_enabled = true
+	eye_material.emission = Color(0.9, 1.0, 1.0)
+	eye_material.emission_energy_multiplier = 2.6
+
+	# 水滴形身体 + 头 + 双眼：俯视先读出一条有朝向的剪影，而不是一颗圆球。
+	var body := MeshInstance3D.new()
+	body.name = "SpiritBody"
+	var body_mesh := SphereMesh.new()
+	body_mesh.radius = 0.5
+	body_mesh.height = 1.0
+	body_mesh.radial_segments = 16
+	body_mesh.rings = 8
+	body.mesh = body_mesh
 	body.material_override = body_material
-	body.position.y = 1.0
+	body.scale = Vector3(0.88, 1.28, 0.82)
+	body.position = Vector3(0.0, 1.05, 0.0)
 	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(body)
+	var head := MeshInstance3D.new()
+	head.name = "SpiritHead"
+	var head_mesh := SphereMesh.new()
+	head_mesh.radius = 0.3
+	head_mesh.height = 0.6
+	head_mesh.radial_segments = 14
+	head_mesh.rings = 7
+	head.mesh = head_mesh
+	head.material_override = body_material
+	head.position = Vector3(0.0, 1.58, 0.18)
+	head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(head)
+	for side in [-1.0, 1.0]:
+		var eye := MeshInstance3D.new()
+		eye.name = "SpiritEye" + ("L" if side < 0.0 else "R")
+		var eye_mesh := SphereMesh.new()
+		eye_mesh.radius = 0.06
+		eye_mesh.height = 0.12
+		eye_mesh.radial_segments = 8
+		eye_mesh.rings = 4
+		eye.mesh = eye_mesh
+		eye.material_override = eye_material
+		eye.position = Vector3(side * 0.12, 1.64, 0.43)
+		eye.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(eye)
+	# 两侧鳍：扁平的发光片，给俯视剪影一条横向"鱼"的轮廓。
+	for side in [-1.0, 1.0]:
+		var fin := MeshInstance3D.new()
+		fin.name = "SpiritFin" + ("L" if side < 0.0 else "R")
+		var fin_mesh := SphereMesh.new()
+		fin_mesh.radius = 0.5
+		fin_mesh.height = 1.0
+		fin_mesh.radial_segments = 8
+		fin_mesh.rings = 4
+		fin.mesh = fin_mesh
+		fin.material_override = fin_material
+		fin.scale = Vector3(0.10, 0.30, 0.42)
+		fin.position = Vector3(side * 0.52, 1.08, -0.02)
+		fin.rotation.z = side * 0.35
+		fin.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(fin)
+	# 尾：三节递减的水珠 + 尾鳍，往后下方拖。
+	var tail := Node3D.new()
+	tail.name = "SpiritTail"
+	tail.position = Vector3(0.0, 0.98, -0.38)
+	root.add_child(tail)
+	for i in 3:
+		var bead := MeshInstance3D.new()
+		var bead_mesh := SphereMesh.new()
+		bead_mesh.radius = 0.24 - float(i) * 0.06
+		bead_mesh.height = bead_mesh.radius * 2.0
+		bead_mesh.radial_segments = 10
+		bead_mesh.rings = 5
+		bead.mesh = bead_mesh
+		bead.material_override = fin_material
+		bead.position = Vector3(0.0, -0.04 * float(i), -0.18 - float(i) * 0.26)
+		bead.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		tail.add_child(bead)
+	var tail_fin := MeshInstance3D.new()
+	var tail_fin_mesh := SphereMesh.new()
+	tail_fin_mesh.radius = 0.5
+	tail_fin_mesh.height = 1.0
+	tail_fin_mesh.radial_segments = 8
+	tail_fin_mesh.rings = 4
+	tail_fin.mesh = tail_fin_mesh
+	tail_fin.material_override = fin_material
+	tail_fin.scale = Vector3(0.06, 0.26, 0.34)
+	tail_fin.position = Vector3(0.0, -0.08, -0.78)
+	tail.add_child(tail_fin)
+	# 伴游光点：一圈小水珠绕体缓转，静止时也有生命感。
+	var orbit := Node3D.new()
+	orbit.name = "SpiritOrbit"
+	orbit.position = Vector3(0.0, 1.2, 0.0)
+	root.add_child(orbit)
+	for i in 3:
+		var drop := MeshInstance3D.new()
+		var drop_mesh := SphereMesh.new()
+		drop_mesh.radius = 0.07
+		drop_mesh.height = 0.14
+		drop_mesh.radial_segments = 8
+		drop_mesh.rings = 4
+		drop.mesh = drop_mesh
+		drop.material_override = eye_material
+		var angle := TAU * float(i) / 3.0
+		drop.position = Vector3(cos(angle) * 0.72, 0.0, sin(angle) * 0.72)
+		drop.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		orbit.add_child(drop)
 	var halo := MeshInstance3D.new()
 	var torus := TorusMesh.new()
 	torus.inner_radius = 0.86
@@ -654,6 +771,7 @@ func _build_river_spirit() -> void:
 	_add_health_bar(2.0, 0.9)
 	_build_status_fx(2.0, 0.55)
 	_set_anim("Idle", true)
+	_spawn_scale_timer = SPAWN_SCALE_SECONDS
 	ModelUtils.enable_shadows(self, false)
 
 func _add_ring(radius: float) -> void:
@@ -1227,6 +1345,8 @@ func _equip_weapon(setup_data: Dictionary) -> void:
 	weapon.rotation_degrees = setup_data.weapon_rotation
 	weapon.position = setup_data.weapon_offset
 	attachment.add_child(weapon)
+	# 武器主色跟英雄谱系色走：立绘/技能/技能图标是同一套色，模型上的武器也要能认出来。
+	ModelUtils.tint(weapon, setup_data.get("accent", Color.WHITE), float(setup_data.get("weapon_tint_amount", 0.0)))
 
 func set_snapshot(data: Dictionary, delta: float = 0.016, alpha: float = 1.0, prev_xy: Vector2 = Vector2(INF, INF)) -> void:
 	var target := Vector3(float(data.get("x", 0.0)), 0.0, float(data.get("y", 0.0)))

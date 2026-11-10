@@ -146,7 +146,7 @@ const WALL_BRICK_TINT := 0.07
 
 ## 石壁材质。全图（野区墙体 + 边界墙）共用一份实例，避免一处石头一处木板，
 ## 也省掉几十个 material 的重复编译。
-static func rock_wall_material() -> ShaderMaterial:
+static func rock_wall_material(fortress := false) -> ShaderMaterial:
 	var material := ShaderMaterial.new()
 	material.shader = load(ROCK_SHADER_PATH)
 	material.set_shader_parameter("albedo_tex", load(ROCK_ALBEDO_PATH))
@@ -165,6 +165,8 @@ static func rock_wall_material() -> ShaderMaterial:
 	material.set_shader_parameter("mortar_width", WALL_MORTAR_WIDTH)
 	material.set_shader_parameter("mortar_darken", WALL_MORTAR_DARKEN)
 	material.set_shader_parameter("brick_tint", WALL_BRICK_TINT)
+	# 野区墙是自然岩壁，不该有整齐砖缝；边界墙才保留砌石城防的语言。
+	material.set_shader_parameter("brick_amount", 1.0 if fortress else 0.0)
 	return material
 
 static func apply_environment(environment: Environment) -> void:

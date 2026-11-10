@@ -44,6 +44,14 @@ static func event_banner(event: Dictionary) -> Dictionary:
 	var team := str(event.get("team", ""))
 	var team_label := str(TEAM_LABELS.get(team, "战场"))
 	match kind:
+		"objective_spawn":
+			return {
+				"text": "暴君与主宰已降临",
+				"feed": "首领刷新，击杀可为全队提供增伤",
+				"color": GameTheme.GOLD_LIGHT,
+				"announce": true,
+				"duration": 2.0,
+			}
 		"objective_killed":
 			var boss := str(event.get("name", "中立首领"))
 			return {

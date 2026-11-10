@@ -22,6 +22,17 @@ const River = preload("res://sim/map/river.gd")
 const Teleport = preload("res://sim/map/teleport.gd")
 
 const TICK_RATE := 30.0
+
+# 路径跟随的"卡死"恢复参数（项 6b）。
+# 背景：实体沿 waypoint 前进，但碰撞系统会把被墙挡住的位移吃掉大半，
+# 而"到点"判定要求距离 < 0.9m。一旦实体钻进野区围墙，它每 tick 只挪一点点，
+# 永远到不了点、path_index 也不前进 —— 实测蓝方射手这样卡了 6 分钟、CS 停在 4。
+# RESYNC_DISTANCE：当前 waypoint 离得远到这个程度，说明索引已经脱节，直接重吸附。
+const RESYNC_DISTANCE := 12.0
+# 实际位移低于应走距离的这个比例，即视为"被挡住"。
+const STUCK_PROGRESS_RATIO := 0.5
+# 连续卡住这么多 tick（约 1 秒）就重吸附一次。
+const STUCK_TICKS_LIMIT := 30
 const HERO_RESPAWN_BASE := 6.0
 const WAVE_INTERVAL := 18.0
 const FIRST_WAVE_DELAY := 1.0
@@ -1009,6 +1020,17 @@ func _advance_along_path(entity: Dictionary, dt: float) -> void:
 	var speed := float(entity.get("speed", 3.3))
 	if float(entity.get("slow_timer", 0.0)) > 0.0:
 		speed *= 0.65
+	# 路径点严重脱节时重新吸附（见下方 _resync_path_index）。
+	# 不修的话会出现永久卡死：实体被墙挡住、每次只挪动一点点，
+	# 而"到点"判定要求 < 0.9m，于是 path_index 永远不前进 ——
+	# 实测蓝方射手卡在野区围墙边 6 分钟、CS 停在 4，而同阵容红方 CS 是 32。
+	if to_point.length() > RESYNC_DISTANCE:
+		index = _resync_path_index(entity, path)
+		entity.path_index = index
+		if index < 0 or index >= path.size():
+			return
+		waypoint = path[index]
+		to_point = waypoint - entity.pos
 	if to_point.length() < 0.9:
 		index += int(entity.path_dir)
 		entity.path_index = index
@@ -1017,9 +1039,51 @@ func _advance_along_path(entity: Dictionary, dt: float) -> void:
 		waypoint = path[index]
 		to_point = waypoint - entity.pos
 	if to_point.length() > 0.01:
+		var before: Vector2 = entity.pos
 		var destination: Vector2 = entity.pos + to_point.normalized() * speed * dt
 		entity.pos = Collision.move(entity.pos, destination, float(entity.get("radius", 0.4)))
 		entity.moving = true
+		# 撞墙检测：这一 tick 实际位移远小于应走距离，说明被挡住了。
+		# 连续卡住超过阈值就重新吸附，避免"贴着墙磨到天荒地老"。
+		var progress := before.distance_to(entity.pos)
+		if progress < speed * dt * STUCK_PROGRESS_RATIO:
+			entity["stuck_ticks"] = int(entity.get("stuck_ticks", 0)) + 1
+			if int(entity.get("stuck_ticks", 0)) > STUCK_TICKS_LIMIT:
+				entity["stuck_ticks"] = 0
+				entity.path_index = _resync_path_index(entity, path)
+		else:
+			entity["stuck_ticks"] = 0
+
+## 把 path_index 重新吸附到**离当前位置最近的路径点**（沿前进方向取）。
+## 返回新的索引；路径为空时返回 -1。
+##
+## 曾经写成"总是再往前多取一格"来避免在两点间抖动，但那会在路径点稀疏时
+## 把实体甩到很远的点上（实测 (5,-5) 最近的点是 (0,0)，多走一格变成 (-18,18)，
+## 距离 32.5m，比不吸附还糟）。正确做法是：**只有恰好落在已过的点上时才前移一格**。
+static func _resync_path_index(entity: Dictionary, path: Array) -> int:
+	if path.is_empty():
+		return -1
+	var pos: Vector2 = entity.pos
+	var best := -1
+	var best_dist := INF
+	for i in path.size():
+		var d: float = pos.distance_to(path[i])
+		if d < best_dist:
+			best_dist = d
+			best = i
+	if best < 0:
+		return -1
+	# 只有当实体已经越过最近点时才前移一格；否则保持原索引。
+	# 判据：朝向该点的分量已经"走过头"（点乘为负），说明该点已在身后。
+	var dir := int(entity.get("path_dir", 1))
+	var forward := best + dir
+	if forward >= 0 and forward < path.size():
+		var to_point: Vector2 = path[best] - pos
+		var to_next: Vector2 = path[forward] - pos
+		# 下一个点比当前点更近，说明当前点已经被越过。
+		if to_next.length() < to_point.length():
+			return forward
+	return best
 
 func _update_minions(dt: float) -> void:
 	for entity in state.entities:
@@ -1038,6 +1102,11 @@ func _update_minions(dt: float) -> void:
 				entity.attack_cd = float(entity.attack_interval)
 				entity.facing = (target.pos - entity.pos).normalized()
 				# 表现层靠这条事件画刀光/弹丸：小兵攻击不能再只改数值。
+				#
+				# 曾经试过"小兵打小兵时抽稀到 1/3"来省网络预算（事件量第一，4678 次），
+				# 但 test_unit_attack_fx 立刻变红：**每一刀都必须有可渲染的反馈**，
+				# 否则清兵时玩家看不到自己在打什么。这条测试的意图是对的，抽稀已回退。
+				# 事件量改从别处优化（hit 已对小兵互殴静音，省了 40%）。
 				_emit("minion_attack", {
 					"source": entity.id,
 					"team": entity.team,
@@ -1402,18 +1471,27 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 	if remaining <= 0.0:
 		return
 	target.hp = float(target.hp) - remaining
-	_emit("hit", {
-		"target": target.id,
-		"target_type": target.type,
-		# 表现层靠这两个字段找到出手者：野怪/小兵没有独立的 attack 事件，
-		# 不给 source 就只能看到目标掉血、看不到谁打的。
-		"source": int(source.get("id", -1)) if not source.is_empty() else -1,
-		"source_type": str(source.get("type", "")),
-		"x": float(target.pos.x),
-		"y": float(target.pos.y),
-		"amount": remaining,
-		"team": target.team,
-	})
+	# 项 3.5：**小兵打小兵不广播 hit**。
+	# 实测事件构成：hit 占 7301 次（总量 65% 的大头之一），而双方小兵每波互殴
+	# 会产生大量只为"飘个伤害数字"的事件。玩家不会去数小兵互相打了多少，
+	# 这类事件纯属挤占 32 条/批的网络预算（峰值批里 hit 占 8/24）。
+	# 注意：**伤害照常结算**，这里只是不发表现事件 —— 数值与胜负完全不受影响。
+	# 英雄/塔/野怪参与的任何一次命中都照常广播。
+	var quiet := str(target.type) == "minion" and not source.is_empty() \
+		and str(source.get("type", "")) == "minion"
+	if not quiet:
+		_emit("hit", {
+			"target": target.id,
+			"target_type": target.type,
+			# 表现层靠这两个字段找到出手者：野怪/小兵没有独立的 attack 事件，
+			# 不给 source 就只能看到目标掉血、看不到谁打的。
+			"source": int(source.get("id", -1)) if not source.is_empty() else -1,
+			"source_type": str(source.get("type", "")),
+			"x": float(target.pos.x),
+			"y": float(target.pos.y),
+			"amount": remaining,
+			"team": target.team,
+		})
 	if float(target.hp) <= 0.0:
 		_kill_entity(target, source)
 

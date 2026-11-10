@@ -72,10 +72,14 @@ var _hero_panel: PanelContainer
 var _hint_box: Label
 # 分区表：视口一变就重算，所有常驻面板都从这里取矩形，不再各写锚点。
 var _layout: Dictionary = {}
+# 手动 _ready() 后再进树时，引擎会再调一次 _ready；没有这道闸就会整份 HUD 建两遍。
+var _built := false
 var _hp_bar: ProgressBar
 var _hp_text: Label
 var _hp_style: StyleBoxFlat
 var _equip_icons: Array[TextureRect] = []
+var _status_pips: Array[PanelContainer] = []
+var _status_icons: Array[TextureRect] = []
 var _mp_bar: ProgressBar
 var _mp_text: Label
 var _level_label: Label
@@ -135,6 +139,8 @@ var _death_countdown: Label
 var _death_killer_label: Label
 var _result_overlay: Control
 var _result_title: Label
+var _result_badge: Label
+var _result_avatar: TextureRect
 var _result_sub: Label
 var _result_stats: Label
 var _pause_overlay: Control
@@ -152,6 +158,9 @@ func setup(owner_id: String, team: String, type_id: String, display: String, mob
 	online_mode = online
 
 func _ready() -> void:
+	if _built:
+		return
+	_built = true
 	theme = GameTheme.theme()
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -550,7 +559,7 @@ func _build_bottom_panel() -> void:
 	var equip_row := HBoxContainer.new()
 	equip_row.add_theme_constant_override("separation", 3)
 	info.add_child(equip_row)
-	var equip_size := 16.0 if touch_mode else 20.0
+	var equip_size := 14.0 if touch_mode else 20.0
 	for i in 6:
 		var frame := PanelContainer.new()
 		frame.custom_minimum_size = Vector2(equip_size, equip_size)
@@ -568,6 +577,33 @@ func _build_bottom_panel() -> void:
 		frame.add_child(icon)
 		equip_row.add_child(frame)
 		_equip_icons.append(icon)
+	# Buff/Debuff 小色标：红/蓝 BUFF、加速、减速。没有图标资产时用纯色标，
+	# 至少让玩家在状态卡上看到"身上有东西"，而不是只能看角色脚下的光环。
+	var pip_size := 12.0 if touch_mode else 16.0
+	for entry in [
+		["红BUFF", Color(0.95, 0.32, 0.18)],
+		["蓝BUFF", Color(0.30, 0.60, 1.0)],
+		["加速", Color(0.42, 0.90, 0.48)],
+		["减速", Color(0.48, 0.80, 1.0)],
+	]:
+		var pip := PanelContainer.new()
+		pip.custom_minimum_size = Vector2(pip_size, pip_size)
+		pip.tooltip_text = str(entry[0])
+		pip.visible = false
+		var pip_style := GameTheme.style(Color(entry[1]), Color(0.95, 0.92, 0.82, 0.8), 1, 3, 0, 0.0)
+		pip_style.content_margin_left = 0
+		pip_style.content_margin_right = 0
+		pip_style.content_margin_top = 0
+		pip_style.content_margin_bottom = 0
+		pip.add_theme_stylebox_override("panel", pip_style)
+		var status_icon := TextureRect.new()
+		status_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		status_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		status_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		pip.add_child(status_icon)
+		equip_row.add_child(pip)
+		_status_pips.append(pip)
+		_status_icons.append(status_icon)
 
 	if not touch_mode:
 		# 技能从状态卡里搬出来，单独贴右下角：状态卡只回答「我是谁 / 我还剩多少血」。
@@ -1030,15 +1066,38 @@ func _build_result_overlay() -> void:
 	panel.offset_right = 330.0
 	panel.offset_top = -220.0
 	panel.offset_bottom = 220.0
-	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.025, 0.045, 0.06, 0.97), Color(0.7, 0.55, 0.28, 0.95), 2, 14))
+	var ornate := GameTheme.ornate_panel()
+	if ornate.texture != null:
+		panel.add_theme_stylebox_override("panel", ornate)
+	else:
+		panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.025, 0.045, 0.06, 0.97), Color(0.7, 0.55, 0.28, 0.95), 2, 14))
 	_result_overlay.add_child(panel)
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.add_theme_constant_override("separation", 16)
 	panel.add_child(box)
-	_result_title = _make_label("胜  利", 76, GameTheme.GOLD_LIGHT, "TitleLabel")
+	var head_row := HBoxContainer.new()
+	head_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	head_row.add_theme_constant_override("separation", 16)
+	box.add_child(head_row)
+	var avatar_frame := PanelContainer.new()
+	avatar_frame.custom_minimum_size = Vector2(96.0, 96.0)
+	avatar_frame.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.03, 0.045, 1.0), Color(0.72, 0.56, 0.30, 0.85), 2, 8, 0, 0.0))
+	head_row.add_child(avatar_frame)
+	_result_avatar = TextureRect.new()
+	_result_avatar.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_result_avatar.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	_result_avatar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	avatar_frame.add_child(_result_avatar)
+	var title_box := VBoxContainer.new()
+	title_box.add_theme_constant_override("separation", 2)
+	head_row.add_child(title_box)
+	_result_title = _make_label("胜  利", 64, GameTheme.GOLD_LIGHT, "TitleLabel")
 	_result_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(_result_title)
+	title_box.add_child(_result_title)
+	_result_badge = _make_label("MVP", 18, GameTheme.GOLD_LIGHT)
+	_result_badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title_box.add_child(_result_badge)
 	_result_sub = _make_label("", 20, GameTheme.TEXT)
 	_result_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(_result_sub)
@@ -1187,6 +1246,18 @@ func update_snapshot(data: Dictionary) -> void:
 				if i < inventory.size()
 				else null
 			)
+	if _status_pips.size() >= 4:
+		# 每帧直接写 4 个 bool，不建临时数组：状态卡是常驻 HUD，能少一次分配就少一次。
+		_status_pips[0].visible = float(local.get("buff_red_timer", 0.0)) > 0.0
+		_status_pips[1].visible = float(local.get("buff_blue_timer", 0.0)) > 0.0
+		_status_pips[2].visible = float(local.get("haste_timer", 0.0)) > 0.0
+		_status_pips[3].visible = float(local.get("slow_timer", 0.0)) > 0.0
+		var icon_size := 12 if touch_mode else 16
+		if _status_icons.size() >= 4:
+			_status_icons[0].texture = GameTheme.status_icon("buff_red", icon_size)
+			_status_icons[1].texture = GameTheme.status_icon("buff_blue", icon_size)
+			_status_icons[2].texture = GameTheme.status_icon("haste", icon_size)
+			_status_icons[3].texture = GameTheme.status_icon("slow", icon_size)
 	# 左上角那行金币：写得短，钱多了折成 15.4k，否则会把塔数挤出去。
 	if _map_gold_label != null:
 		_map_gold_label.text = _short_gold(gold)
@@ -1321,14 +1392,70 @@ func add_feed(text: String, color := GameTheme.TEXT) -> void:
 	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	label.add_theme_constant_override("outline_size", 4)
 	_feed_box.add_child(label)
-	while _feed_box.get_child_count() > 5:
-		var first := _feed_box.get_child(0)
-		_feed_box.remove_child(first)
-		first.queue_free()
+	_trim_feed()
 	var tween := create_tween()
 	tween.tween_interval(4.5)
 	tween.tween_property(label, "modulate:a", 0.0, 0.6)
 	tween.tween_callback(label.queue_free)
+
+# 击杀条目：英雄击杀显示"击杀者头像 + 文字 + 受害者头像"，
+# 塔/小兵击杀只显示受害者头像。头像复用立绘裁切缓存，不新增 2D 资产。
+func add_kill_feed(killer_name: String, killer_hero_type: String, victim_name: String, victim_hero_type: String, color: Color, killer_is_hero := true) -> void:
+	if _feed_box == null:
+		return
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	row.alignment = BoxContainer.ALIGNMENT_END
+	if killer_is_hero and killer_hero_type != "":
+		_add_feed_avatar(row, killer_hero_type)
+	var text := ""
+	if killer_is_hero:
+		text = "%s 击败了 %s" % [killer_name, victim_name]
+	else:
+		text = "%s 被 %s 击败" % [victim_name, killer_name]
+	var label := _make_label(text, 14, color)
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	label.clip_text = true
+	label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	label.add_theme_constant_override("outline_size", 4)
+	row.add_child(label)
+	if victim_hero_type != "":
+		_add_feed_avatar(row, victim_hero_type)
+	_feed_box.add_child(row)
+	_trim_feed()
+	var tween := create_tween()
+	tween.tween_interval(4.5)
+	tween.tween_property(row, "modulate:a", 0.0, 0.6)
+	tween.tween_callback(row.queue_free)
+
+func _add_feed_avatar(row: HBoxContainer, hero_type: String) -> void:
+	var texture := GameTheme.hero_avatar(hero_type, 22)
+	if texture == null:
+		return
+	var frame := PanelContainer.new()
+	frame.custom_minimum_size = Vector2(24.0, 24.0)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var style := GameTheme.style(Color(0.02, 0.03, 0.04, 0.95), Color(0.72, 0.56, 0.30, 0.8), 1, 4, 0, 0.0)
+	style.content_margin_left = 0
+	style.content_margin_right = 0
+	style.content_margin_top = 0
+	style.content_margin_bottom = 0
+	frame.add_theme_stylebox_override("panel", style)
+	var icon := TextureRect.new()
+	icon.texture = texture
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_child(icon)
+	row.add_child(frame)
+
+func _trim_feed() -> void:
+	while _feed_box.get_child_count() > 5:
+		var first := _feed_box.get_child(0)
+		_feed_box.remove_child(first)
+		first.queue_free()
 
 func show_pause(value: bool, online := false) -> void:
 	paused = value
@@ -1368,6 +1495,14 @@ func show_result(winner: String, local: Dictionary) -> void:
 	close_shop()
 	_death_overlay.visible = false
 	var victory := winner == local_team
+	if _result_avatar:
+		_result_avatar.texture = GameTheme.hero_avatar(hero_type, 96)
+	var kills := int(local.get("kills", 0))
+	var deaths := int(local.get("deaths", 0))
+	var is_mvp := kills >= 3 and kills > deaths
+	if _result_badge:
+		_result_badge.text = "MVP" if is_mvp else "参战"
+		_result_badge.add_theme_color_override("font_color", GameTheme.GOLD_LIGHT if is_mvp else GameTheme.MUTED)
 	_result_title.text = "胜  利" if victory else "战  败"
 	_result_title.add_theme_color_override("font_color", GameTheme.GOLD_LIGHT if victory else Color(0.9, 0.36, 0.3))
 	_result_sub.text = "敌方主堡已被摧毁" if victory else "我方主城已被摧毁"

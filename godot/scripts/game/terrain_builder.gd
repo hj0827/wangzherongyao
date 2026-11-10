@@ -155,6 +155,12 @@ void fragment() {
 	col = mix(col, sand, bank * 0.82);
 	col = mix(col, rock, rocky);
 	col *= 0.90 + g3.r * 0.16;
+	// 低频 macro variation：复用 g3/g1，不再多采样一次。
+	// 大地块从冷绿过渡到偏黄的干草，远看不会是一片均匀的塑料绿。
+	float macro = smoothstep(0.18, 0.82, g3.r);
+	float macro_warm = smoothstep(0.30, 0.72, g1.g);
+	col = mix(col, col * mix(vec3(0.82, 0.91, 0.80), vec3(1.08, 1.04, 0.90), macro), 0.24);
+	col *= 0.95 + macro_warm * 0.10;
 
 	// 去饱和在前、阵营染色在后：反过来的话染色会被去饱和拉回中性，色偏就白做了。
 	float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));

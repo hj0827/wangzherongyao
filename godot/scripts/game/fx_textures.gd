@@ -4,9 +4,41 @@ class_name FxTextures
 ## 程序化特效贴图。项目里没有 VFX 贴图资产，先用 GradientTexture2D 生成柔光圆，
 ## 把粒子从"纯色方片"变成"有衰减的光点"。生成一次、静态缓存，战斗路径不 load()。
 
+const VFX_DIR := "res://assets/vfx/textures/"
+static var _cache: Dictionary = {}
 static var _soft_glow: Texture2D = null
 
+static func file_texture(name: String) -> Texture2D:
+	if _cache.has(name):
+		return _cache[name]
+	var texture: Texture2D = null
+	var path := VFX_DIR + name + ".png"
+	if ResourceLoader.exists(path):
+		var loaded := load(path)
+		if loaded is Texture2D:
+			texture = loaded as Texture2D
+	_cache[name] = texture
+	return texture
+
+static func spark() -> Texture2D:
+	return file_texture("spark")
+
+static func smoke() -> Texture2D:
+	return file_texture("smoke")
+
+static func rune() -> Texture2D:
+	return file_texture("rune")
+
+static func slash() -> Texture2D:
+	return file_texture("slash")
+
+static func shock() -> Texture2D:
+	return file_texture("shock")
+
 static func soft_glow() -> Texture2D:
+	var file := file_texture("glow")
+	if file != null:
+		return file
 	if _soft_glow != null:
 		return _soft_glow
 	var gradient := Gradient.new()

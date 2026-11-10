@@ -58,7 +58,11 @@ func _build() -> void:
 	panel.offset_right = 490.0
 	panel.offset_top = -310.0
 	panel.offset_bottom = 310.0
-	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.025, 0.045, 0.06, 0.98), Color(0.7, 0.55, 0.28, 0.95), 2, 12))
+	var ornate := GameTheme.ornate_panel()
+	if ornate.texture != null:
+		panel.add_theme_stylebox_override("panel", ornate)
+	else:
+		panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.025, 0.045, 0.06, 0.98), Color(0.7, 0.55, 0.28, 0.95), 2, 12))
 	_root.add_child(panel)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 8)

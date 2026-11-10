@@ -128,6 +128,86 @@ static func style(
 	box.shadow_offset = Vector2(0, float(shadow_size) * 0.7)
 	return box
 
+const SKILL_ICON_DIR := "res://assets/ui/skills/"
+const STATUS_ICON_DIR := "res://assets/ui/status/"
+const MINIMAP_BG_PATH := "res://assets/ui/minimap/canyon_bg.png"
+const PANEL_FRAME_PATH := "res://assets/ui/frames/panel_gold.png"
+
+static var _skill_icon_cache: Dictionary = {}
+static var _status_icon_cache: Dictionary = {}
+static var _minimap_bg: Texture2D = null
+static var _panel_frame: Texture2D = null
+
+# 技能图标：按 kind 取位图；缺图返回 null，SkillButton 回落矢量图形。
+static func skill_icon(kind: String, size: int = 0) -> Texture2D:
+	var key := "%s@%d" % [kind, size]
+	if _skill_icon_cache.has(key):
+		return _skill_icon_cache[key]
+	var path := SKILL_ICON_DIR + kind + ".png"
+	var texture: Texture2D = null
+	if ResourceLoader.exists(path):
+		var loaded := load(path)
+		if loaded is Texture2D:
+			texture = loaded as Texture2D
+			if size > 0:
+				var image := texture.get_image()
+				if image != null and not image.is_empty():
+					if image.is_compressed():
+						image.decompress()
+					image.resize(size, size, Image.INTERPOLATE_LANCZOS)
+					texture = ImageTexture.create_from_image(image)
+	_skill_icon_cache[key] = texture
+	return texture
+
+static func has_skill_icon(kind: String) -> bool:
+	return ResourceLoader.exists(SKILL_ICON_DIR + kind + ".png")
+
+# 状态图标：红/蓝 BUFF、护盾、减速、加速、回血、眩晕、沉默。
+static func status_icon(status_id: String, size: int = 0) -> Texture2D:
+	var key := "%s@%d" % [status_id, size]
+	if _status_icon_cache.has(key):
+		return _status_icon_cache[key]
+	var path := STATUS_ICON_DIR + status_id + ".png"
+	var texture: Texture2D = null
+	if ResourceLoader.exists(path):
+		var loaded := load(path)
+		if loaded is Texture2D:
+			texture = loaded as Texture2D
+			if size > 0:
+				var image := texture.get_image()
+				if image != null and not image.is_empty():
+					if image.is_compressed():
+						image.decompress()
+					image.resize(size, size, Image.INTERPOLATE_LANCZOS)
+					texture = ImageTexture.create_from_image(image)
+	_status_icon_cache[key] = texture
+	return texture
+
+static func minimap_background() -> Texture2D:
+	if _minimap_bg == null and ResourceLoader.exists(MINIMAP_BG_PATH):
+		var loaded := load(MINIMAP_BG_PATH)
+		if loaded is Texture2D:
+			_minimap_bg = loaded as Texture2D
+	return _minimap_bg
+
+# 9-slice 金边面板：边框 24px，内容区由 content_margin 控制。
+static func ornate_panel() -> StyleBoxTexture:
+	if _panel_frame == null and ResourceLoader.exists(PANEL_FRAME_PATH):
+		var loaded := load(PANEL_FRAME_PATH)
+		if loaded is Texture2D:
+			_panel_frame = loaded as Texture2D
+	var box := StyleBoxTexture.new()
+	box.texture = _panel_frame
+	box.texture_margin_left = 24.0
+	box.texture_margin_right = 24.0
+	box.texture_margin_top = 24.0
+	box.texture_margin_bottom = 24.0
+	box.content_margin_left = 18.0
+	box.content_margin_right = 18.0
+	box.content_margin_top = 14.0
+	box.content_margin_bottom = 14.0
+	return box
+
 static func portrait_path(hero_type: String) -> String:
 	return "res://assets/ui/portraits/%s.png" % hero_type
 

@@ -85,7 +85,7 @@ func test_boundary_wall_is_a_rock_cliff_not_a_square_rampart() -> void:
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena.call("_build_boundary_walls")
-	var stone: ShaderMaterial = arena._wall_stone_material()
+	var stone: ShaderMaterial = arena._wall_stone_material(true)
 	var cores := {}
 	for child in arena._props_root.get_children():
 		var node_name := str((child as Node).name)

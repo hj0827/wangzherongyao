@@ -40,6 +40,24 @@ func test_bought_items_show_icons_and_empty_slots_stay_blank() -> void:
 	check(hud._equip_icons[2].texture == null, "空槽不能显示上一件装备的图标")
 	hud.free()
 
+func test_status_pips_follow_buff_timers() -> void:
+	var sim := _sim()
+	var hero: Dictionary = sim.get_hero_by_player("p1")
+	hero["buff_red_timer"] = 12.0
+	hero["slow_timer"] = 2.0
+	var hud := _hud(sim)
+	eq(hud._status_pips.size(), 4, "状态卡要有 4 个状态色标")
+	check(hud._status_pips[0].visible, "红 BUFF 色标要亮")
+	check(not hud._status_pips[1].visible, "没有蓝 BUFF 时蓝标要隐藏")
+	check(not hud._status_pips[2].visible, "没有加速时加速标要隐藏")
+	check(hud._status_pips[3].visible, "减速色标要亮")
+	check(hud._status_icons.size() == 4 and hud._status_icons[0].texture != null, "状态色标要用位图图标")
+	hero["buff_red_timer"] = 0.0
+	hero["slow_timer"] = 0.0
+	hud.update_snapshot(sim.snapshot())
+	check(not hud._status_pips[0].visible and not hud._status_pips[3].visible, "状态结束后色标要隐藏")
+	hud.free()
+
 func test_inventory_change_updates_icons() -> void:
 	var sim := _sim()
 	var hero: Dictionary = sim.get_hero_by_player("p1")

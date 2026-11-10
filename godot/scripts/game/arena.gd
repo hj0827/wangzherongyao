@@ -193,7 +193,8 @@ var _camp_sigil_active: Dictionary = {}
 var _camp_labels: Dictionary = {}
 # 全图石壁共用的一份材质（野区墙 + 边界墙 + 压顶石）。懒建，因为
 # 「建场景」和「渲染」都可能在无材质需求时被单独调用（测试里就是这样）。
-var _stone_material: ShaderMaterial = null
+var _stone_material_jungle: ShaderMaterial = null
+var _stone_material_boundary: ShaderMaterial = null
 # 墙石批处理：几百块 Rock.glb 如果逐个节点画，移动端光是 draw call 和
 # 阴影 pass 就会把帧率吃掉。这里先收集实例数据，最后合成 1~2 个 MultiMesh。
 var _rock_batch_specs: Array[Dictionary] = []
@@ -349,6 +350,8 @@ var _hit_particles_active: Array[GPUParticles3D] = []
 # 三路兵线同时交火时每秒十几次攻击，不能每次 new + queue_free。
 var _tracer_pool: Array[MeshInstance3D] = []
 var _tracer_active: Array[MeshInstance3D] = []
+var _trail_pool: Array[MeshInstance3D] = []
+var _trail_active: Array[MeshInstance3D] = []
 var _lance_pool: Array[MeshInstance3D] = []
 var _lance_active: Array[MeshInstance3D] = []
 # 命中/技能范围环：以前每次 new TorusMesh + StandardMaterial3D + queue_free，
@@ -359,6 +362,11 @@ var _ring_active: Array[MeshInstance3D] = []
 # 每次 new SurfaceTool 提交网格 + 新建材质就等于把硬规则 4 重新破掉。
 var _slash_pool: Array[MeshInstance3D] = []
 var _slash_active: Array[MeshInstance3D] = []
+# 技能地面残留：贴地光斑，1.6s 内淡出。池化，战斗期只切 visible / 改 alpha。
+const DECAL_POOL_LIMIT := 12
+const DECAL_SECONDS := 1.6
+var _decal_pool: Array[MeshInstance3D] = []
+var _decal_active: Array[Dictionary] = []
 var build_complete := false
 
 func configure(options: Dictionary) -> void:
@@ -987,6 +995,7 @@ func _process(delta: float) -> void:
 	_sync_structures(current_snapshot, false)
 	_update_bush_feedback()
 	_update_channel_feedback(delta)
+	_update_decals(delta)
 	var intent := _has_local_intent()
 	if intent and not _last_intent and _camera_focus.is_active():
 		# 玩家开始操作英雄就立刻收回镜头：否则人已经打起来了，画面还停在地图另一头。
@@ -2513,10 +2522,14 @@ func _build_bridge_piers(label: String, path: Array, material: Material) -> void
 
 # 石壁材质只建一次。理由有两个：观感必须全图一致（一处石头一处木板是最刺眼的不一致），
 # 以及几十段墙各建一个 ShaderMaterial 会让每个材质都要单独编译一次。
-func _wall_stone_material() -> ShaderMaterial:
-	if _stone_material == null:
-		_stone_material = ArenaLook.rock_wall_material()
-	return _stone_material
+func _wall_stone_material(fortress := false) -> ShaderMaterial:
+	if fortress:
+		if _stone_material_boundary == null:
+			_stone_material_boundary = ArenaLook.rock_wall_material(true)
+		return _stone_material_boundary
+	if _stone_material_jungle == null:
+		_stone_material_jungle = ArenaLook.rock_wall_material(false)
+	return _stone_material_jungle
 
 # 地图机制的可视化：墙体、草丛、野区营地与首领坑都从 MapLayout 取坐标，
 # 与碰撞/视野/野怪刷新点严格同源，避免「看得见走不过去」或「打到空气墙」。
@@ -2525,6 +2538,9 @@ func _build_map_features() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 90210
 	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
+	# 墙端露头交替用单块 Rock 与 Rock_Group：同一块石头复制二十次，
+	# 俯视是一排一模一样的轮廓；岩石群至少有 2~3 个不同的咬合剪影。
+	var rock_group_scene: PackedScene = load(ENV_DIR + "Rock_Group.glb")
 	var stone := _wall_stone_material()
 
 	_begin_rock_batch()
@@ -2598,6 +2614,31 @@ func _build_map_features() -> void:
 	# 野区墙石：一批 MultiMesh，阴影关闭。高石/墙脚石都由基座与墙端石提供接地阴影，
 	# 这一批数量最大，单独开阴影会让移动端的 shadow pass 翻倍。
 	_flush_rock_batch("wall_rocks", rock_scene, stone, false)
+
+	# 中段岩石变体：在现有岩脊之间再插一批更低、更窄的 Rock_Group 轮廓。
+	# 不替换 wall_rocks（那批的高度/间距/碰撞契约由测试钉死），只做叠加，
+	# 让同一段墙的顶缘不再全是同一块 Rock.glb 的复制。
+	_begin_rock_batch()
+	for wall in marks.walls:
+		var va: Vector2 = wall.a
+		var vb: Vector2 = wall.b
+		var vlength := va.distance_to(vb)
+		if vlength < 1.2:
+			continue
+		var vcount := maxi(3, int(round(vlength / MapLayout.WALL_ROCK_SPACING)))
+		for i in vcount:
+			if i % 4 != 1:
+				continue
+			var vt := (float(i) + 0.5) / float(vcount)
+			var vp := va.lerp(vb, vt)
+			_queue_rock(
+				vp,
+				rng.randf_range(1.35, 1.85),
+				rng.randf_range(0.55, 0.80),
+				rng.randf_range(0.0, TAU),
+				{"wall_id": str(wall.get("id", "jungle")), "kind": "variant", "along": vlength * vt}
+			)
+	_flush_rock_batch("wall_ridge_variants", rock_group_scene, stone, false)
 	# 墙端露头：BoxMesh 的端面是绝对平的，一段墙看着像被刀切过。
 	# 王者的野区石壁是「山体在两端露头」，所以每个墙端压一块**高过墙顶**的岩体，
 	# 把平整端面吞进石头里。相邻两段墙靠得近时，两块露头自然合成一个山口。
@@ -2615,8 +2656,10 @@ func _build_map_features() -> void:
 		# 一排等高石头俯视是条锯齿完全相同的花边，比等高墙还假。
 		var end_height := 1.55 + (end_radius - MapLayout.END_MIN_RADIUS) * 0.85
 		end_height += float(end_index % 3) * 0.08
-		var cap := ModelUtils.fit_scene(rock_scene, end_height, end_radius * 2.0)
+		var end_scene: PackedScene = rock_group_scene if end_index % 3 == 1 else rock_scene
+		var cap := ModelUtils.fit_scene(end_scene, end_height, end_radius * 2.0)
 		cap.name = "wall_end_%s_%s" % [str(entry["wall"]), str(entry["end"])]
+		cap.set_meta("end_variant", "group" if end_scene == rock_group_scene else "single")
 		var end_pos: Vector2 = entry["pos"]
 		# 往墙里推 0.15 米：让石头吃掉端面，而不是在端面外侧贴一颗。
 		var inward: Vector2 = -(entry["outward"] as Vector2) * 0.15
@@ -2701,9 +2744,273 @@ func _build_map_features() -> void:
 
 	# 墙脚草：让石壁和草地之间有一圈植被过渡，而不是一条灰色石头直接插在绿地上。
 	_build_wall_tufts()
+	# 基地旗/灯笼：给出生点一点阵营氛围，纯装饰、不参与碰撞。
+	_build_base_props()
+	# 野区兽骨/石碑：让野点不只是"圆盘 + 野怪"，也有环境叙事。
+	_build_jungle_props()
+	# 河岸芦苇：给河道两岸一条植被过渡，水陆交界不再是一条硬边。
+	_build_river_reeds()
 
-# 墙脚草簇：一个 MultiMesh 批次。只铺在墙的半厚之外，不参与碰撞；
-# 野区墙两侧都铺，边界墙只铺朝可玩区那一侧（外侧贴着地形抬升，铺了也看不见）。
+# 河岸芦苇：沿河道两岸（x = z 中心线）铺高草簇，避开兵线、桥心、营地和传送阵。
+# 用 GrassField 的草叶网格放大成"芦苇"，仍是单批次，不参与碰撞。
+func _build_river_reeds() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 91073
+	var normal := Vector2(1.0, -1.0).normalized()
+	var points: Array[Vector2] = []
+	for side in [-1.0, 1.0]:
+		for i in 30:
+			var along := -44.0 + float(i) * 3.0
+			var center := Vector2(along, along)
+			var distance := rng.randf_range(9.8, 12.2)
+			var pos: Vector2 = center + normal * float(side) * distance
+			if pos.length() < 13.0:
+				continue
+			if _lane_distance(pos) < 4.2:
+				continue
+			if not _feature_clear(pos, 0.7):
+				continue
+			points.append(pos)
+	if points.is_empty():
+		return
+	var mesh := GrassField.build_mesh()
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = points.size()
+	for i in points.size():
+		var point: Vector2 = points[i]
+		var scale := rng.randf_range(1.2, 2.0)
+		var basis := Basis(Vector3.UP, rng.randf_range(0.0, TAU)).scaled(Vector3(scale, scale * rng.randf_range(2.4, 3.6), scale))
+		multimesh.set_instance_transform(i, Transform3D(basis, Vector3(point.x, maxf(_terrain_height(point.x, point.y), 0.0) - 0.02, point.y)))
+	var node := MultiMeshInstance3D.new()
+	node.name = "river_reeds"
+	node.multimesh = multimesh
+	node.set_meta("reed_points", points.duplicate())
+	node.material_override = GrassField.build_material()
+	node.custom_aabb = AABB(Vector3(-62.0, -2.0, -62.0), Vector3(124.0, 6.0, 124.0))
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(node)
+
+# 基地装饰：4 面旗 + 2 盏灯笼，绕基地一圈。只放在广场外沿（半径 9.2/9.6），
+# 不压泉水、不挡兵线；材质团队色，远处也能读出"这是哪边的家"。
+func _build_base_props() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 55021
+	var wood := StandardMaterial3D.new()
+	wood.albedo_color = Color(0.24, 0.17, 0.10)
+	wood.roughness = 0.9
+	for team in ["blue", "red"]:
+		var base: Vector2 = MapData.BLUE_BASE if team == "blue" else MapData.RED_BASE
+		var team_color := BLUE if team == "blue" else RED
+		var flag_mat := StandardMaterial3D.new()
+		flag_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.92)
+		flag_mat.emission_enabled = true
+		flag_mat.emission = team_color
+		flag_mat.emission_energy_multiplier = 0.45
+		flag_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		flag_mat.roughness = 0.85
+		var glow_mat := StandardMaterial3D.new()
+		glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		glow_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		glow_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.75)
+		glow_mat.emission_enabled = true
+		glow_mat.emission = team_color
+		glow_mat.emission_energy_multiplier = 1.6
+		var banner_positions := _pick_base_prop_positions(base, 9.2, 4, 4.2)
+		for i in banner_positions.size():
+			var pos: Vector2 = banner_positions[i]
+			var angle := atan2(pos.y - base.y, pos.x - base.x)
+			var root := Node3D.new()
+			root.name = "base_banner_%s_%d" % [team, i]
+			root.position = Vector3(pos.x, 0.0, pos.y)
+			root.rotation.y = -angle + PI * 0.5
+			var pole := MeshInstance3D.new()
+			var pole_mesh := CylinderMesh.new()
+			pole_mesh.top_radius = 0.055
+			pole_mesh.bottom_radius = 0.075
+			pole_mesh.height = 3.1
+			pole_mesh.radial_segments = 8
+			pole.mesh = pole_mesh
+			pole.material_override = wood
+			pole.position.y = 1.55
+			pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(pole)
+			var flag := MeshInstance3D.new()
+			var flag_mesh := BoxMesh.new()
+			flag_mesh.size = Vector3(1.15, 0.62, 0.035)
+			flag.mesh = flag_mesh
+			flag.material_override = flag_mat
+			flag.position = Vector3(0.62, 2.72, 0.0)
+			flag.rotation.z = rng.randf_range(-0.06, 0.06)
+			flag.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(flag)
+			_props_root.add_child(root)
+		var lantern_positions := _pick_base_prop_positions(base, 9.7, 2, 4.0)
+		for i in lantern_positions.size():
+			var pos: Vector2 = lantern_positions[i]
+			var root := Node3D.new()
+			root.name = "base_lantern_%s_%d" % [team, i]
+			root.position = Vector3(pos.x, 0.0, pos.y)
+			var pole := MeshInstance3D.new()
+			var pole_mesh := CylinderMesh.new()
+			pole_mesh.top_radius = 0.05
+			pole_mesh.bottom_radius = 0.07
+			pole_mesh.height = 2.3
+			pole_mesh.radial_segments = 8
+			pole.mesh = pole_mesh
+			pole.material_override = wood
+			pole.position.y = 1.15
+			pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(pole)
+			var lantern := MeshInstance3D.new()
+			var lantern_mesh := SphereMesh.new()
+			lantern_mesh.radius = 0.2
+			lantern_mesh.height = 0.4
+			lantern_mesh.radial_segments = 12
+			lantern_mesh.rings = 6
+			lantern.mesh = lantern_mesh
+			lantern.material_override = glow_mat
+			lantern.position.y = 2.42
+			lantern.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(lantern)
+			_props_root.add_child(root)
+
+# 在基地外圈挑「离兵线最远」的若干点。基地是三路交汇处，固定角度很容易正好
+# 立在路面上；先把 12 个候选按离兵线距离排序，再取前 N 个。
+func _pick_base_prop_positions(base: Vector2, radius: float, wanted: int, min_lane: float) -> Array[Vector2]:
+	var candidates: Array = []
+	for i in 12:
+		var angle := TAU * float(i) / 12.0
+		var pos := base + Vector2(cos(angle), sin(angle)) * radius
+		candidates.append({"pos": pos, "lane": _lane_distance(pos)})
+	candidates.sort_custom(func(a, b): return float(a.lane) > float(b.lane))
+	var picked: Array[Vector2] = []
+	for entry in candidates:
+		if picked.size() >= wanted:
+			break
+		if float(entry.lane) < min_lane:
+			continue
+		picked.append(entry.pos)
+	return picked
+
+# 野区道具：每个野点一块低矮石碑 + 一小堆兽骨；首领坑只放石碑。
+# 全部纯程序化、不参与碰撞；位置先按"离兵线最远 + 不压墙/草/营地"筛。
+func _build_jungle_props() -> void:
+	var bone := StandardMaterial3D.new()
+	bone.albedo_color = Color(0.78, 0.74, 0.62)
+	bone.roughness = 0.95
+	var stone := StandardMaterial3D.new()
+	stone.albedo_color = Color(0.34, 0.33, 0.31)
+	stone.roughness = 1.0
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 33017
+	var props: Array = []
+	for camp in MapLayout.CAMPS:
+		var color := Color(0.95, 0.62, 0.22) if str(camp.get("buff", "")) == "red" else Color(0.34, 0.58, 0.98)
+		if str(camp.get("buff", "")) == "":
+			color = Color(0.58, 0.78, 0.42)
+		var pos := _find_jungle_prop_pos(camp.pos, float(camp.get("radius", 1.5)) + 1.9)
+		if pos == Vector2.INF:
+			continue
+		props.append({"id": str(camp.id), "pos": pos, "color": color, "yaw": rng.randf_range(0.0, TAU)})
+	for pit in MapLayout.OBJECTIVE_PITS:
+		var pos := _find_jungle_prop_pos(pit.pos, MapLayout.PIT_DISC_RADIUS + 2.0)
+		if pos == Vector2.INF:
+			continue
+		props.append({"id": str(pit.id), "pos": pos, "color": Color(0.72, 0.5, 0.92), "yaw": rng.randf_range(0.0, TAU)})
+	if props.is_empty():
+		return
+	# 石碑：一个 MultiMesh 批次。
+	var stele_mesh := BoxMesh.new()
+	stele_mesh.size = Vector3(0.42, 0.92, 0.18)
+	var steles := MultiMesh.new()
+	steles.transform_format = MultiMesh.TRANSFORM_3D
+	steles.mesh = stele_mesh
+	steles.instance_count = props.size()
+	var stele_specs: Array = []
+	for i in props.size():
+		var prop: Dictionary = props[i]
+		var pos: Vector2 = prop.pos
+		var yaw := float(prop.yaw)
+		var basis := Basis(Vector3.UP, yaw).rotated(Vector3.FORWARD, rng.randf_range(-0.08, 0.08))
+		steles.set_instance_transform(i, Transform3D(basis, Vector3(pos.x, 0.46, pos.y)))
+		stele_specs.append({"id": str(prop.id), "pos": pos})
+	var stele_node := MultiMeshInstance3D.new()
+	stele_node.name = "jungle_steles"
+	stele_node.multimesh = steles
+	stele_node.set_meta("prop_specs", stele_specs)
+	stele_node.material_override = stone
+	stele_node.custom_aabb = AABB(Vector3(-62.0, -1.0, -62.0), Vector3(124.0, 4.0, 124.0))
+	stele_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(stele_node)
+	# 符文：一个 MultiMesh 批次，逐实例颜色。
+	var rune_mesh := BoxMesh.new()
+	rune_mesh.size = Vector3(0.16, 0.2, 0.04)
+	var runes := MultiMesh.new()
+	runes.transform_format = MultiMesh.TRANSFORM_3D
+	runes.use_colors = true
+	runes.mesh = rune_mesh
+	runes.instance_count = props.size()
+	for i in props.size():
+		var prop: Dictionary = props[i]
+		var pos: Vector2 = prop.pos
+		var basis := Basis(Vector3.UP, float(prop.yaw))
+		runes.set_instance_transform(i, Transform3D(basis, Vector3(pos.x, 0.68, pos.y) + basis * Vector3(0.0, 0.0, 0.11)))
+		runes.set_instance_color(i, prop.color)
+	var rune_material := StandardMaterial3D.new()
+	rune_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	rune_material.vertex_color_use_as_albedo = true
+	rune_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	rune_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	rune_material.albedo_color = Color(1.0, 1.0, 1.0, 0.92)
+	var rune_node := MultiMeshInstance3D.new()
+	rune_node.name = "jungle_runes"
+	rune_node.multimesh = runes
+	rune_node.material_override = rune_material
+	rune_node.custom_aabb = AABB(Vector3(-62.0, -1.0, -62.0), Vector3(124.0, 4.0, 124.0))
+	rune_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(rune_node)
+	# 兽骨：一个 MultiMesh 批次，每处 3 根。
+	var rib_mesh := CylinderMesh.new()
+	rib_mesh.top_radius = 0.045
+	rib_mesh.bottom_radius = 0.055
+	rib_mesh.height = 1.0
+	rib_mesh.radial_segments = 6
+	var ribs := MultiMesh.new()
+	ribs.transform_format = MultiMesh.TRANSFORM_3D
+	ribs.mesh = rib_mesh
+	ribs.instance_count = props.size() * 3
+	var rib_index := 0
+	for prop in props:
+		var pos: Vector2 = prop.pos
+		var yaw := float(prop.yaw)
+		var basis_yaw := Basis(Vector3.UP, yaw)
+		for i in 3:
+			var offset := Vector3(rng.randf_range(-0.55, 0.55), 0.06, rng.randf_range(-0.42, 0.42))
+			var basis := basis_yaw * Basis.from_euler(Vector3(PI * 0.5, rng.randf_range(0.0, TAU), rng.randf_range(-0.2, 0.2))).scaled(Vector3(1.0, rng.randf_range(0.38, 0.62), 1.0))
+			ribs.set_instance_transform(rib_index, Transform3D(basis, Vector3(pos.x, 0.06, pos.y) + basis_yaw * offset))
+			rib_index += 1
+	var rib_node := MultiMeshInstance3D.new()
+	rib_node.name = "jungle_bones"
+	rib_node.multimesh = ribs
+	rib_node.material_override = bone
+	rib_node.custom_aabb = AABB(Vector3(-62.0, -1.0, -62.0), Vector3(124.0, 4.0, 124.0))
+	rib_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(rib_node)
+
+func _find_jungle_prop_pos(center: Vector2, radius: float) -> Vector2:
+	for i in 12:
+		var angle := TAU * float(i) / 12.0 + 0.2
+		var pos := center + Vector2(cos(angle), sin(angle)) * radius
+		if _lane_distance(pos) < 5.2:
+			continue
+		if not _feature_clear(pos, 0.6):
+			continue
+		return pos
+	return Vector2.INF
+
 func _build_wall_tufts() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 77821
@@ -2870,9 +3177,9 @@ func _flush_rock_batch(node_name: String, rock_scene: PackedScene, stone: Materi
 # 四个角再压一簇更大的岩体，把直角吞掉。岩脊可以往非走区探 1.2 米，
 # 但前缘始终留在玩家身体之外（可走极限 54.2，岩体前缘 ≥ 55）。
 func _build_boundary_walls() -> void:
-	# 边界墙与野区墙是同一块石头：两套材质会出现「远处木板、近处石壁」的割裂，
-	# 而且玩家读不出这两者是同一种地形。
-	var stone := _wall_stone_material()
+	# 边界墙保留砌石城防语言，野区墙是自然岩壁；两者共用同一 shader，
+	# 只靠 brick_amount 切换，避免真的变成"一处木板一处石壁"。
+	var stone := _wall_stone_material(true)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 20481
 	var rock_scene: PackedScene = load(ENV_DIR + "Rock.glb")
@@ -2953,6 +3260,36 @@ func _build_boundary_walls() -> void:
 	# 边界岩脊与角岩合成一批：桌面保留阴影（边界轮廓更立体）；
 	# 移动端关掉，边界基座和墙端石仍会投影，足够接地。
 	_flush_rock_batch("boundary_rocks", rock_scene, stone, not OS.has_feature("mobile"))
+
+	# 边界外侧的背景岩峰：比墙顶更高，但完全在非走区之外，不参与遮挡计算。
+	# 这解决"墙后直接是空天/远山"，让边界读成山体的一部分，而不是一圈围栏。
+	_begin_rock_batch()
+	var backdrop_stone := _wall_stone_material(false)
+	var boundary_c := MapLayout.BOUNDARY_CENTER
+	var outer := boundary_c + MapLayout.BOUNDARY_THICK * 0.5
+	for side in 4:
+		for i in 7:
+			var t := -0.82 + 1.64 * (float(i) + 0.5) / 7.0
+			var along := t * boundary_c
+			var offset := outer + rng.randf_range(3.5, 10.0)
+			var pos := Vector2.ZERO
+			match side:
+				0:
+					pos = Vector2(along, -offset)
+				1:
+					pos = Vector2(along, offset)
+				2:
+					pos = Vector2(-offset, along)
+				_:
+					pos = Vector2(offset, along)
+			_queue_rock(
+				pos,
+				rng.randf_range(4.8, 8.6),
+				rng.randf_range(2.4, 4.6),
+				rng.randf_range(0.0, TAU),
+				{"kind": "backdrop", "side": side, "along": along}
+			)
+	_flush_rock_batch("boundary_backdrop", rock_scene, backdrop_stone, false)
 
 # 贴地圆盘（营地 / 首领坑 / 传送阵）。base_y 默认压在草地上（草地 0.0、路面 0.022）；
 # 传送阵现在坐在角落桥上（桥面 y = BRIDGE_DECK_Y），必须显式抬高，否则整块被桥面盖住。
@@ -3786,6 +4123,49 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		root.add_child(bubble)
 		crystal_shield = bubble
 		destroy_hide.append(bubble)
+		# 基地广场法阵：贴地旋转符阵 + 三道同心环。原来广场只是一块圆柱贴图，
+		# 俯视像一块木地板；法阵让它一眼读成"泉水晶盘"，而不是普通地面。
+		var sigil_shader: Shader = _sigil_shader
+		if sigil_shader == null:
+			sigil_shader = load(CAMP_SIGIL_SHADER) as Shader
+		if sigil_shader != null:
+			var sigil_material := ShaderMaterial.new()
+			sigil_material.shader = sigil_shader
+			sigil_material.set_shader_parameter("sigil_color", Color(team_color.r, team_color.g, team_color.b, 0.62))
+			sigil_material.set_shader_parameter("active", 1.0)
+			var sigil := MeshInstance3D.new()
+			sigil.name = "base_sigil_" + team
+			var sigil_plane := PlaneMesh.new()
+			sigil_plane.size = Vector2(14.0, 14.0)
+			sigil.mesh = sigil_plane
+			sigil.material_override = sigil_material
+			sigil.position = Vector3(0.0, 0.09, 0.0)
+			sigil.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(sigil)
+			destroy_hide.append(sigil)
+		for i in 3:
+			var plaza_radius: float = [8.0, 6.1, 3.8][i]
+			var plaza_ring := MeshInstance3D.new()
+			plaza_ring.name = "base_ring_%s_%d" % [team, i]
+			var plaza_torus := TorusMesh.new()
+			plaza_torus.inner_radius = plaza_radius - 0.07
+			plaza_torus.outer_radius = plaza_radius + 0.07
+			plaza_torus.rings = 48
+			plaza_torus.ring_segments = 5
+			plaza_ring.mesh = plaza_torus
+			var plaza_mat := StandardMaterial3D.new()
+			plaza_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			plaza_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			plaza_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			plaza_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.28)
+			plaza_mat.emission_enabled = true
+			plaza_mat.emission = team_color
+			plaza_mat.emission_energy_multiplier = 0.8
+			plaza_ring.material_override = plaza_mat
+			plaza_ring.position.y = 0.10
+			plaza_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			root.add_child(plaza_ring)
+			destroy_hide.append(plaza_ring)
 	else:
 		# 参考图里的塔：米黄石雕裙摆 + 收分塔柱 + 笼状塔冠 + 发光核心 + 塔脚光池。
 		# 石构件由 TowerVisual 一次拼好（一个网格），光效拆成独立节点方便每帧调色。
@@ -3801,6 +4181,37 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		root.add_child(glow_node)
 		root.add_child(petals)
 		spin_node = petals
+		# 层级束带：外塔最细，内塔/高地塔逐级加宽。塔身只放了 0.04 的队伍色，
+		# 远看层级只靠大小；一条束带把"这是哪一级塔"变成可读的第二信号。
+		var tier_band_radius := 1.0
+		match tier:
+			"inner":
+				tier_band_radius = 1.12
+			"high":
+				tier_band_radius = 1.24
+			"twin":
+				tier_band_radius = 0.92
+		var tier_band := MeshInstance3D.new()
+		tier_band.name = "tier_band_" + tier
+		var tier_torus := TorusMesh.new()
+		tier_torus.inner_radius = (tier_band_radius - 0.045) * visual_scale
+		tier_torus.outer_radius = tier_band_radius * visual_scale
+		tier_torus.rings = 40
+		tier_torus.ring_segments = 5
+		tier_band.mesh = tier_torus
+		var tier_band_mat := StandardMaterial3D.new()
+		tier_band_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		tier_band_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		tier_band_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		tier_band_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.42)
+		tier_band_mat.emission_enabled = true
+		tier_band_mat.emission = team_color
+		tier_band_mat.emission_energy_multiplier = 1.1
+		tier_band.material_override = tier_band_mat
+		tier_band.position.y = 6.45 * visual_scale
+		tier_band.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(tier_band)
+		destroy_hide.append(tier_band)
 		# 血条要压过塔顶石顶（含塔冠），同时给一点余量。
 		bar_height = (TowerVisual.TOP_HEIGHT + 0.7) * visual_scale
 		bar_width = 2.4 * visual_scale
@@ -4110,10 +4521,19 @@ func _process_events(events: Array) -> void:
 			"river_spirit_killed":
 				var spirit_pos := Vector3(float(event.get("x", 0.0)), 0.5, float(event.get("y", 0.0)))
 				_spawn_ring(spirit_pos, Color(0.46, 0.86, 0.94), 0.6, 4.0, 0.8)
+			"objective_spawn":
+				# 首领刷新是全局事件：两个坑各起一圈地面冲击 + 金色粒子，配合顶部播报。
+				for pit in MapLayout.OBJECTIVE_PITS:
+					var pit_pos := Vector3(float(pit.pos.x), 0.1, float(pit.pos.y))
+					_spawn_ring(pit_pos, Color(0.92, 0.66, 0.28), 1.0, 5.5, 1.0, 0.65)
+					_spawn_particles(pit_pos + Vector3(0.0, 0.8, 0.0), GOLD, 16, 3.0, 0.1, 0.7)
+				_camera_shake = maxf(_camera_shake, 0.12)
 			"objective_killed":
 				var boss_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(boss_pos, GOLD, 40)
 				_spawn_ring(Vector3(boss_pos.x, 0.1, boss_pos.z), GOLD, 1.0, 6.0, 0.9)
+				_spawn_decal(Vector2(boss_pos.x, boss_pos.z), GOLD, 5.0, 2.2)
+				_trigger_hit_stop(0.12, 0.35)
 				_camera_shake = maxf(_camera_shake, 0.2)
 			"buff_taken":
 				var buff_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
@@ -4140,7 +4560,16 @@ func _process_events(events: Array) -> void:
 				var pos := Vector3(float(event.get("x", 0.0)), 0.1, float(event.get("y", 0.0)))
 				_spawn_ring(pos, GOLD, 0.4, 2.0, 0.6)
 			"match_end":
-				hud.announce("主堡陷落", GameTheme.GOLD_LIGHT, 2.0)
+				var match_winner := str(event.get("winner", ""))
+				# 败方基地：水晶碎成光屑 + 一圈扩散到广场边缘的冲击环。
+				# match_end 只带 winner，败方基地由 winner 反推，不新增协议字段。
+				var loser_base: Vector2 = MapData.RED_BASE if match_winner == "blue" else MapData.BLUE_BASE
+				var loser_color := RED if match_winner == "blue" else BLUE
+				_explosion(Vector3(loser_base.x, 1.6, loser_base.y), loser_color, 80)
+				_spawn_ring(Vector3(loser_base.x, 0.12, loser_base.y), loser_color, 1.0, 12.0, 1.2, 0.8)
+				_camera_shake = maxf(_camera_shake, 0.3)
+				if hud != null:
+					hud.announce("主堡陷落", GameTheme.GOLD_LIGHT, 2.0)
 				_trigger_hit_stop(0.16, 0.45)
 				# 结算曲按本地队伍判：赢了上行号角，输了下行钟声。
 				# 这两个是一次性音（不循环），所以不走 play_cue 的声道池。
@@ -4204,6 +4633,9 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 	if view != null and spell == "":
 		view.play_skill(slot)
 	var color: Color = SkillFx.summoner_color(spell) if spell != "" else _hero_vfx_color(str(request.get("hero_type", "blade")))
+	if spell == "":
+		# 英雄色负责身份，技能强调色负责区分同英雄的 Q/W/E/R。
+		color = SkillFx.blend_color(color, str(request.get("kind", "")))
 	var from_point: Vector2 = request.get("from", Vector2.ZERO)
 	var aim_point: Vector2 = request.get("aim", Vector2.ZERO)
 	var from := Vector3(from_point.x, 1.0, from_point.y)
@@ -4215,6 +4647,8 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 		var ratio := float(index + 1) / float(trail + 1)
 		var point := from.lerp(aim, ratio)
 		_spawn_ring(Vector3(point.x, 0.1, point.z), color, 0.35, 2.0, 0.38, 0.45)
+	var decal_radius := 0.0
+	var decal_at_aim := false
 	for ring in recipe.get("rings", []):
 		var ring_base: Vector3 = from if str(ring.get("at", "aim")) == "self" else aim
 		_spawn_ring(
@@ -4222,6 +4656,11 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 			float(ring.get("from", 0.4)), float(ring.get("to", 2.4)),
 			float(ring.get("dur", 0.3)), float(ring.get("alpha", 0.6))
 		)
+		decal_radius = maxf(decal_radius, float(ring.get("to", 2.4)) * 0.55)
+		if str(ring.get("at", "aim")) == "aim":
+			decal_at_aim = true
+	if decal_at_aim or float(recipe.get("projectile", 0.0)) > 0.0 or int(recipe.get("beam", 0)) > 0:
+		_spawn_decal(aim_point, color, clampf(decal_radius, 1.2, 4.5))
 	for burst in recipe.get("particles", []):
 		var burst_base: Vector3 = from if str(burst.get("at", "aim")) == "self" else aim
 		_spawn_particles(
@@ -4398,10 +4837,14 @@ func _handle_death_event(event: Dictionary) -> void:
 			hud.announce("友方 %s 被击败" % victim, RED, 1.6)
 
 		var feed_color := GameTheme.GOLD_LIGHT if is_local_killer else (RED if is_local_victim else (BLUE if killer_team == local_team else RED))
-		if killer_type == "hero":
-			hud.add_feed("%s 击败了 %s" % [killer_name, victim], feed_color)
-		else:
-			hud.add_feed("%s 被 %s 击败" % [victim, killer_name], feed_color)
+		hud.add_kill_feed(
+			killer_name,
+			str(event.get("killer_hero_type", "")),
+			victim,
+			str(event.get("victim_hero_type", "")),
+			feed_color,
+			killer_type == "hero"
+		)
 	elif entity_type == "minion":
 		_spawn_particles(pos, Color(0.75, 0.7, 0.6), 5, 2.0, 0.05, 0.4)
 	elif entity_type == "monster":
@@ -4453,7 +4896,7 @@ func _init_vfx_pools() -> void:
 		material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 		material.vertex_color_use_as_albedo = true
-		material.albedo_texture = FxTextures.soft_glow()
+		material.albedo_texture = FxTextures.spark()
 		quad.material = material
 		p.draw_pass_1 = quad
 		p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -4477,6 +4920,21 @@ func _init_vfx_pools() -> void:
 		orb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_effects_root.add_child(orb)
 		_tracer_pool.append(orb)
+
+	# 弹道拖尾：独立 12 个小光点，跟着弹丸后面淡出；不抢占主弹丸池。
+	var trail_mesh := SphereMesh.new()
+	trail_mesh.radius = 0.5
+	trail_mesh.height = 1.0
+	trail_mesh.radial_segments = 10
+	trail_mesh.rings = 5
+	for i in 12:
+		var trail := MeshInstance3D.new()
+		trail.mesh = trail_mesh
+		trail.material_override = _make_fx_material(BaseMaterial3D.BLEND_MODE_ADD)
+		trail.visible = false
+		trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_effects_root.add_child(trail)
+		_trail_pool.append(trail)
 
 	# 塔的光束：一根会淡出的细圆柱，比飞过的小球更像「塔在开火」。
 	var lance_mesh := CylinderMesh.new()
@@ -4512,6 +4970,31 @@ func _init_vfx_pools() -> void:
 		_effects_root.add_child(ring)
 		_ring_pool.append(ring)
 
+	# 贴地技能残留：12 个水平 quad，径向柔光；每个节点独立材质以便单独淡出。
+	var decal_mesh := QuadMesh.new()
+	decal_mesh.size = Vector2(1.0, 1.0)
+	for i in DECAL_POOL_LIMIT:
+		var decal := MeshInstance3D.new()
+		decal.name = "SkillDecal%d" % i
+		decal.mesh = decal_mesh
+		var decal_mat := StandardMaterial3D.new()
+		decal_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		decal_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		decal_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		decal_mat.albedo_texture = FxTextures.rune()
+		decal_mat.albedo_color = Color(1.0, 1.0, 1.0, 0.0)
+		decal_mat.emission_enabled = true
+		decal_mat.emission = Color(1.0, 1.0, 1.0)
+		decal_mat.emission_energy_multiplier = 0.8
+		decal_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		decal.material_override = decal_mat
+		decal.rotation.x = -PI * 0.5
+		decal.position.y = 0.12
+		decal.visible = false
+		decal.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_effects_root.add_child(decal)
+		_decal_pool.append(decal)
+
 	# 英雄普攻刀光：12 片新月，5v5 同一秒十几次普攻也够；池空时抢占最老的。
 	# 网格只提交一次（slash_mesh），材质每个节点一份 —— 挥击要独立改透明度。
 	# 用普通混合（和塔光束/弹丸同一条理由）：叠加混合在亮石板、桥面上会被抬成纯白，
@@ -4522,6 +5005,7 @@ func _init_vfx_pools() -> void:
 		slash.mesh = slash_shape
 		var slash_mat := _make_fx_material(BaseMaterial3D.BLEND_MODE_MIX)
 		slash_mat.emission_energy_multiplier = 1.4
+		slash_mat.albedo_texture = FxTextures.slash()
 		slash.material_override = slash_mat
 		slash.visible = false
 		slash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -4537,6 +5021,55 @@ func _make_fx_material(blend := BaseMaterial3D.BLEND_MODE_ADD) -> StandardMateri
 	material.emission_energy_multiplier = 2.2
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return material
+
+# 技能落点的贴地残留。池空时抢最老的一枚；战斗期不 new 节点/材质。
+func _spawn_decal(pos: Vector2, color: Color, radius: float, duration := DECAL_SECONDS) -> void:
+	if _effects_root == null:
+		return
+	if _decal_pool.is_empty() and _decal_active.is_empty():
+		return
+	var node: MeshInstance3D = null
+	if _decal_pool.is_empty():
+		var oldest: Dictionary = _decal_active.pop_front()
+		node = oldest.get("node") as MeshInstance3D
+	else:
+		node = _decal_pool.pop_back()
+	if node == null:
+		return
+	node.visible = true
+	node.position = Vector3(pos.x, 0.12, pos.y)
+	node.scale = Vector3(radius * 2.0, radius * 2.0, 1.0)
+	var material := node.material_override as StandardMaterial3D
+	if material:
+		material.albedo_color = Color(color.r, color.g, color.b, 0.55)
+		material.emission = color
+		material.emission_energy_multiplier = 0.8
+	_decal_active.append({"node": node, "time": duration, "duration": duration})
+
+func _update_decals(delta: float) -> void:
+	var i := _decal_active.size() - 1
+	while i >= 0:
+		var entry: Dictionary = _decal_active[i]
+		var left := float(entry.get("time", 0.0)) - delta
+		entry["time"] = left
+		var node := entry.get("node") as MeshInstance3D
+		if node == null:
+			_decal_active.remove_at(i)
+			i -= 1
+			continue
+		if left <= 0.0:
+			node.visible = false
+			_decal_pool.append(node)
+			_decal_active.remove_at(i)
+		else:
+			var material := node.material_override as StandardMaterial3D
+			if material:
+				var duration := maxf(0.01, float(entry.get("duration", DECAL_SECONDS)))
+				var fade := clampf(left / duration, 0.0, 1.0)
+				material.albedo_color.a = fade * 0.55
+				# 自发光不读 albedo.a；不同步压 energy 的话，残留会"透明但仍发亮"永远不消失。
+				material.emission_energy_multiplier = 0.8 * fade
+		i -= 1
 
 func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 	if _effects_root == null:
@@ -4791,6 +5324,39 @@ func _spawn_slash(center: Vector3, direction: Vector2, color: Color, reach: floa
 
 # 小兵普攻弹道 / 近战刀光：从池里借一颗发光球飞向目标。
 # 近战用极短 duration（0.06~0.1s），看上去就是一道瞬时刀光。
+func _spawn_trail(from: Vector3, to: Vector3, color: Color, duration: float) -> void:
+	if _effects_root == null or (to - from).length() < 0.05:
+		return
+	var slot: Dictionary = take_particle_slot(_trail_pool, _trail_active)
+	if slot.is_empty():
+		return
+	var trail: MeshInstance3D = slot.get("node")
+	var generation := int(trail.get_meta("generation", 0)) + 1
+	trail.set_meta("generation", generation)
+	var previous: Variant = trail.get_meta("tween") if trail.has_meta("tween") else null
+	if previous is Tween and (previous as Tween).is_valid():
+		(previous as Tween).kill()
+	var material := trail.material_override as StandardMaterial3D
+	material.albedo_color = Color(color.r, color.g, color.b, 0.32)
+	material.emission = color
+	material.emission_energy_multiplier = 1.2
+	trail.visible = true
+	trail.position = from
+	trail.scale = Vector3.ONE * 0.12
+	_trail_active.append(trail)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(trail, "position", to, maxf(0.03, duration))
+	tween.tween_property(material, "albedo_color:a", 0.0, maxf(0.03, duration))
+	tween.chain().tween_callback(func():
+		if not is_instance_valid(trail) or int(trail.get_meta("generation", 0)) != generation:
+			return
+		trail.visible = false
+		_trail_active.erase(trail)
+		_trail_pool.append(trail)
+	)
+	trail.set_meta("tween", tween)
+
 func _spawn_tracer(from: Vector3, to: Vector3, color: Color, radius: float, duration: float) -> void:
 	if _effects_root == null:
 		return
@@ -4811,6 +5377,7 @@ func _spawn_tracer(from: Vector3, to: Vector3, color: Color, radius: float, dura
 	orb.position = from
 	orb.scale = Vector3.ONE * maxf(0.05, radius * 2.0)
 	_tracer_active.append(orb)
+	_spawn_trail(from, to, color, duration * 0.9)
 	var tween := create_tween()
 	tween.tween_property(orb, "position", to, maxf(0.03, duration))
 	tween.tween_callback(func():
@@ -4888,7 +5455,9 @@ static func _hero_vfx_color(hero_type: String) -> Color:
 
 func _build_ambient_particles() -> void:
 	var particles := GPUParticles3D.new()
-	particles.amount = 36
+	# 36 个光点在 1600×900 下几乎看不到；120 个才像"空气里有浮尘"。
+	# 移动端保守到 60，仍是单批次，不增加 draw call 层级。
+	particles.amount = 60 if OS.has_feature("mobile") else 120
 	particles.lifetime = 14.0
 	particles.visibility_aabb = AABB(Vector3(-70, -2, -70), Vector3(140, 18, 140))
 	var process := ParticleProcessMaterial.new()

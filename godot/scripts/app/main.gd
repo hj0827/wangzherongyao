@@ -12,6 +12,7 @@ const CinematicBackground = preload("res://scripts/ui/cinematic_background.gd")
 const AudioDirector = preload("res://scripts/game/audio_director.gd")
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const DepthCard = preload("res://scripts/ui/depth_card.gd")
+const HeroPreview = preload("res://scripts/app/hero_preview.gd")
 const OrnateTitle = preload("res://scripts/ui/ornate_title.gd")
 const OrnateFrame = preload("res://scripts/ui/ornate_frame.gd")
 const OrnamentRule = preload("res://scripts/ui/ornament_rule.gd")
@@ -73,6 +74,7 @@ var _menu_buttons := {}
 var _audio: Node = null
 
 var _hero_cards := {}
+var _hero_preview: HeroPreview
 var _hero_marks := {}
 var _hero_videos := {}
 # 每个英雄一条「台词只念一遍」的循环状态：第一轮带原声，之后每轮静音。
@@ -326,6 +328,7 @@ func _show_hero_select() -> void:
 	_clear_screen()
 	discovery.stop()
 	_hero_cards.clear()
+	_hero_preview = null
 	_hero_marks.clear()
 	_hero_videos.clear()
 	_hero_video_cycles.clear()
@@ -379,6 +382,10 @@ func _show_hero_select() -> void:
 	var footer := HBoxContainer.new()
 	footer.add_theme_constant_override("separation", 18)
 	column.add_child(footer)
+	# 3D 预览骨架：复用现有模型，旋转展示当前选中英雄；正式皮肤/专属动作仍属 HERO-04。
+	_hero_preview = HeroPreview.new()
+	_hero_preview.custom_minimum_size = Vector2(96, 96)
+	footer.add_child(_hero_preview)
 	var selected := _make_label("", 16, GameTheme.TEXT)
 	selected.name = "SelectedHint"
 	footer.add_child(selected)
@@ -555,6 +562,8 @@ func _refresh_hero_selection() -> void:
 
 	if _hero_confirm != null:
 		_hero_confirm.text = "确 认 出 战   ·   %s" % str(HeroDefs.get_hero(local_hero).name)
+	if _hero_preview != null:
+		_hero_preview.setup(local_hero)
 
 	var definition: Dictionary = HeroDefs.get_hero(local_hero)
 	var quote: String = str(definition.get("quote", definition.title))

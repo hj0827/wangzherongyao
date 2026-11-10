@@ -44,6 +44,24 @@ func test_hero_widths_are_visibly_different() -> void:
 		highest = maxf(highest, float(widths[hero_type]))
 	gt(highest - lowest, 0.15, "最宽与最窄英雄的差距要肉眼可辨（%.2f m）" % (highest - lowest))
 
+func test_weapons_carry_the_hero_accent() -> void:
+	for hero_type in HEROES:
+		var view := UnitVisual.new()
+		view.setup("hero", "blue", hero_type, hero_type, false, "blue")
+		var slot := view.model_root.find_child("WeaponSlot", true, false)
+		check(slot != null, "%s 必须有 WeaponSlot" % hero_type)
+		var tinted := false
+		if slot:
+			for node in slot.find_children("*", "MeshInstance3D", true, false):
+				var mesh_instance := node as MeshInstance3D
+				if mesh_instance.mesh == null:
+					continue
+				for surface in mesh_instance.mesh.get_surface_count():
+					if mesh_instance.get_surface_override_material(surface) != null:
+						tinted = true
+		check(tinted, "%s 的武器要带主色染色" % hero_type)
+		view.free()
+
 func test_hero_setup_declares_its_own_body_and_weapon_scale() -> void:
 	var body_scales := {}
 	var weapon_scales := {}

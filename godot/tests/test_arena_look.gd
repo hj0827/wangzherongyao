@@ -119,3 +119,9 @@ func test_arena_builds_the_environment_through_arena_look() -> void:
 	check(source.contains("ArenaLook.apply_environment("), "arena must apply the shared environment")
 	check(source.contains("ArenaLook.apply_sun("), "arena must apply the shared sun")
 	check(not source.contains("adjustment_saturation = 1.1"), "the old oversaturated value must be gone")
+
+
+func test_terrain_has_macro_variation() -> void:
+	var source := FileAccess.get_file_as_string("res://scripts/game/terrain_builder.gd")
+	check(source.contains("macro variation"), "地形 shader 必须有低频 macro variation")
+	check(source.contains("macro_warm"), "macro variation 要复用现有噪声，不额外采样")

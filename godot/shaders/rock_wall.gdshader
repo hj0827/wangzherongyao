@@ -46,6 +46,10 @@ uniform float brick_length : hint_range(0.4, 4.0) = 1.15;   // 一块砖多长
 uniform float mortar_width : hint_range(0.0, 0.2) = 0.035;  // 砖缝半宽（米）
 uniform float mortar_darken : hint_range(0.1, 1.0) = 0.62;  // 缝里比砖面暗多少
 uniform float brick_tint : hint_range(0.0, 0.4) = 0.10;     // 单块砖的亮度差
+// 0 = 自然岩壁（野区），1 = 砌石城防（边界）。同一 shader，两种语言。
+uniform float brick_amount : hint_range(0.0, 1.0) = 1.0;
+// 自然岩壁的横向岩层；砌石城防下由 brick_amount 压掉。
+uniform float strata_amount : hint_range(0.0, 0.4) = 0.10;
 
 varying vec3 world_pos;
 varying vec3 world_normal;
@@ -96,14 +100,17 @@ void fragment() {
 	float solid = smoothstep(mortar_width, mortar_width * 1.9 + 0.001, gap);
 	// 单块砖一点亮度差。没有它，一整面墙是一块单色板，砖缝再准也像画上去的。
 	float brick_hash = fract(sin(dot(vec2(course, floor(u)), vec2(27.13, 61.70))) * 43758.5453);
-	alb *= mix(1.0 - brick_tint, 1.0 + brick_tint * 0.5, brick_hash);
-	alb *= mix(mortar_darken, 1.0, solid);
+	alb *= mix(1.0, mix(1.0 - brick_tint, 1.0 + brick_tint * 0.5, brick_hash), brick_amount);
+	alb *= mix(1.0, mix(mortar_darken, 1.0, solid), brick_amount);
 
 	// 顶面草：用同一张贴图的两个频率做遮罩，省掉一张噪声图。
 	// 必须是**斑块**而不是一层均匀绿 —— 单一频率 + 宽阈值会让整块顶面
 	// 都越过阈值，顶面就变成一块绿毯子；两个频率叠起来才有「石板缝里冒草」。
 	float g1 = texture(albedo_tex, p.xz * 0.31 + vec2(0.37, 0.11)).g;
 	float g2 = texture(albedo_tex, p.xz * 0.87 + vec2(0.61, 0.23)).g;
+	// 横向岩层：只用 world_pos.y + 已采样的 g1.g 做相位，不再多一次采样。
+	float strata = sin(world_pos.y * 1.9 + g1 * 5.0) * 0.5 + 0.5;
+	alb *= mix(1.0, 0.92 + strata * 0.16, (1.0 - brick_amount) * strata_amount * 6.0);
 	float grain = g1 * 0.65 + g2 * 0.35;
 	float up = smoothstep(0.45, 0.92, n.y);
 	float moss = up * moss_amount * smoothstep(0.34, 0.66, grain);
@@ -123,7 +130,7 @@ void fragment() {
 	float occ = aox * w.x + aoy * w.y + aoz * w.z;
 	// 砖缝要同时压反照率和遮挡：只压颜色的话，缝在阴影里会「浮」起来 ——
 	// 因为它比周围的砖面更亮，看着像画上去的一条白线。
-	occ *= mix(0.70, 1.0, solid);
+	occ *= mix(1.0, mix(0.70, 1.0, solid), brick_amount);
 	alb *= mix(1.0, occ, ao_strength);
 
 	// 三平面法线：每张法线图的 xy 是切线方向，z 是「朝外」，只取切线分量叠加到世界法线上。

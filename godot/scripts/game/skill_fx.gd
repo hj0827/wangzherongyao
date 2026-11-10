@@ -27,6 +27,37 @@ const DEFAULT_RECIPE := {
 	"hit_stop": 0.0,
 }
 
+# 技能强调色：英雄谱系色负责"这是谁"，强调色负责"这是哪个技能"。
+# 17 个 kind 各有一个色相，渲染层用 55% 英雄色 + 45% 强调色混合；
+# 不新增贴图/资产，就能让同族技能（如 slash/spin）在战场上分开。
+const KIND_ACCENTS := {
+	"slash": Color(1.0, 0.62, 0.22),
+	"spin": Color(1.0, 0.88, 0.35),
+	"dash": Color(0.35, 0.90, 0.92),
+	"leap_slam": Color(1.0, 0.34, 0.22),
+	"burst": Color(0.76, 0.42, 1.0),
+	"line": Color(0.30, 0.78, 1.0),
+	"slow": Color(0.38, 0.55, 1.0),
+	"meteor_storm": Color(1.0, 0.32, 0.72),
+	"quake": Color(0.88, 0.56, 0.24),
+	"charge": Color(1.0, 0.78, 0.20),
+	"shield": Color(0.32, 0.88, 0.72),
+	"taunt_aura": Color(0.95, 0.66, 0.26),
+	"arrow": Color(0.46, 0.94, 0.42),
+	"aoe_shot": Color(0.72, 0.96, 0.30),
+	"haste": Color(0.42, 0.98, 0.68),
+	"arrow_barrage": Color(0.30, 0.82, 0.34),
+	"evade": Color(0.78, 0.36, 0.78),
+	"summoner": Color(0.80, 0.90, 1.0),
+}
+
+static func accent_color(kind: String) -> Color:
+	return KIND_ACCENTS.get(kind, Color(0.9, 0.92, 1.0))
+
+# 英雄谱系色与技能强调色的混合口径。arena 与测试读同一个函数，避免两处公式漂移。
+static func blend_color(hero_color: Color, kind: String, amount := 0.45) -> Color:
+	return hero_color.lerp(accent_color(kind), clampf(amount, 0.0, 1.0))
+
 const SUMMONER_COLORS := {
 	"flash": Color(0.78, 0.92, 1.0),
 	"execute": Color(1.0, 0.4, 0.36),

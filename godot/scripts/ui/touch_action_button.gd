@@ -131,7 +131,12 @@ func _draw_glyph(center: Vector2, radius: float) -> void:
 		color = GameTheme.MUTED
 	elif held:
 		color = GameTheme.GOLD_LIGHT
-	SkillGlyph.paint(self, icon_kind, center, radius * ICON_FILL, color)
+	var icon_size := radius * 2.0 * ICON_FILL * 0.92
+	var icon := GameTheme.skill_icon(icon_kind, int(icon_size))
+	if icon != null:
+		draw_texture_rect(icon, Rect2(center - Vector2(icon_size, icon_size) * 0.5, Vector2(icon_size, icon_size)), false, color)
+	else:
+		SkillGlyph.paint(self, icon_kind, center, radius * ICON_FILL, color)
 
 func _draw_caption(center: Vector2, radius: float) -> void:
 	var font_size := 24 if size.x >= 120.0 else 18

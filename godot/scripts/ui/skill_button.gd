@@ -196,7 +196,12 @@ func _draw() -> void:
 		glyph_color = Color(0.52, 0.58, 0.64, 0.8)
 	if cooldown > 0.001:
 		glyph_color.a = 0.26
-	SkillGlyph.paint(self, skill_kind, center, radius * float(skin["glyph_fill"]), glyph_color)
+	var icon_size := radius * 2.0 * float(skin["glyph_fill"]) * 0.92
+	var icon := GameTheme.skill_icon(skill_kind, int(icon_size))
+	if icon != null:
+		draw_texture_rect(icon, Rect2(center - Vector2(icon_size, icon_size) * 0.5, Vector2(icon_size, icon_size)), false, glyph_color)
+	else:
+		SkillGlyph.paint(self, skill_kind, center, radius * float(skin["glyph_fill"]), glyph_color)
 
 	if cooldown > 0.001:
 		_draw_cooldown(center, radius, font)

@@ -412,6 +412,45 @@ func test_control_status_is_rendered_on_the_unit_visual() -> void:
 	for kind in ControlRules.KINDS:
 		check(src.contains('"%s"' % kind), "缺少 %s 的状态环" % kind)
 
+func test_minion_vs_minion_hits_do_not_flood_the_wire() -> void:
+	# 项 3.5：小兵互殴的 hit 事件曾占全场 65% 的大头，而玩家不会去数
+	# 小兵互相打了多少下 —— 这类事件纯属挤占 32 条/批的网络预算。
+	# 现在小兵打小兵不发 hit，但**伤害照常结算**（这一点必须分开验，
+	# 否则"省事件"可能变成"不打伤害"）。
+	#
+	# 采样要点：首波兵到中路相遇需要十几秒，且小兵会死、会被补满，
+	# 所以不能在某一个 tick 上判断"此刻有没有残血"，要累计"曾经有没有残血"。
+	var sim := MatchSim.new({"mode": "team", "humans": [], "bot_fill": true, "bot_ai": true})
+	var dt := 1.0 / MatchSim.TICK_RATE
+	var minion_to_minion := 0
+	var ever_damaged := false
+	for i in 900:
+		sim.tick(dt)
+		for ev in sim.consume_events():
+			if str(ev.get("type", "")) != "hit":
+				continue
+			if str(ev.get("target_type", "")) == "minion" and str(ev.get("source_type", "")) == "minion":
+				minion_to_minion += 1
+		if not ever_damaged:
+			for e in sim.state.entities:
+				if str(e.get("type", "")) != "minion":
+					continue
+				if float(e.get("hp", 0.0)) < float(e.get("max_hp", 1.0)) - 0.5:
+					ever_damaged = true
+					break
+	eq(minion_to_minion, 0, "小兵打小兵不应广播 hit（伤害仍要照常结算）")
+	eq(ever_damaged, true, "静音事件不代表静音伤害：小兵必须真的在掉血")
+
+func test_hero_involved_hits_are_never_suppressed() -> void:
+	# 反向守卫：过滤只针对"小兵打小兵"。
+	# 英雄打小兵、小兵打英雄、打塔、打野怪的 hit 都必须照常广播，
+	# 否则玩家看不到自己的伤害数字（那是核心反馈，不是噪声）。
+	var src := FileAccess.get_file_as_string("res://sim/match_sim.gd")
+	check(has_live_line(src, 'str(target.type) == "minion" and not source.is_empty()'),
+		"过滤条件必须严格要求目标是小兵")
+	check(has_live_line(src, 'and str(source.get("type", "")) == "minion"'),
+		"过滤条件必须严格要求来源是小兵（缺了这一半，英雄打小兵就没数字了）")
+
 func test_control_execution_is_wired_into_the_skill_path() -> void:
 	# G3：control 字段有数据、有文案，还要证明**施法路径真的读它**。
 	# 否则就是"字段在、文案对、打上去没控"。

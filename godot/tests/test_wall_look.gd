@@ -276,16 +276,17 @@ func test_wall_foot_rocks_use_the_same_stone_material() -> void:
 		gt(float(minus), 0.0, "墙脚石必须左右两侧都有（左）：%s" % id)
 	arena.free()
 
-func test_jungle_and_boundary_walls_share_one_material() -> void:
-	# 只看墙体名下的节点。场景里还有草丛（BushField）等其它 ShaderMaterial，
-	# 早先按「凡是 ShaderMaterial」统计，草丛一改成 shader，这条就误报 3 份材质。
+func test_jungle_and_boundary_walls_split_material_language() -> void:
+	# 契约变更（2026-11-10，用户批准）：野区墙是自然岩壁（无砖缝），
+	# 边界墙是砌石城防（有砖缝）。两者共用同一 shader，只靠 brick_amount 区分；
+	# 不再要求全图只有一份材质，但每一侧内部仍必须各自复用同一份。
 	var arena: Node3D = Arena.new()
 	arena._props_root = Node3D.new()
 	arena.add_child(arena._props_root)
 	arena._build_map_features()
 	arena._build_boundary_walls()
-	var stone_ids := {}
-	var barrier_count := 0
+	var jungle_ids := {}
+	var boundary_ids := {}
 	for child in arena._props_root.get_children():
 		if not (child is MeshInstance3D or child is MultiMeshInstance3D):
 			continue
@@ -297,17 +298,29 @@ func test_jungle_and_boundary_walls_share_one_material() -> void:
 			material = (child as MultiMeshInstance3D).material_override
 		else:
 			material = (child as MeshInstance3D).material_override
-		if material is ShaderMaterial:
-			stone_ids[material.get_instance_id()] = true
-			if node_name.begins_with("wall_") and not node_name.begins_with("wall_end_"):
-				barrier_count += 1
-	gt(float(barrier_count), 7.0, "至少 8 段野区墙要吃到石壁材质")
-	eq(stone_ids.size(), 1, "全图石壁只能有一份材质：混用会变成一处石头一处木板")
+		if not (material is ShaderMaterial):
+			continue
+		var shader_mat := material as ShaderMaterial
+		var brick := float(shader_mat.get_shader_parameter("brick_amount"))
+		if node_name.begins_with("boundary_"):
+			boundary_ids[shader_mat.get_instance_id()] = true
+			near(brick, 1.0, 0.001, "边界墙必须保留砌石砖缝：%s" % node_name)
+		else:
+			jungle_ids[shader_mat.get_instance_id()] = true
+			near(brick, 0.0, 0.001, "野区墙必须是自然岩壁（无砖缝）：%s" % node_name)
+	eq(jungle_ids.size(), 1, "野区石壁必须复用同一份自然岩壁材质")
+	eq(boundary_ids.size(), 1, "边界石壁必须复用同一份砌石城防材质")
+	check(arena._wall_stone_material(false) != arena._wall_stone_material(true), "两种语言必须是不同材质实例")
 	arena.free()
 
-# 墙体名下的所有部件：基座 / 岩脊批次 / 墙端露头 / 边界角岩。
 func _is_stone_part(node_name: String) -> bool:
 	for prefix in ["wall_end_", "wall_", "wall_rocks", "boundary_rocks", "ridge_", "corner_rock_", "footrock_", "rubble_"]:
 		if node_name.begins_with(prefix):
 			return true
 	return false
+
+
+func test_natural_wall_has_layered_strata() -> void:
+	var source := FileAccess.get_file_as_string("res://shaders/rock_wall.gdshader")
+	check(source.contains("strata_amount"), "自然岩壁必须有岩层带 uniform")
+	check(source.contains("world_pos.y * 1.9"), "岩层带要沿世界高度分层")

@@ -323,6 +323,11 @@ func _draw() -> void:
 	var scale := _world_scale()
 	# 底色不再是一块死板的深绿：外层压暗 + 中心极淡提亮，读起来像一张地形图而不是点阵图。
 	draw_rect(Rect2(origin, Vector2(inner, inner)), Color(0.05, 0.075, 0.065, 0.96))
+	# 程序化峡谷底图：草地/河道/三路/双方基地。底图 180° 对称，
+	# 红方视角整张转 180° 也不会让基地左右互换。
+	var background := GameTheme.minimap_background()
+	if background != null:
+		draw_texture_rect(background, Rect2(origin, Vector2(inner, inner)), false, Color(1.0, 1.0, 1.0, 0.88))
 	draw_circle(origin + Vector2(inner, inner) * 0.5, inner * 0.58, Color(1.0, 0.97, 0.88, 0.035))
 
 	var frame := map_frame()

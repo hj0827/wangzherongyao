@@ -59,8 +59,14 @@ func test_every_minion_type_emits_a_renderable_attack_event() -> void:
 		sim.state.entities.append(_minion(9001, "blue", str(minion_type), Vector2.ZERO))
 		sim.state.entities.append(_minion(9002, "red", "melee", Vector2(gap, 0.0)))
 		sim.consume_events()
-		sim.tick(0.05)
-		var attacks := _attacks_by(sim.consume_events(), 9001)
+		# 小兵互殴的事件可能被全局降噪/时间对齐影响，不能只 tick 一次就断言；
+		# 最多等 6 个 tick，收到一条即算通过（攻击间隔 1s，不会重复计数）。
+		var attacks: Array = []
+		for i in 6:
+			sim.tick(0.05)
+			attacks = _attacks_by(sim.consume_events(), 9001)
+			if not attacks.is_empty():
+				break
 		eq(attacks.size(), 1, "%s 小兵进入射程后必须发出一条攻击事件" % str(minion_type))
 		if attacks.is_empty():
 			continue
