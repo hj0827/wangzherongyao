@@ -418,13 +418,14 @@ func test_minion_vs_minion_hits_do_not_flood_the_wire() -> void:
 	# 现在小兵打小兵不发 hit，但**伤害照常结算**（这一点必须分开验，
 	# 否则"省事件"可能变成"不打伤害"）。
 	#
-	# 采样要点：首波兵到中路相遇需要十几秒，且小兵会死、会被补满，
-	# 所以不能在某一个 tick 上判断"此刻有没有残血"，要累计"曾经有没有残血"。
+	# 采样要点：mid 路全长约 130m，双方小兵速度约 4.4 m/s，各走 65m 需要约 15 秒
+	# **纯移动**，但小兵要绕塔、会被塔打、还会停下来互殴，实际首次交战接近 25~30 秒。
+	# 所以这里给 60 秒（1800 tick），并累计"曾经有没有残血"而不是判断某一帧。
 	var sim := MatchSim.new({"mode": "team", "humans": [], "bot_fill": true, "bot_ai": true})
 	var dt := 1.0 / MatchSim.TICK_RATE
 	var minion_to_minion := 0
 	var ever_damaged := false
-	for i in 900:
+	for i in 1800:
 		sim.tick(dt)
 		for ev in sim.consume_events():
 			if str(ev.get("type", "")) != "hit":

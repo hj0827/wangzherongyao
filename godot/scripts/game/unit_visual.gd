@@ -4,6 +4,7 @@ class_name UnitVisual
 const ModelUtils = preload("res://scripts/game/model_utils.gd")
 const BushEye = preload("res://scripts/game/bush_eye.gd")
 const MonsterForms = preload("res://scripts/game/monster_forms.gd")
+const HeroModelRegistry = preload("res://scripts/game/hero_model_registry.gd")
 const MonsterKit = preload("res://scripts/game/monster_kit.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
@@ -250,6 +251,7 @@ var _hit_flash_timer := 0.0
 var _hit_squash_timer := 0.0
 var _attack_lunge_timer := 0.0
 var _spawn_scale_timer := 0.0
+var _force_shared_hero := false
 var flash_mesh: MeshInstance3D = null
 var shield_bubble: MeshInstance3D = null
 var buff_aura: MeshInstance3D = null
@@ -450,6 +452,9 @@ func reset_minion(new_team: String, new_pos: Vector3, new_type := "melee") -> vo
 
 func _build_hero() -> void:
 	var setup_data: Dictionary = HERO_SETUPS.get(hero_type, HERO_SETUPS["blade"])
+	if not _force_shared_hero and HeroModelRegistry.has_custom_model(hero_type):
+		_build_custom_hero(setup_data)
+		return
 	var team_tint := Color(0.92, 0.25, 0.2) if team == "red" else Color(0.35, 0.55, 1.0)
 	var team_tint_amount := 0.24 if team == "red" else 0.05
 	model_root = Node3D.new()
@@ -484,6 +489,41 @@ func _build_hero() -> void:
 	process_priority = 10
 	# 单位数量多、始终处于镜头附近，阴影 pass 的收益远低于开销；
 	# 建筑与环境保留阴影，单位用脚下队伍环提供接地感。
+	ModelUtils.enable_shadows(self, false)
+
+# HERO-04 定制模型：模型自带服装/武器/骨骼/动作，不再拼 body/outfit/hair/weapon。
+# 缺失时完全回退现有共享模型，保证没有资产时游戏照常运行。
+func _build_custom_hero(setup_data: Dictionary) -> void:
+	var scene: PackedScene = load(HeroModelRegistry.model_path(hero_type)) as PackedScene
+	if scene == null:
+		_force_shared_hero = true
+		_build_hero()
+		_force_shared_hero = false
+		return
+	var model := scene.instantiate()
+	model.name = "Model"
+	model_root = model
+	add_child(model_root)
+	for node in model_root.find_children("*", "AnimationPlayer", true, false):
+		var player := node as AnimationPlayer
+		if player:
+			animation_players.append(player)
+			player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
+	var team_tint := Color(0.92, 0.25, 0.2) if team == "red" else Color(0.35, 0.55, 1.0)
+	ModelUtils.tint(model_root, team_tint, 0.06)
+	var measured_height := ModelUtils.relative_aabb(model_root).size.y
+	model_root.scale = Vector3.ONE * scale_for_height(measured_height, HERO_HEIGHT)
+	_capture_model_rest_pose()
+	_add_ring(0.9)
+	if is_local:
+		local_ring = _make_ring(1.15, GOLD, 0.55)
+		local_ring.position.y = 0.02
+		add_child(local_ring)
+	_add_health_bar(HERO_HEIGHT + 0.30)
+	_build_status_fx(HERO_HEIGHT, 0.62)
+	idle_anim = str(setup_data.get("idle", "Idle"))
+	_set_anim(idle_anim, true)
+	process_priority = 10
 	ModelUtils.enable_shadows(self, false)
 
 func _build_minion() -> void:

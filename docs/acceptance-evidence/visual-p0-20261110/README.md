@@ -1,6 +1,6 @@
 # 视觉 P0 第一批 · 实施与验收证据（2026-11-10）
 
-日期：2026-11-10 ｜ 基线：`main` 工作树 ｜ 视觉回归：**VISUAL TESTS: 102 PASSED: 102 FAILED: 0**（全量受既有慢测试/并发改动阻塞，见 §1）
+日期：2026-11-10 ｜ 基线：`main` 工作树 ｜ 视觉回归：**VISUAL TESTS: 105 PASSED: 105 FAILED: 0**（全量受既有慢测试/并发改动阻塞，见 §1）
 配套：[视觉升级开发文档](../../视觉升级开发文档.md) ｜ [视觉差距分析](../../视觉差距分析-对标王者荣耀.md)
 
 ---
@@ -39,6 +39,7 @@
 | UI-05 小地图底图 | 512² 对称峡谷底图，叠在程序化标记下 | `assets/ui/minimap/canyon_bg.png`、`scripts/ui/minimap.gd` |
 | UI-07 9-slice | 金边面板框接入商店/结算浮层 | `assets/ui/frames/panel_gold.png`、`scripts/ui/game_theme.gd` |
 | HERO-03 3D 预览 | 选人页复用现有模型的可旋转 SubViewport 预览骨架 | `scripts/app/hero_preview.gd`、`scripts/app/main.gd` |
+| HERO-04 接入骨架/规格 | 定制模型路径/动作契约、自动回退、美术规格书；**5 套模型/动画待美术交付** | `scripts/game/hero_model_registry.gd`、[规范](../../英雄定制模型规范-HERO-04.md) |
 | WALL-02 材质语言 | 野区自然岩壁 / 边界砌石城防共用 shader，`brick_amount` 切换；自然岩壁加岩层带 | `scripts/game/arena_look.gd`、`shaders/rock_wall.gdshader`、`scripts/game/arena.gd` |
 | WALL-04 背景岩峰（部分） | 边界外侧增加高过墙顶的背景岩体，不改碰撞/遮挡预算 | `scripts/game/arena.gd` |
 | SCENE-04 地表 macro | 地形 shader 低频 macro variation，复用现有噪声采样 | `scripts/game/terrain_builder.gd` |
@@ -60,7 +61,7 @@ godot --headless --path godot --script res://.tmp/run_visual_tests.gd
 结果：
 
 ```
-VISUAL TESTS: 102  PASSED: 102  FAILED: 0
+VISUAL TESTS: 105  PASSED: 105  FAILED: 0
 ```
 
 覆盖 31 个视觉相关测试文件（受击/状态/兵种/残骸/英雄剪影/技能图标/商店/HUD/基地/城墙/河岸/粒子/3D 预览等），
@@ -74,7 +75,7 @@ VISUAL TESTS: 102  PASSED: 102  FAILED: 0
 `test_match.test_minions_spawn_and_advance_towards_enemy_base` 失败。
 这两类都不是本批视觉代码；待对应 owner 修复后再跑全量。
 
-视觉回归覆盖（31 个文件，102 条；下表为新增/扩展的代表性用例）：
+视觉回归覆盖（32 个文件，105 条；下表为新增/扩展的代表性用例）：
 
 | 文件 | 条数 | 覆盖 |
 | --- | --- | --- |
@@ -101,6 +102,7 @@ VISUAL TESTS: 102  PASSED: 102  FAILED: 0
 | `test_tracer_trail.gd` | 2 | 拖尾池预建、弹丸不抢占主池 |
 | `test_boundary_backdrop.gd` | 1 | 背景岩峰在可走边界外、高过墙顶 |
 | `test_hero_preview.gd` | 2 | 3D 预览装配、切换英雄重建 |
+| `test_hero_model_registry.gd` | 3 | 路径/动作契约、缺失回退 |
 | `test_base_props.gd` | 2 | 基地旗/灯笼存在、避开广场与兵线 |
 | `test_jungle_props.gd` | 2 | 野区石碑/兽骨存在、避开兵线/贴地盘 |
 | `test_skill_decals.gd` | 4 | 残留池预建、淡出归还、池空抢占、技能链路接线 |
@@ -207,7 +209,7 @@ grep -rn "quality_of\|ids_by_category" --include="*.gd" godot/scripts godot/sim
 - [ ] G2 变异验证（4 条）
 - [ ] G6 目标机性能 ≥60fps（当前 Quadro K420 33.8fps）
 - [ ] G8 连接设备后重导 APK + device_checks
-- [ ] HERO-04 5 英雄定制模型/动画（需 3D 美术生产线）
+- [ ] HERO-04 5 英雄定制模型/动画（接入骨架/规格已完成，待 3D 美术交付）
 - [ ] FX-05 预警圈（当前 sim 无施法前摇，强行加会与伤害时序不一致）
 - [ ] WALL-04 墙顶局部抬高（当前只做了边界外背景岩峰）
 - [ ] UI-07 全量面板 9-slice（当前只接商店/结算）
@@ -218,7 +220,7 @@ grep -rn "quality_of\|ids_by_category" --include="*.gd" godot/scripts godot/sim
 
 | 项 | 结论 | 证据 | 签字 | 日期 |
 | --- | --- | --- | --- | --- |
-| G1 机器 | 🟨 视觉回归 102/102；全量被外部慢测试阻塞 | `.tmp/check_visual_selected3.log` | 待签 | 2026-11-10 |
+| G1 机器 | 🟨 视觉回归 105/105；全量被外部慢测试阻塞 | `.tmp/check_registry.log` | 待签 | 2026-11-10 |
 | G2 变异 | ⬜ 未做 | — | — | — |
 | G3 接线 | ✅ grep 命中生产 | 本文件 §2 | 待签 | 2026-11-10 |
 | G4 视觉 | 🟨 截图已生成，待专项复核 | `godot/shots/ui_*.png` | 待签 | 2026-11-10 |
