@@ -3,6 +3,8 @@ class_name UnitVisual
 
 const ModelUtils = preload("res://scripts/game/model_utils.gd")
 const BushEye = preload("res://scripts/game/bush_eye.gd")
+const MonsterForms = preload("res://scripts/game/monster_forms.gd")
+const MonsterKit = preload("res://scripts/game/monster_kit.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
 const BLUE := Color(0.22, 0.6, 1.0)
@@ -42,6 +44,8 @@ const FONT_PATH := "res://assets/fonts/NotoSansSC.ttf"
 const HERO_HEIGHT := 2.7
 const MINION_HEIGHT := 1.15
 const MINION_GIRTH := 0.9
+# 双狼营地的狼：比小兵高一点、比英雄矮一半 —— 俯视下「狼比小兵大、比英雄小」。
+const WOLF_HEIGHT := 1.45
 # 头顶血条按世界单位定尺寸。英雄条比小兵/野怪更宽更厚：
 # 默认镜头下英雄只占屏高 ~7%，1.24×0.14 的细条在手机竖屏上读不出剩余血量。
 # 1.9×0.26 是玩家反馈「血条太短太细」后的加宽加粗版；蓝条同宽、厚度约一半，
@@ -141,6 +145,11 @@ const LOOPING_CLIPS := ["Idle", "Jog_Fwd", "Sprint", "Sword_Idle", "Spell_Simple
 const LOCO_REF_SPEED := 3.2
 const LOCO_RATE_MIN := 1.0
 const LOCO_RATE_MAX := 2.2
+# 程序化倒地用多久倒到位（秒）。快于死亡停留时间，让「倒下 → 躺住」有个过程而不是瞬移。
+const DEATH_FALL_SECONDS := 0.9
+# 死亡后视图停留多久（秒）。倒地进度是**从这个值往回算**的（见 _update_death_pose）：
+# 用「剩余时间」当进度会算反 —— death_timer 从 2.4 递减，进度要拿 2.4 - 剩余。
+const DEATH_LINGER_SECONDS := 2.4
 
 const ANIM_ATTACK := {
 	"blade": "Sword_Regular_A",
@@ -198,6 +207,18 @@ var minion_type := "melee"
 # 首领（暴君 / 主宰）走更大体型的独立分支；objective_id 用来区分两座坑。
 var is_objective := false
 var objective_id := ""
+# 野怪形态键（wolf / lizard / boar / bird / blue_sentinel / red_sentinel / tyrant / overlord）。
+# 由 camp_id / monster_type 派生，见 _build_monster()：**形象不靠名字猜**，靠快照里已有的字段。
+var monster_form := ""
+# 野点 id（快照里的 camp_id）。表现层用它查「这个野点该长什么样」，
+# 见 MonsterForms.CAMP_FORMS —— 不新增 sim/联机字段。
+var monster_camp := ""
+# 程序化形态的部件表（腿/翅/尾/轨道/呼吸点）。这类形态没有 AnimationPlayer，
+# 走路与倒地都由 process_visual 依据它驱动；空的表示这只怪用的是骨骼模型（狼）。
+var _monster_spec: Dictionary = {}
+# 装配完成时的静止姿态，倒地动画要在它之上叠加（见 _capture_model_rest_pose）。
+var _model_rest_scale := Vector3.ONE
+var _model_rest_position := Vector3.ZERO
 
 var model_root: Node3D
 var body_root: Node3D
@@ -258,13 +279,15 @@ func setup(
 	local: bool,
 	viewer: String = "",
 	objective: bool = false,
-	pit_id: String = ""
+	pit_id: String = "",
+	camp_id: String = ""
 ) -> void:
 	kind = unit_kind
 	team = unit_team
 	hero_type = type_id
 	is_objective = objective
 	objective_id = pit_id
+	monster_camp = camp_id
 	if kind == "monster":
 		monster_type = type_id
 	elif kind == "minion":
@@ -422,20 +445,45 @@ func _build_monster() -> void:
 	if monster_type == "spirit":
 		_build_river_spirit()
 		return
-	var scene: PackedScene
-	var target_height := 1.5
-	var bar_width := 0.9
+	var form := MonsterForms.form_key(monster_type, is_objective, objective_id, monster_camp)
+	monster_form = form
+	var objective_height := OVERLORD_HEIGHT if objective_id == "overlord" else TYRANT_HEIGHT
+	var spec := MonsterForms.build(form, objective_height)
+	if not spec.is_empty():
+		_build_procedural_monster(spec)
+		return
+	_build_wolf_monster()
+
+# 程序化野怪：形象由 MonsterForms 拼好，UnitVisual 只管挂上、对齐血条与脚下环。
+# 这类形态**没有 AnimationPlayer**，走路/呼吸/死亡全部由 process_visual 里的
+# 程序化动画驱动，所以这里必须把 spec 留下来（_monster_spec）。
+func _build_procedural_monster(spec: Dictionary) -> void:
+	_monster_spec = spec
+	model_root = spec.get("root", null)
+	if model_root == null:
+		# 形态字典里没有 root = 装配失败。退回狼模型，绝不留下「看不见却能被打」的空模型。
+		_build_wolf_monster()
+		return
+	add_child(model_root)
+	var target_height := float(spec.get("height", 1.5))
+	var bar_width := float(spec.get("bar_width", 0.9))
+	monster_form = str(spec.get("form", monster_form))
+	_capture_model_rest_pose()
+	# 脚下环贴着形态的真实体量：石像比蜥蜴宽一圈，首领占满整个坑。
+	_add_ring(MonsterForms.ring_radius(monster_form))
 	if is_objective:
-		scene = preload("res://assets/characters/Orc.glb")
-		target_height = OVERLORD_HEIGHT if objective_id == "overlord" else TYRANT_HEIGHT
-		bar_width = OBJECTIVE_BAR_WIDTH
-	elif monster_type == "orc":
-		scene = preload("res://assets/characters/Orc.glb")
-		target_height = 2.4
+		_add_health_bar(target_height + 0.55, bar_width)
 	else:
-		scene = preload("res://assets/characters/Wolf.glb")
-		target_height = 1.4
-	var fitted := ModelUtils.fit_scene(scene, target_height)
+		_add_health_bar(target_height + 0.25, bar_width)
+	_set_anim("Idle", true)
+	ModelUtils.enable_shadows(self, false)
+
+# 狼：现成模型（双狼营地本来就是狼），只补两处 —— 高度对齐、眼睛点亮。
+# 保留 glb 的 Idle/Walk/Gallop/Death 骨骼动作，这是程序化形态没有的东西。
+func _build_wolf_monster() -> void:
+	_monster_spec = {}
+	monster_form = "wolf"
+	var fitted := ModelUtils.fit_scene(preload("res://assets/characters/Wolf.glb"), WOLF_HEIGHT)
 	fitted.name = "Model"
 	model_root = fitted
 	add_child(model_root)
@@ -444,16 +492,53 @@ func _build_monster() -> void:
 		if player:
 			animation_players.append(player)
 			player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
-	if is_objective:
-		# 脚下环贴着碰撞半径画（暴君 2.6 / 主宰 2.8），
-		# 让玩家在选中首领前就能读出它的实际体积。
-		_add_ring(2.4 if objective_id == "tyrant" else 2.6)
-		_add_health_bar(target_height + 0.55, bar_width)
-	else:
-		_add_ring(0.6)
-		_add_health_bar(target_height + 0.25, bar_width)
+	_polish_wolf(model_root)
+	_capture_model_rest_pose()
+	_add_ring(MonsterForms.ring_radius("wolf"))
+	_add_health_bar(WOLF_HEIGHT + 0.25, 0.9)
 	_set_anim("Idle", true)
 	ModelUtils.enable_shadows(self, false)
+
+# 狼原本是一团灰白：在草地上、和石头一个色，玩家要凑近才认得出是活物。
+# 把 glb 里那对「黑眼睛」换成自发光琥珀色，20 米机位下那两点亮光就是「它是活的」。
+# 材质走 MonsterKit 的静态缓存，重生时不会新建材质（硬规则 4）。
+func _polish_wolf(root: Node3D) -> void:
+	var eyes := MonsterKit.glow(Color(1.0, 0.72, 0.28), 1.9)
+	for node in root.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := node as MeshInstance3D
+		if mesh_instance.mesh == null:
+			continue
+		for surface in mesh_instance.mesh.get_surface_count():
+			var material := mesh_instance.get_active_material(surface)
+			if material != null and str(material.resource_name).to_lower().contains("eye"):
+				mesh_instance.set_surface_override_material(surface, eyes)
+
+# 记下装配完成时的静止姿态：倒地动画（程序化形态没有骨骼动作）要在这个姿态上叠加，
+# 否则会覆盖 fit_height 算出来的缩放与贴地偏移，野怪一死就变大/浮空。
+func _capture_model_rest_pose() -> void:
+	if model_root == null:
+		return
+	_model_rest_scale = model_root.scale
+	_model_rest_position = model_root.position
+
+# 复活：把倒地姿态收回去。野怪在自己视野内被打死又刷新的情况下视图不会重建，
+# 少了这一步它就会带着「趴在地上」的旋转继续站着打人。
+func _restore_model_rest_pose() -> void:
+	if model_root == null:
+		return
+	model_root.rotation = Vector3.ZERO
+	model_root.scale = _model_rest_scale
+	model_root.position = _model_rest_position
+
+# 死亡动作名。三种单位三种命名，不能互相顶替：
+#   英雄 ual 动作库叫 Death01；小兵 Skeleton_* 叫 Death_A；狼 glb 叫 Death。
+# 程序化形态没有 AnimationPlayer，_set_anim 会静默跳过，倒地交给 _update_death_pose()。
+func _death_anim() -> String:
+	if kind == "hero":
+		return "Death01"
+	if kind == "monster" and _monster_spec.is_empty():
+		return "Death"
+	return "Death_A"
 
 func _build_river_spirit() -> void:
 	var root := Node3D.new()
@@ -854,6 +939,7 @@ func _update_health_bar() -> void:
 func _update_dead_state(alive: bool) -> void:
 	if alive and dead:
 		dead = false
+		_restore_model_rest_pose()
 		_shown_hp = -1.0
 		_shown_shield = -1.0
 		_shown_mp = -1.0
@@ -872,8 +958,8 @@ func _update_dead_state(alive: bool) -> void:
 		_refresh_bush_eye()
 	elif not alive and not dead:
 		dead = true
-		death_timer = 2.4
-		_set_anim("Death01" if kind == "hero" else "Death_A", false)
+		death_timer = DEATH_LINGER_SECONDS
+		_set_anim(_death_anim(), false)
 		action_timer = 0.0
 		_shown_hp = 0.0
 		if bar_material:
@@ -951,6 +1037,7 @@ func process_visual(delta: float) -> void:
 			_update_locomotion()
 	if dead:
 		death_timer -= delta
+		_update_death_pose()
 		if death_timer <= 0.0:
 			for player in animation_players:
 				if player:
@@ -960,8 +1047,26 @@ func process_visual(delta: float) -> void:
 		return
 	if action_timer <= 0.0:
 		_update_locomotion()
+	_animate_monster(delta)
 	if local_ring:
 		local_ring.rotation.y += delta * 0.8
+
+# 野怪的程序化动画：只有没有骨骼动作的形态才走这里（狼有自己的 Idle/Walk/Death）。
+func _animate_monster(delta: float) -> void:
+	if _monster_spec.is_empty() or model_root == null:
+		return
+	MonsterForms.animate(_monster_spec, delta, moving, unit_speed)
+
+# 程序化倒地：没有 Death 动作的形态（石像 / 蜥蜴 / 猪 / 鸟 / 首领）向前倒 + 轻微下沉。
+# 没有这一步，被击杀的野怪会保持站姿杵在原地，玩家读成「打不动它」。
+# 只在静止姿态之上叠加，不能覆盖 fit_height 的缩放与贴地偏移 —— 否则一死就变大。
+func _update_death_pose() -> void:
+	if not _monster_spec.is_empty() and animation_players.is_empty() and model_root != null:
+		var elapsed := clampf((DEATH_LINGER_SECONDS - death_timer) / DEATH_FALL_SECONDS, 0.0, 1.0)
+		var eased := elapsed * elapsed
+		model_root.rotation.x = -1.42 * eased
+		model_root.scale = _model_rest_scale * lerp(1.0, 0.82, eased)
+		model_root.position = _model_rest_position + Vector3(0.0, -0.12 * eased, 0.0)
 
 func _update_locomotion() -> void:
 	if dead:

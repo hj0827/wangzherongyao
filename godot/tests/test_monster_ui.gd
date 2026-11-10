@@ -55,9 +55,10 @@ func test_objective_monsters_tower_over_heroes_and_match_their_hitbox() -> void:
 	check(overlord_height > tyrant_box.size.y, "主宰要比暴君更大")
 
 	var camp_orc := UnitVisual.new()
-	camp_orc.setup("monster", "neutral", "orc", "石卫", false, "blue")
-	near(ModelUtils.relative_aabb(camp_orc.model_root).size.y, 2.4, 0.05, "普通兽人营地保持原身高")
-	check(not camp_orc.is_objective, "普通营地不能误走首领体型")
+	camp_orc.setup("monster", "neutral", "boar", "三猪", false, "blue")
+	near(ModelUtils.relative_aabb(camp_orc.model_root).size.y, 1.4, 0.05, "小野点保持小体型")
+	check(not camp_orc.is_objective, "普通野点不能误走首领体型")
+	near(camp_orc.bar_root.position.y, 1.65, 0.06, "小野点血条贴在头顶，不抬到首领高度")
 	tyrant.free()
 	overlord.free()
 	camp_orc.free()

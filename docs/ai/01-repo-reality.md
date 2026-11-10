@@ -26,7 +26,11 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   ├── app/main.gd             ★ 应用壳：菜单、选人、建房、进战斗（1200+ 行）
 │   ├── game/                   ★ 实际的 view 层
 │   │   ├── arena.gd            2500+ 行，承担相机/单位同步/特效/指示器/输入
-│   │   ├── unit_visual.gd      单位装配 + 骨骼动画 + 血条
+│   │   ├── unit_visual.gd      单位装配 + 骨骼动画 + 血条 + 野怪形态装配
+│   │   ├── monster_kit.gd      ★ 野怪形象工具箱（材质/网格缓存、基本体、量体对齐）
+│   │   ├── monster_forms.gd    ★ 野怪形态派发 + 程序化动画（无骨骼）
+│   │   ├── monster_forms_jungle.gd  ★ 蓝/红石像 + 蜥蜴/三猪/红鸟
+│   │   ├── monster_forms_boss.gd    ★ 暴君 / 主宰
 │   │   ├── map_view.gd         ✅ 地图表现，**唯一真正接线的新模块**
 │   │   ├── bush_eye.gd         进草头顶斜划眼（程序化 96px 贴图 + 静态缓存）
 │   │   ├── input_assist.gd     键鼠/触控 → 战局方向向量

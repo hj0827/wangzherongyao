@@ -3321,7 +3321,8 @@ func _create_unit_view(entity: Dictionary) -> UnitVisual:
 			false,
 			local_team,
 			objective,
-			str(entity.get("objective_id", ""))
+			str(entity.get("objective_id", "")),
+			str(entity.get("camp_id", ""))
 		)
 		view.set_monster_badge(str(entity.get("buff_type", "")), objective)
 	else:

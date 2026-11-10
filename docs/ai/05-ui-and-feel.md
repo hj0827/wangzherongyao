@@ -209,7 +209,70 @@ godot --path godot --script res://tools/mobile_shot.gd
 - 加了护盾会在血条右侧叠一段白色 `shield_ratio`。
 - **不要换成 `BaseMaterial3D.BILLBOARD_ENABLED`**，原因见 `02-godot-pitfalls.md` §3。
 
-**首领体型**：暴君 `3.8 m`、主宰 `4.2 m`，分别是英雄 `2.7 m` 的 `1.41 / 1.56` 倍。Orc 模型按高度等比放大后宽约 `5.1 / 5.7 m`，与模拟层 `2.6 / 2.8` 的碰撞半径一致，避免「身板看着小、实际被打范围大」。首领血条整体抬到 `身高 + 0.55`、名字字号 `44`；普通野怪仍是 `身高 + 0.25` / `32`。`UnitVisual.setup()` 的 `objective / pit_id` 由 `Arena` 从快照的 `objective / objective_id` 传入，**普通营地只能走小体型分支**。
+**首领体型**：暴君 `3.8 m`、主宰 `4.2 m`，分别是英雄 `2.7 m` 的 `1.41 / 1.56` 倍。两只首领是**程序化拼的重甲魔兽**（见 §7.1），实测宽 `5.14 / 5.27 m`，与模拟层 `2.8` 的碰撞半径（直径 5.6）同一量级，避免「身板看着小、实际被打范围大」。首领血条整体抬到 `身高 + 0.55`、名字字号 `44`；普通野怪仍是 `身高 + 0.25` / `32`。`UnitVisual.setup()` 的 `objective / pit_id` 由 `Arena` 从快照的 `objective / objective_id` 传入，**普通营地只能走小体型分支**。
+
+---
+
+## 7.1 野怪形象（2026-11-10）
+
+玩家反馈原话：「红蓝buff和野怪的形象还是不够好看，要继续优化，可以参考王者荣耀等游戏的野怪设计」。
+改前的实际状态是：**12 个野点全都用同一只 `Wolf.glb`**（只靠头顶名牌区分），暴君/主宰共用同一只
+Kenney 兽人 —— 俯视下野区是一串一模一样的狼。现在每个野点有自己的剪影与配色。
+
+| 文件 | 职责 | 规模 |
+| --- | --- | --- |
+| `scripts/game/monster_kit.gd` | 工具箱：材质/网格静态缓存、基本体拼装、量体对齐（`fit_height`）、形态字典收尾（`finish`） | 330 行 |
+| `scripts/game/monster_forms_jungle.gd` | 蔚蓝石像 / 猩红石像 / 蜥蜴 / 三猪 / 红鸟 | 400 行 |
+| `scripts/game/monster_forms_boss.gd` | 暴君 / 主宰（共用 `_beast` 骨架，靠配色 + 角数 + 甲刺长度分开） | 180 行 |
+| `scripts/game/monster_forms.gd` | 形态派发（`form_key` / `CAMP_FORMS` / `build` / `ring_radius`）+ 程序化动画（`animate`） | 160 行 |
+| `tools/monster_gallery.gd` | 画廊：每种形态单独特写拼成对照图 + 一张实战取景图（入库工具） | 230 行 |
+
+**接线只有三处**（都在表现层，sim / 协议一行没动）：`Arena._create_unit_view()` 把快照里的
+`camp_id / objective_id / monster_type` 三项传给 `UnitVisual.setup()`；`UnitVisual._build_monster()`
+用 `MonsterForms.form_key()` 换出形态键，程序化形态交给 `_build_procedural_monster()`，
+狼走 `_build_wolf_monster()`，河道之灵仍是原来的水球分支。`Arena` 只负责**把快照字段递下去**，
+形态语义收在 `MonsterForms` 里 —— 和 `set_monster_badge()` 的分工一致。
+
+**为什么程序化拼、不再找现成模型**：现成包的 glb 里连 `license` 字段都没有
+（差距文档 §5.1），野怪再引一套资产等于再加一处合规风险；基本体 + 共享材质的显存与包体代价
+接近零；而俯视 20 米机位下玩家读的是**剪影 + 配色**，不是面数。
+
+**四条设计口径**（都是看实拍图改出来的，别凭手感推翻）：
+
+1. **剪影第一**：同一体积拆成两三块各自转几度，比一整块大方块像「石头/甲壳」；发光件要**小而亮**，
+   做大了在 bloom 下糊成一坨白斑（第一版蓝石像的晶体就把整个胸甲吃掉了）。
+2. **配色按 FILMIC 反解**：石头基色要压到 `0.1~0.3` 这一档。写 `0.5` 上去，经过
+   `TONE_MAPPER_FILMIC + exposure 1.05 + 天空环境光` 出来是中灰色，红石像会读成「奶咖色」。
+   这和 §7 血条三色（`HP_SELF/HP_ALLY/HP_ENEMY`）是同一类坑。
+3. **体型与碰撞半径必须同量级**：`Jungle.monster_stats()` 给的 `radius`（小野点 1.5 / buff 2.2 /
+   首领 2.8）就是「被打到的范围」。`fit_height()` 负责把形象对齐到标定身高，`test_monster_forms`
+   再按 AABB 卡住「不能明显超出、也不能缩成小点」。
+4. **獠牙/角一律朝上外翻**：朝前摆会连成一排白板，正面读成「一张嘴」。
+
+**动画不用骨骼**：形象是基本体拼的，没有骨骼可播。`MonsterForms.animate()` 每帧按
+「腿绕髋关节摆 / 翅膀扇 / 尾巴摇 / 肩甲与火星绕体转 / 晶体呼吸」驱动关节节点，
+`moving` 与 `unit_speed` 决定步频与幅度。死亡时（`_update_death_pose`）向前倒 + 下沉，
+复活时 `_restore_model_rest_pose()` 收回 —— **倒地只叠加在静止姿态上**，直接写
+`model_root.scale/rotation` 会覆盖 `fit_height` 的结果，野怪一死就变大浮空。
+
+**性能纪律**：材质与网格都走 `MonsterKit` 的静态缓存（`stone/gem/glow/aura/hide_mat/chitin` +
+`_box_mesh/_sphere_mesh/_cylinder_mesh/_shard_mesh`），同形态重复装配**不新建**材质与网格
+（`test_monster_forms` 有守卫）。首领约 55 个 `MeshInstance3D`，小野点 26~35 个；
+它们共用材质、关闭投影，同屏最多也就是几个野点。
+
+**改形象的操作顺序**（否则你会盯着一张缩成一坨的图瞎调）：
+
+```cmd
+godot --path godot --script res://tools/monster_gallery.gd
+:: 产物：godot/shots/monster_sheet.png（8 宫格特写）、monster_field.png（51° 俯角实战取景）
+```
+
+画廊的**环境与主光直接吃 `ArenaLook`**（`apply_environment` / `apply_sun`），
+所以图上看到的颜色就是游戏里的颜色 —— 自己另写一套光照、尤其是不开 bloom 时，
+「晶体到底亮不亮」根本判断不了。
+
+**遗留**：`assets/characters/Orc.glb` 现在没有生产引用了（旧版首领模型），
+保留为素材；`test_global_integrity` 仍在资产清单里断言它能加载。
 
 血条之外的头顶信息：
 
@@ -321,6 +384,20 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 | 蓝方蓝区 / 红方蓝区 | 蓝BUFF | 双狼、蜥蜴 |
 | 蓝方红区 / 红方红区 | 红BUFF | 三猪、红鸟 |
 
+| 野点（`camp_id`） | 形象（`MonsterForms.CAMP_FORMS`） | 说明 |
+| --- | --- | --- |
+| 霜狼 / 赤狼（蓝 BUFF / 红 BUFF） | `blue_sentinel` / `red_sentinel` | 蔚蓝石像 / 猩红石像（漂浮石躯 + 胸口晶簇 / 岩浆裂纹） |
+| 双狼 | `wolf` | 现成狼模型（`Wolf.glb`），眼睛换成自发光琥珀 |
+| 蜥蜴 | `lizard` | 低伏长身 + 背脊鳍刺 + 拖尾 |
+| 三猪 | `boar` | 前高后低的桶身 + 上翘獠牙 + 鬃背 |
+| 红鸟 | `bird` | 赤色猛禽 + 后掠翼板 + 三根长尾羽 |
+| 暴君 / 主宰（`objective_id`） | `tyrant` / `overlord` | 四足重甲魔兽（暗赤 / 紫黑，见 §7.1） |
+
+**形象登记在 `scripts/game/monster_forms.gd` 的 `CAMP_FORMS`，不在 `MapLayout.CAMPS` 里**：
+换模型不改任何玩法数值，它是纯表现层的事；`camp_id` 本来就在快照与
+`net_protocol._sanitize_entity` 的白名单里，所以主机与客机自动一致。
+新增野点忘了登记会被 `test_monster_forms` 直接拦下（那张表必须与 `CAMPS` 一一对应）。
+
 - `MapLayout.CAMPS` 是唯一数据源；小野点 `radius = 1.5`、`disc_radius = 2.4`，没有 `buff` 字段。
 - `Jungle.monster_stats()` 读取营地可选的 `hp / damage / xp / respawn_time`：buff 怪保持 720/780 血、70 秒刷新；小野点 420~500 血、60 秒刷新、只给经验。
 - 击杀小野点**不发 `buff_taken`**：空 `buff` 会被播报层误读成红BUFF。只加经验，死亡事件仍然发。
@@ -337,9 +414,12 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 - 只定义**蓝方半场两座**的形状；红方两座由 `mirror()` 得到。四座 buff 营地在镜像下正好两两成对
   （蓝蓝 (-1,-23) ↔ 红蓝 (23,1)；蓝红 (6,27) ↔ 红红 (-27,-6)），所以不会挪错营地。
   **不要改成 180° 旋转 `-p`** —— 那会把围栏塞到隔壁营地头上。
-- 折线是**开口**的，首尾之间那一段就是进出通道。开口一律朝河道那一侧，
-  因为河岸坡本来就圈不进去（`TerrainBuilder.height_at` 在那里掉到 -0.6，石头会悬空）。
-- 半径有鼓有收（4.30 ~ 6.90）：一条等距圆弧俯视还是「围栏」，不是山体。
+- 折线是**开口**的，首尾之间那一段就是进出通道。**开口朝己方基地一侧**（2026-11-10
+  玩家反馈改的：之前朝河道/敌方一侧，等于自家 buff 窝的门开在敌境方向）。镜子规律：
+  开口中心 θ 镜像后落在 −θ−90，蓝方两座对准蓝基地，红方两座镜像后自动对准红基地。
+- 墙段压到河岸坡的那几个顶点把半径收小（3.6~4.2 米），保证 river_d ≥ 10.9：
+  水面在 -0.42，再靠近墙基就要泡水/悬空。
+- 半径有鼓有收（3.60 ~ 6.75）：一条等距圆弧俯视还是「围栏」，不是山体。
 - 每个顶点都过了 `tools/probe_ring_fit.gd`（探针，不入库）：地形平坦、不压兵线、
   不盖营地/草丛/首领坑/传送阵、与保留石壁留出净宽、**折线整段**合法而不只是顶点。
 
