@@ -108,6 +108,25 @@ const BUILD_ORDERS := {
 static func get_item(item_id: String) -> Dictionary:
 	return CATALOGUE.get(item_id, {})
 
+static func ids_by_category(category: String) -> Array:
+	if category == "" or category == "all":
+		return CATALOGUE.keys()
+	var ids: Array = []
+	for item_id in CATALOGUE:
+		if str(CATALOGUE[item_id].get("category", "")) == category:
+			ids.append(item_id)
+	return ids
+
+# 品质由价格推导，不新增一件装备一个手填字段：
+# 250/300/220 这类基础件是 basic，710 左右的过渡件是 rare，2000+ 的成装是 epic。
+static func quality_of(item_id: String) -> String:
+	var cost := int(get_item(item_id).get("cost", 0))
+	if cost >= 2000:
+		return "epic"
+	if cost >= 500:
+		return "rare"
+	return "basic"
+
 static func build_order_for(hero_type: String) -> Array:
 	return BUILD_ORDERS.get(hero_type, BUILD_ORDERS["blade"])
 

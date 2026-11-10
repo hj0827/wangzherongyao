@@ -2,6 +2,7 @@ extends RefCounted
 
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const ItemShop = preload("res://sim/item_shop.gd")
+const ControlRules = preload("res://sim/control_rules.gd")
 
 const MAGIC := 0x4D4F4241
 const VERSION := 1
@@ -14,7 +15,7 @@ const MAX_AIM := 58.0
 const MODES := ["duel", "team"]
 const ATTACK_MODES := ["default", "minion", "tower"]
 const SUMMONER_SPELLS := ["flash", "execute", "cleanse", "heal"]
-const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster"]
+const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster", "projectile"]
 # 战斗属性（项 1，链路 4）的入站钳制上限。resist/CDR/攻速都按"非负 + 封顶"清洗，
 # 负值一律钳到 0，杜绝客机伪造"负护甲 = 增伤"这类越界数值。
 const MAX_RESISTANCE := 100000.0
@@ -453,6 +454,15 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["attack_cd"] = clampf(_number(source.get("attack_cd", 0.0)), 0.0, 60.0)
 		entity["haste_timer"] = clampf(_number(source.get("haste_timer", 0.0)), 0.0, 60.0)
 		entity["slow_timer"] = clampf(_number(source.get("slow_timer", 0.0)), 0.0, 60.0)
+		# 硬控（项 4，链路 4）：时长钳到 0~10 秒（没有哪个控该超过 10 秒，
+		# 否则客机会画出一个"永久眩晕"的图标）；cc_status 只收白名单枚举，
+		# 避免客机把任意字符串塞进 UI 层。
+		entity["stun_timer"] = clampf(_number(source.get("stun_timer", 0.0)), 0.0, 10.0)
+		entity["knockup_timer"] = clampf(_number(source.get("knockup_timer", 0.0)), 0.0, 10.0)
+		entity["silence_timer"] = clampf(_number(source.get("silence_timer", 0.0)), 0.0, 10.0)
+		entity["root_timer"] = clampf(_number(source.get("root_timer", 0.0)), 0.0, 10.0)
+		var cc_code := str(source.get("cc_status", ""))
+		entity["cc_status"] = cc_code if ControlRules.is_known(cc_code) else ""
 		entity["moving"] = _flag(source.get("moving", false))
 		entity["last_killer_name"] = _short_string(str(source.get("last_killer_name", "")), 32)
 		entity["recalling"] = _flag(source.get("recalling", false))
@@ -466,6 +476,37 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["buff_blue_timer"] = clampf(_number(source.get("buff_blue_timer", 0.0)), 0.0, 600.0)
 		entity["revealed_timer"] = clampf(_number(source.get("revealed_timer", 0.0)), 0.0, 60.0)
 		entity["last_input_seq"] = clampi(int(_number(source.get("last_input_seq", -1))), -1, 1000000000)
+	elif type == "projectile":
+		# 项 3：客机靠这些字段画出**真实弹道**（而不是"血凭空掉"）。
+		# 只传表现必需的量：方向已归一化，速度/寿命是位置外推参数，
+		# kind 决定弹体外观，aoe_radius 决定落地圈大小。
+		# 刻意不下发 damage / hit_ids / target_mode：客机不结算伤害，
+		# 伤害永远由主机算完再广播，这也是"信任根在主机"的一部分。
+		# 默认值必须是 0 而不是 1：缺失 dir_x 时若默认 1，会被归一化成一个
+		# "看起来合理"的方向（实测 0.94,0.33 与真实 0.94,0.35 极其接近），
+		# 于是"快照漏发方向"这种缺陷在联机上表现为弹道略微歪一点，查不出来。
+		# 默认 0 时归一化会退化成 (0,±1)，一眼可辨，且能被断言抓住。
+		var dir_x := clampf(_number(source.get("dir_x", 0.0)), -1.0, 1.0)
+		var dir_y := clampf(_number(source.get("dir_y", 0.0)), -1.0, 1.0)
+		var length := sqrt(dir_x * dir_x + dir_y * dir_y)
+		if length > 0.0001:
+			dir_x /= length
+			dir_y /= length
+		else:
+			# 两个分量都缺失/为零：不猜方向，给一个显式的"无方向"标记。
+			# 客机看到 dir 为 (0,0) 就按"从 owner 指向落点"自行推断，
+			# 而不是被一个伪造的 (1,0) 带去歪。
+			dir_x = 0.0
+			dir_y = 0.0
+		entity["dir_x"] = dir_x
+		entity["dir_y"] = dir_y
+		entity["speed"] = clampf(_number(source.get("speed", 0.0)), 0.0, 96.0)
+		entity["lifetime"] = clampf(_number(source.get("lifetime", 0.0)), 0.0, 8.0)
+		entity["age"] = clampf(_number(source.get("age", 0.0)), 0.0, 8.0)
+		entity["kind"] = str(source.get("kind", ""))
+		entity["slot"] = str(source.get("slot", ""))
+		entity["owner_id"] = int(_number(source.get("owner_id", 0)))
+		entity["aoe_radius"] = clampf(_number(source.get("aoe_radius", 0.0)), 0.0, 16.0)
 	elif type == "minion":
 		var lane := str(source.get("lane", "mid"))
 		if lane != "top" and lane != "bottom":

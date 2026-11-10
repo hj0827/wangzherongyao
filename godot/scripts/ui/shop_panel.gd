@@ -23,6 +23,13 @@ var _slot_icons: Array[TextureRect] = []
 var _slot_labels: Array[Label] = []
 var _root: Control
 var _state_signature := ""
+var _active_category := "all"
+var _tabs: Dictionary = {}
+var _item_cells: Dictionary = {}
+var _detail_name: Label
+var _detail_meta: Label
+var _detail_stats: Label
+var _detail_hint: Label
 
 func setup(type_id: String, mobile: bool) -> void:
 	hero_type = type_id
@@ -47,10 +54,10 @@ func _build() -> void:
 
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	panel.offset_left = -390.0
-	panel.offset_right = 390.0
-	panel.offset_top = -286.0
-	panel.offset_bottom = 286.0
+	panel.offset_left = -490.0
+	panel.offset_right = 490.0
+	panel.offset_top = -310.0
+	panel.offset_bottom = 310.0
 	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.025, 0.045, 0.06, 0.98), Color(0.7, 0.55, 0.28, 0.95), 2, 12))
 	_root.add_child(panel)
 	var box := VBoxContainer.new()
@@ -80,13 +87,56 @@ func _build() -> void:
 	_quick_button.pressed.connect(_on_quick_buy)
 	box.add_child(_quick_button)
 
+	var body := HBoxContainer.new()
+	body.add_theme_constant_override("separation", 12)
+	box.add_child(body)
+
+	var tabs := VBoxContainer.new()
+	tabs.custom_minimum_size = Vector2(92.0, 0.0)
+	tabs.add_theme_constant_override("separation", 6)
+	body.add_child(tabs)
+	for entry in [["all", "全部"], ["attack", "攻击"], ["magic", "法术"], ["defense", "防御"], ["movement", "移动"]]:
+		var category := str(entry[0])
+		var tab := Button.new()
+		tab.text = str(entry[1])
+		tab.toggle_mode = true
+		tab.button_pressed = category == "all"
+		tab.focus_mode = Control.FOCUS_NONE
+		tab.custom_minimum_size = Vector2(0.0, 34.0)
+		tab.pressed.connect(_select_category.bind(category))
+		tabs.add_child(tab)
+		_tabs[category] = tab
+
 	var grid := GridContainer.new()
 	grid.columns = 2
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 8)
-	box.add_child(grid)
+	body.add_child(grid)
 	for item_id in ItemShop.CATALOGUE:
 		grid.add_child(_make_item_cell(str(item_id)))
+
+	# 右侧详情：只放文字，不放 TextureRect —— 商店的图标数量契约按 8 件装备算，
+	# 详情再塞一张图会让 test_item_icons 的 "one icon per catalogue entry" 失真。
+	var detail := PanelContainer.new()
+	detail.custom_minimum_size = Vector2(236.0, 0.0)
+	detail.add_theme_stylebox_override("panel", GameTheme.style(Color(0.03, 0.05, 0.07, 0.96), Color(0.42, 0.36, 0.22, 0.85), 1, 8))
+	body.add_child(detail)
+	var detail_box := VBoxContainer.new()
+	detail_box.add_theme_constant_override("separation", 6)
+	detail.add_child(detail_box)
+	_detail_name = _label("", 20, GameTheme.GOLD_LIGHT, "TitleLabel")
+	detail_box.add_child(_detail_name)
+	_detail_meta = _label("", 13, GameTheme.MUTED)
+	detail_box.add_child(_detail_meta)
+	_detail_stats = _label("", 13, GameTheme.TEXT)
+	_detail_stats.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	detail_box.add_child(_detail_stats)
+	_detail_hint = _label("", 12, GameTheme.MUTED)
+	_detail_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	detail_box.add_child(_detail_hint)
+	if not ItemShop.CATALOGUE.is_empty():
+		_show_detail(str(ItemShop.CATALOGUE.keys()[0]))
 
 	var inv_title := _label("已购装备（点击出售，返还 60%）", 15, GameTheme.MUTED)
 	box.add_child(inv_title)
@@ -126,7 +176,8 @@ func _build() -> void:
 func _make_item_cell(item_id: String) -> Control:
 	var item: Dictionary = ItemShop.get_item(item_id)
 	var cell := PanelContainer.new()
-	cell.add_theme_stylebox_override("panel", GameTheme.style(Color(0.035, 0.06, 0.08, 0.96), Color(0.22, 0.28, 0.34, 0.9), 1, 8))
+	cell.add_theme_stylebox_override("panel", GameTheme.style(Color(0.035, 0.06, 0.08, 0.96), _quality_color(item_id), 1, 8))
+	cell.mouse_entered.connect(_show_detail.bind(item_id))
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	cell.add_child(row)
@@ -147,7 +198,63 @@ func _make_item_cell(item_id: String) -> Control:
 	buy.pressed.connect(func(): buy_requested.emit(item_id))
 	row.add_child(buy)
 	_item_buttons[item_id] = buy
+	_item_cells[item_id] = cell
 	return cell
+
+func _quality_color(item_id: String) -> Color:
+	match ItemShop.quality_of(item_id):
+		"epic":
+			return Color(0.72, 0.42, 1.0, 0.95)
+		"rare":
+			return Color(0.36, 0.62, 1.0, 0.95)
+	return Color(0.34, 0.40, 0.44, 0.9)
+
+func _quality_label(item_id: String) -> String:
+	match ItemShop.quality_of(item_id):
+		"epic":
+			return "史诗"
+		"rare":
+			return "进阶"
+	return "基础"
+
+func _category_label(category: String) -> String:
+	match category:
+		"attack":
+			return "攻击"
+		"magic":
+			return "法术"
+		"defense":
+			return "防御"
+		"movement":
+			return "移动"
+	return "全部"
+
+func _select_category(category: String) -> void:
+	_active_category = category
+	for key in _tabs:
+		(_tabs[key] as Button).button_pressed = str(key) == category
+	var allowed := ItemShop.ids_by_category(category)
+	for item_id in _item_cells:
+		(_item_cells[item_id] as Control).visible = allowed.has(str(item_id))
+	if not _item_cells.is_empty():
+		for item_id in _item_cells:
+			if (_item_cells[item_id] as Control).visible:
+				_show_detail(str(item_id))
+				break
+
+func _show_detail(item_id: String) -> void:
+	var item: Dictionary = ItemShop.get_item(item_id)
+	if item.is_empty():
+		return
+	if _detail_name:
+		_detail_name.text = str(item.get("name", item_id))
+	if _detail_meta:
+		_detail_meta.text = "%s · %s" % [_category_label(str(item.get("category", ""))), _quality_label(item_id)]
+	if _detail_stats:
+		_detail_stats.text = _describe(item)
+	if _detail_hint:
+		var cost := int(item.get("cost", 0))
+		_detail_hint.text = "价格 %d g · 出售返还 %d g" % [cost, int(float(cost) * 0.6)]
 
 # 缩略图。图缺了就用「品类色块 + 名字首字」占位，绝不出现一个空白的格子。
 # 统一套一个槽位框：图标本身是暗底，直接贴在暗面板上会看不出边界。

@@ -46,26 +46,27 @@ static func family(kind: String) -> String:
 ## 不直接画：调用方（SkillButton）才知道该用什么颜色、要不要置灰。
 static func shapes(kind: String, center: Vector2, radius: float) -> Array:
 	var g := radius * GLYPH_SCALE
+	var result: Array = []
 	match family(kind):
 		"burst":
-			return [
+			result = [
 				{"type": "poly", "points": _star(center, g), "closed": true},
 				# 中心补一个小菱形：35px 下纯星形中心是空的，读起来像「裂开的图形」。
 				{"type": "poly", "points": _diamond(center, g * 0.30), "closed": false, "width": 2.0},
 			]
 		"move":
-			return [
+			result = [
 				{"type": "poly", "points": _chevron(center, g, 0.58, 0.60, -0.34, 0.0), "closed": false, "width": 3.2},
 				{"type": "poly", "points": _chevron(center, g, 0.30, 0.50, 0.10, 0.0), "closed": false, "width": 2.6},
 			]
 		"ward":
-			return [
+			result = [
 				{"type": "poly", "points": _shield(center, g), "closed": true},
 				{"type": "line", "a": center + Vector2(-0.26, -0.14) * g, "b": center + Vector2(0.26, -0.14) * g, "width": 2.2},
 				{"type": "line", "a": center + Vector2(0.0, 0.10) * g, "b": center + Vector2(0.0, 0.42) * g, "width": 2.2},
 			]
 		"shot":
-			return [
+			result = [
 				{"type": "line", "a": center + Vector2(-0.78, 0.78) * g, "b": center + Vector2(0.46, -0.46) * g, "width": 2.8},
 				{"type": "poly", "points": PackedVector2Array([
 					center + Vector2(0.76, -0.76) * g,
@@ -78,7 +79,7 @@ static func shapes(kind: String, center: Vector2, radius: float) -> Array:
 			# 一把竖着的剑：剑尖朝上、护手横穿、剑柄在下。
 			# 它是攻击键唯一的图形，要在 130px 的圆里一眼读成「刀剑」，
 			# 所以只保留三段剪影（剑身 / 护手 / 剑柄），不加装饰。
-			return [
+			result = [
 				{"type": "poly", "points": PackedVector2Array([
 					center + Vector2(0.0, -0.98) * g,
 					center + Vector2(0.19, -0.58) * g,
@@ -90,17 +91,136 @@ static func shapes(kind: String, center: Vector2, radius: float) -> Array:
 				{"type": "line", "a": center + Vector2(0.0, 0.20) * g, "b": center + Vector2(0.0, 0.66) * g, "width": 5.0},
 				{"type": "line", "a": center + Vector2(-0.15, 0.72) * g, "b": center + Vector2(0.15, 0.72) * g, "width": 4.0},
 			]
-	# strike：一道 45° 的刀光，外加两条速度线
-	return [
-		{"type": "poly", "points": PackedVector2Array([
-			center + Vector2(-0.72, -0.34) * g,
-			center + Vector2(-0.34, -0.72) * g,
-			center + Vector2(0.72, 0.34) * g,
-			center + Vector2(0.34, 0.72) * g,
-		]), "closed": true},
-		{"type": "line", "a": center + Vector2(-0.86, 0.12) * g, "b": center + Vector2(-0.46, 0.52) * g, "width": 2.4},
-		{"type": "line", "a": center + Vector2(-0.48, 0.86) * g, "b": center + Vector2(-0.18, 0.56) * g, "width": 1.8},
-	]
+		_:
+			# strike：一道 45° 的刀光，外加两条速度线
+			result = [
+				{"type": "poly", "points": PackedVector2Array([
+					center + Vector2(-0.72, -0.34) * g,
+					center + Vector2(-0.34, -0.72) * g,
+					center + Vector2(0.72, 0.34) * g,
+					center + Vector2(0.34, 0.72) * g,
+				]), "closed": true},
+				{"type": "line", "a": center + Vector2(-0.86, 0.12) * g, "b": center + Vector2(-0.46, 0.52) * g, "width": 2.4},
+				{"type": "line", "a": center + Vector2(-0.48, 0.86) * g, "b": center + Vector2(-0.18, 0.56) * g, "width": 1.8},
+			]
+	result.append_array(_kind_mark(kind, center, g))
+	return result
+
+# 每个技能在族语法之外再盖一枚「小印记」。族负责一眼看出是斩击/爆发/位移，
+# 印记负责区分同族技能：没有它，苍刃 Q 和铁壁 Q 的键面一模一样。
+# 所有点都落在 0.30g 内（≈0.17R），不会破坏 test_glyph_stays_inside_the_ring。
+static func _kind_mark(kind: String, center: Vector2, g: float) -> Array:
+	var c := center
+	var dot := g * 0.11
+	match kind:
+		"slash":
+			return [
+				{"type": "line", "a": c + Vector2(-0.26, 0.30) * g, "b": c + Vector2(0.02, 0.30) * g, "width": 2.0},
+				{"type": "line", "a": c + Vector2(-0.18, 0.40) * g, "b": c + Vector2(0.10, 0.40) * g, "width": 1.6},
+			]
+		"spin":
+			var spin_pts: Array = []
+			for a in range(0, 7):
+				spin_pts.append(c + Vector2(cos(float(a)), sin(float(a))) * g * 0.26)
+			return [_polyline(spin_pts, 2.2)]
+		"dash":
+			return [_polyline([c + Vector2(-0.32, 0.24) * g, c + Vector2(-0.10, 0.36) * g, c + Vector2(-0.32, 0.48) * g], 2.2)]
+		"leap_slam":
+			return [
+				{"type": "poly", "points": PackedVector2Array([
+					c + Vector2(0.26, -0.34) * g, c + Vector2(0.26, 0.02) * g, c + Vector2(0.40, 0.02) * g,
+					c + Vector2(0.20, 0.26) * g, c + Vector2(0.00, 0.02) * g, c + Vector2(0.14, 0.02) * g,
+					c + Vector2(0.14, -0.34) * g,
+				]), "closed": true},
+			]
+		"burst":
+			var rays: Array = []
+			for i in 4:
+				var a := TAU * float(i) / 4.0 + PI * 0.25
+				rays.append({"type": "line", "a": c + Vector2(cos(a), sin(a)) * g * 0.28, "b": c + Vector2(cos(a), sin(a)) * g * 0.44, "width": 1.8})
+			return rays
+		"line":
+			return [
+				{"type": "line", "a": c + Vector2(-0.20, -0.34) * g, "b": c + Vector2(-0.20, 0.34) * g, "width": 2.0},
+				{"type": "line", "a": c + Vector2(0.20, -0.34) * g, "b": c + Vector2(0.20, 0.34) * g, "width": 2.0},
+			]
+		"slow":
+			return [
+				{"type": "poly", "points": _dot(c + Vector2(-0.22, 0.28) * g, dot), "closed": true},
+				{"type": "poly", "points": _dot(c + Vector2(0.00, 0.36) * g, dot), "closed": true},
+				{"type": "poly", "points": _dot(c + Vector2(0.22, 0.28) * g, dot), "closed": true},
+			]
+		"meteor_storm":
+			var streaks: Array = []
+			for i in 3:
+				var x := (float(i) - 1.0) * 0.18
+				streaks.append({"type": "line", "a": c + Vector2(x - 0.10, -0.32) * g, "b": c + Vector2(x + 0.06, 0.26) * g, "width": 2.0})
+			return streaks
+		"quake":
+			return [
+				{"type": "line", "a": c + Vector2(-0.34, 0.28) * g, "b": c + Vector2(0.34, 0.28) * g, "width": 2.0},
+				{"type": "line", "a": c + Vector2(-0.24, 0.38) * g, "b": c + Vector2(0.24, 0.38) * g, "width": 1.6},
+			]
+		"charge":
+			return [
+				{"type": "line", "a": c + Vector2(-0.36, -0.16) * g, "b": c + Vector2(0.36, -0.16) * g, "width": 2.0},
+				{"type": "line", "a": c + Vector2(-0.24, -0.04) * g, "b": c + Vector2(0.24, -0.04) * g, "width": 1.6},
+			]
+		"shield":
+			return [_polyline([c + Vector2(-0.18, 0.30) * g, c + Vector2(0.18, 0.30) * g], 2.0)]
+		"taunt_aura":
+			return [
+				{"type": "poly", "points": _arc(c, g * 0.34, -0.55, 0.55), "closed": false, "width": 1.8},
+				{"type": "poly", "points": _arc(c, g * 0.44, -0.45, 0.45), "closed": false, "width": 1.4},
+			]
+		"arrow":
+			return [_polyline([c + Vector2(-0.28, 0.34) * g, c + Vector2(-0.38, 0.22) * g, c + Vector2(-0.30, 0.10) * g], 2.0)]
+		"aoe_shot":
+			var ring_pts: Array = []
+			for a in range(0, 9):
+				ring_pts.append(c + Vector2(cos(float(a)), sin(float(a))) * g * 0.30)
+			return [_polyline(ring_pts, 2.0)]
+		"haste":
+			return [
+				{"type": "line", "a": c + Vector2(-0.36, 0.24) * g, "b": c + Vector2(0.18, 0.24) * g, "width": 1.8},
+				{"type": "line", "a": c + Vector2(-0.26, 0.34) * g, "b": c + Vector2(0.28, 0.34) * g, "width": 1.5},
+			]
+		"arrow_barrage":
+			var arrows: Array = []
+			for i in 3:
+				var x := (float(i) - 1.0) * 0.16
+				arrows.append({"type": "line", "a": c + Vector2(x, 0.34) * g, "b": c + Vector2(x, 0.12) * g, "width": 1.6})
+				arrows.append({"type": "line", "a": c + Vector2(x, 0.12) * g, "b": c + Vector2(x - 0.06, 0.20) * g, "width": 1.4})
+				arrows.append({"type": "line", "a": c + Vector2(x, 0.12) * g, "b": c + Vector2(x + 0.06, 0.20) * g, "width": 1.4})
+			return arrows
+		"evade":
+			return [
+				{"type": "poly", "points": _dot(c + Vector2(-0.24, 0.26) * g, dot), "closed": true},
+				{"type": "poly", "points": _dot(c + Vector2(-0.08, 0.34) * g, dot * 0.8), "closed": true},
+				{"type": "poly", "points": _dot(c + Vector2(0.08, 0.40) * g, dot * 0.55), "closed": true},
+			]
+		"attack":
+			return [_polyline([c + Vector2(-0.32, 0.34) * g, c + Vector2(0.32, 0.34) * g], 1.6)]
+		_:
+			return [{"type": "poly", "points": _diamond(c + Vector2(0.0, 0.30) * g, g * 0.12), "closed": true}]
+
+static func _polyline(points: Array, width: float) -> Dictionary:
+	return {"type": "poly", "points": PackedVector2Array(points), "closed": false, "width": width}
+
+static func _dot(center: Vector2, radius: float) -> PackedVector2Array:
+	var points := PackedVector2Array()
+	for i in 8:
+		var a := TAU * float(i) / 8.0
+		points.append(center + Vector2(cos(a), sin(a)) * radius)
+	return points
+
+static func _arc(center: Vector2, radius: float, from_angle: float, to_angle: float) -> PackedVector2Array:
+	var points := PackedVector2Array()
+	for i in 7:
+		var t := float(i) / 6.0
+		var a := lerpf(from_angle, to_angle, t)
+		points.append(center + Vector2(cos(a), sin(a)) * radius)
+	return points
 
 ## 键位字母的角标位置：右下角。放在圆环内会挡住图形，放在圆环外会跑出按钮。
 static func badge_center(center: Vector2, radius: float) -> Vector2:

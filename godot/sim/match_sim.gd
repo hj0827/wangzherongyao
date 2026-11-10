@@ -3,6 +3,8 @@ extends RefCounted
 const MapData = preload("res://sim/map_data.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const SkillSystem = preload("res://sim/skill_system.gd")
+const ProjectileSystem = preload("res://sim/projectile_system.gd")
+const ControlRules = preload("res://sim/control_rules.gd")
 const TargetingRules = preload("res://sim/targeting_rules.gd")
 const EconomySystem = preload("res://sim/economy_system.gd")
 const ItemShop = preload("res://sim/item_shop.gd")
@@ -146,6 +148,78 @@ func _emit(event_type: String, data: Dictionary = {}) -> void:
 	for key in data:
 		event[key] = data[key]
 	state.events.append(event)
+
+## 发射一枚投射物（项 3）。由 SkillSystem 在施放远程技能时调用。
+##
+## 为什么把"建实体"放在 sim 而不是 skill_system：id 分配、实体列表、tick 推进
+## 都是 sim 的职责；skill_system 是 static 工具，拿不到 next_id，硬塞会破坏分层。
+func spawn_projectile(owner: Dictionary, slot: String, kind: String, aim: Vector2,
+		damage: float, dtype: String, aoe_radius: float, slow_sec: float, speed := 0.0) -> Dictionary:
+	var proj := ProjectileSystem.build(owner, slot, kind, aim, damage, dtype, aoe_radius, slow_sec, speed)
+	proj["id"] = int(state.next_id)
+	state.next_id = int(state.next_id) + 1
+	state.entities.append(proj)
+	# 表现层要靠这条事件立即出施法动作（而不是等命中）；命中另有 projectile_hit。
+	_emit("projectile_spawned", {
+		"id": int(proj.id),
+		"team": str(proj.team),
+		"owner_id": proj.get("owner_id", 0),
+		"kind": kind,
+		"slot": slot,
+		"x": float((proj.origin as Vector2).x),
+		"y": float((proj.origin as Vector2).y),
+		"aim_x": float(aim.x),
+		"aim_y": float(aim.y),
+	})
+	return proj
+
+## 推进投射物并结算命中（项 3）。
+## 伤害仍然走 _damage —— 护甲/魔抗/减伤/暴击只有一份实现，弹道不复制它。
+func _update_projectiles(dt: float) -> void:
+	var hits := ProjectileSystem.tick(state.entities, dt)
+	for hit in hits:
+		var proj: Dictionary = hit.get("projectile", {})
+		# source 必须是**真实的施法者实体**，不能手工拼一个字典冒充。
+		# 原因：_damage → _kill_entity → _add_xp 会读 source.alive / source.level /
+		# source.base_hp 等一长串字段，凑不齐就刷 "Invalid access to property"。
+		# 找不到施法者时（已死亡/已离开）退化成空字典 —— 各处都有 is_empty 守卫。
+		var source: Dictionary = {}
+		var owner_id: Variant = proj.get("owner_id", 0)
+		for entity in state.entities:
+			if entity is Dictionary and entity.get("id", -1) == owner_id:
+				source = entity
+				break
+		for target in hit.get("targets", []):
+			if not bool(target.get("alive", true)):
+				continue
+			# 范围弹（aoe_radius>0）对同一目标只结算一次，靠 hit_ids 记账。
+			var hit_ids: Array = proj.get("hit_ids", [])
+			hit_ids.append(target.get("id", 0))
+			proj["hit_ids"] = hit_ids
+			_damage(target, float(proj.get("damage", 0.0)), source, str(proj.get("damage_type", "physical")))
+			var slow_sec := float(proj.get("slow_sec", 0.0))
+			if slow_sec > 0.0:
+				# 走统一入口，让"免控"真的挡得住减速（旧实现直接写字段，免疫形同虚设）。
+				ControlRules.apply_slow(target, slow_sec)
+			_emit("projectile_hit", {
+				"id": int(proj.get("id", 0)),
+				"team": str(proj.get("team", "")),
+				"owner_id": proj.get("owner_id", 0),
+				"target": target.get("id", 0),
+				"target_type": str(target.get("type", "")),
+				"x": float((target.get("pos", Vector2.ZERO) as Vector2).x),
+				"y": float((target.get("pos", Vector2.ZERO) as Vector2).y),
+			})
+	# 回收：死亡投射物从实体表移除，否则会无限累积（每 tick 都在追加）。
+	_cleanup_dead_projectiles()
+
+func _cleanup_dead_projectiles() -> void:
+	var kept: Array = []
+	for entity in state.entities:
+		if entity is Dictionary and str(entity.get("type", "")) == "projectile" and not bool(entity.get("alive", true)):
+			continue
+		kept.append(entity)
+	state.entities = kept
 
 func _setup_teams() -> void:
 	var humans: Array = config.get("humans", [])
@@ -296,6 +370,12 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"last_purchase_seq": -1,
 		"passive_stacks": 0,
 		"cc_immune_timer": 0.0,
+		# 硬控（项 4）：四个独立计时。分开而不是合成一个"被控"标志，
+		# 是因为行动矩阵不同（沉默不禁普攻、定身不禁施法）。
+		"stun_timer": 0.0,
+		"knockup_timer": 0.0,
+		"silence_timer": 0.0,
+		"root_timer": 0.0,
 		"facing": Vector2(0.0, -1.0) if team == "blue" else Vector2(0.0, 1.0),
 		"shield": 0.0,
 		"shield_timer": 0.0,
@@ -518,6 +598,8 @@ func tick(dt: float) -> void:
 	_update_bots(dt)
 	_update_minions(dt)
 	_update_monsters(dt)
+	# 项 3：投射物在小兵/野怪更新之后推进，保证它们看到的是本 tick 的最终位置。
+	_update_projectiles(dt)
 	_update_structures(dt)
 	Crystal.tick(state, dt)
 	_update_respawns(dt)
@@ -622,6 +704,29 @@ func _in_fountain(entity: Dictionary) -> bool:
 # 回城与传送的引导推进。返回 true 表示本 tick 已被引导消费（完成瞬移后不该再处理移动与施法）。
 # 单独成函数是因为它不能挂在「有输入」这个前提上：客户端站着不动时推的是空字典。
 func _tick_channels(entity: Dictionary, input: Dictionary, dt: float) -> bool:
+	# 硬控打断引导（项 4）：眩晕/击飞/沉默都该打断回城与传送。
+	# 这不只是"合理"——回城是脱离手段，如果被控还能安然读条回家，
+	# 硬控在防守端的价值就没了。定身不打断（它不禁施法，见 ControlRules 矩阵）。
+	if not ControlRules.can_cast(entity):
+		var was_recalling := bool(entity.get("recalling", false))
+		var was_teleporting := bool(entity.get("teleporting", false))
+		if was_recalling or was_teleporting:
+			var break_pos: Vector2 = entity.pos
+			RecallRules.interrupt(entity)
+			Teleport.interrupt(entity)
+			# 事件形状与下面"自然打断"的两处保持一致（team/hero/x/y），
+			# 否则表现层要为同一个语义写两套解析。
+			if was_recalling:
+				_emit("recall_interrupt", {
+					"team": entity.team, "hero": entity.id,
+					"x": float(break_pos.x), "y": float(break_pos.y),
+				})
+			if was_teleporting:
+				_emit("teleport_interrupt", {
+					"team": entity.team, "hero": entity.id,
+					"x": float(break_pos.x), "y": float(break_pos.y),
+				})
+			return false
 	if bool(input.get("teleport", false)) and not bool(entity.get("teleporting", false)):
 		if Teleport.start(entity):
 			# 传送优先。这里静默取消回城而不发打断事件：客户端会看到 kind 从
@@ -696,6 +801,8 @@ func _update_hero_timers(dt: float) -> void:
 		if bool(entity.get("debug_infinite_mana", false)):
 			entity.mp = float(entity.max_mp)
 		entity.cc_immune_timer = maxf(0.0, float(entity.get("cc_immune_timer", 0.0)) - dt)
+		# 硬控计时（项 4）：统一递减，避免"四个字段各写一遍、漏掉一个就永久眩晕"。
+		ControlRules.tick(entity, dt)
 		entity.attack_cd = maxf(0.0, float(entity.attack_cd) - dt)
 		entity.shield_timer = maxf(0.0, float(entity.shield_timer) - dt)
 		if float(entity.shield_timer) <= 0.0:
@@ -768,24 +875,32 @@ func _apply_human_inputs(dt: float) -> void:
 			move = move.normalized()
 		if _tick_channels(entity, input, dt):
 			continue
-		if move.length() > 0.01:
+		# 硬控门控（项 4）：行动矩阵的真身在 ControlRules，这里只问"能不能"。
+		# 两条**刻意的例外**，写在这里免得后来者以为是漏判：
+		#   1. 转向不受限制 —— 定身/眩晕时仍可调整朝向。连朝向都锁死，
+		#      手感会变成"游戏卡住了"而不是"我被控住了"。
+		#   2. 召唤师技能不受沉默/眩晕限制 —— 否则"净化"永远解不开自己身上的控，
+		#      这张牌就废了（它的全部意义就是在被控时使用）。
+		var can_move := ControlRules.can_move(entity)
+		var can_cast := ControlRules.can_cast(entity)
+		if move.length() > 0.01 and can_move:
 			# 移动时朝向移动方向：点击移动经常是「往身后走」，若还朝着准星就成了倒着走。
 			# 站住时才看向准星；技能与普攻随后各自把 facing 改回目标方向，瞄准手感不变。
 			entity.facing = move.normalized()
 			_move_hero(entity, move, dt)
 		elif aim_vector.length() > 0.6:
 			entity.facing = aim_vector.normalized()
-		if bool(input.get("skill_q", false)):
+		if can_cast and bool(input.get("skill_q", false)):
 			_cast_q(entity, aim)
-		if bool(input.get("skill_w", false)):
+		if can_cast and bool(input.get("skill_w", false)):
 			SkillSystem.cast_skill(entity, "w", aim, self)
-		if bool(input.get("skill_e", false)):
+		if can_cast and bool(input.get("skill_e", false)):
 			_cast_e(entity, aim)
-		if bool(input.get("skill_r", false)):
+		if can_cast and bool(input.get("skill_r", false)):
 			SkillSystem.cast_skill(entity, "r", aim, self)
 		if bool(input.get("summoner", false)):
 			SkillSystem.cast_summoner_spell(entity, str(entity.get("summoner_spell", "flash")), aim, self)
-		if bool(input.get("attack", false)):
+		if bool(input.get("attack", false)) and ControlRules.can_attack(entity):
 			_try_attack(entity)
 
 func _update_bots(dt: float) -> void:
@@ -797,25 +912,40 @@ func _update_bots(dt: float) -> void:
 		var recommended := ItemShop.get_quick_buy_recommendation(entity, ItemShop.build_order_for(str(entity.hero_type)))
 		if recommended != "":
 			ItemShop.buy_item(entity, recommended)
+		# 硬控必须对 bot 生效（4.2）：AI 读不到控就等于白控 ——
+		# 玩家把控制交出去，bot 照样走位放技能，那这套硬控只是"给玩家看的动画"。
+		# 购买不受门控（和人类路径一致：买装备不是身体动作）。
+		var can_move := ControlRules.can_move(entity)
+		var can_cast := ControlRules.can_cast(entity)
+		var can_attack := ControlRules.can_attack(entity)
+		var controlled := not can_move and not can_cast and not can_attack
+		# 刻意**不**在这里 continue：召唤师技能不受门控（净化必须能在被控时用），
+		# 若提前退出，被控的 bot 永远交不出净化 —— 那正好把这张牌废掉。
+		# 其余动作各自按 can_move / can_cast / can_attack 门控，行为等价且无死角。
 		var target: Dictionary = _nearest_enemy(entity, 9.0)
 		if target.is_empty():
-			_advance_along_path(entity, dt)
+			if can_move:
+				_advance_along_path(entity, dt)
+			if controlled:
+				_use_bot_summoner(entity, {}, 999.0)
 			continue
 		var to_target: Vector2 = target.pos - entity.pos
 		if to_target.length() > 0.1:
 			entity.facing = to_target.normalized()
 		var distance := to_target.length()
-		if float(entity.skill_q_cd) <= 0.0 and distance <= 9.0:
-			_cast_q(entity, target.pos)
-		var hero_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type))
-		var w_def: Dictionary = hero_def.w
-		if float(entity.skill_w_cd) <= 0.0 and distance <= float(w_def.range) + 1.0 and float(entity.mp) >= float(w_def.cost):
-			SkillSystem.cast_skill(entity, "w", target.pos, self)
-		var r_def: Dictionary = hero_def.r
-		if float(entity.skill_r_cd) <= 0.0 and distance <= float(r_def.range) + float(target.get("radius", 0.0)) and float(entity.mp) >= float(r_def.cost):
-			SkillSystem.cast_skill(entity, "r", target.pos, self)
+		if can_cast:
+			if float(entity.skill_q_cd) <= 0.0 and distance <= 9.0:
+				_cast_q(entity, target.pos)
+			var hero_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type))
+			var w_def: Dictionary = hero_def.w
+			if float(entity.skill_w_cd) <= 0.0 and distance <= float(w_def.range) + 1.0 and float(entity.mp) >= float(w_def.cost):
+				SkillSystem.cast_skill(entity, "w", target.pos, self)
+			var r_def: Dictionary = hero_def.r
+			if float(entity.skill_r_cd) <= 0.0 and distance <= float(r_def.range) + float(target.get("radius", 0.0)) and float(entity.mp) >= float(r_def.cost):
+				SkillSystem.cast_skill(entity, "r", target.pos, self)
+		# 召唤师技能不被沉默/眩晕门控：净化必须在被控时能用（同人类路径的理由）。
 		_use_bot_summoner(entity, target, distance)
-		if float(entity.skill_e_cd) <= 0.0:
+		if can_cast and float(entity.skill_e_cd) <= 0.0:
 			var e_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type)).e
 			var kind := str(e_def.kind)
 			if kind == "shield" and float(entity.hp) < float(entity.max_hp) * 0.55:
@@ -826,8 +956,10 @@ func _update_bots(dt: float) -> void:
 				_cast_e(entity, target.pos)
 		var reach: float = float(entity.attack_range) + float(target.get("radius", 0.0))
 		if to_target.length() > reach:
-			_move_hero(entity, to_target.normalized(), dt)
-		else:
+			# 定身/眩晕时不能靠近，但仍允许放技能（上面已按 can_cast 判过）。
+			if can_move:
+				_move_hero(entity, to_target.normalized(), dt)
+		elif can_attack:
 			_try_attack(entity)
 
 func _use_bot_summoner(hero: Dictionary, target: Dictionary, distance: float) -> void:
@@ -840,13 +972,20 @@ func _use_bot_summoner(hero: Dictionary, target: Dictionary, distance: float) ->
 			if hp_ratio < 0.55:
 				SkillSystem.cast_summoner_spell(hero, spell, hero.pos, self)
 		"execute":
+			if target.is_empty():
+				return
 			var target_ratio := float(target.get("hp", 0.0)) / maxf(1.0, float(target.get("max_hp", 1.0)))
 			if distance <= 4.0 and target_ratio < 0.4:
 				SkillSystem.cast_summoner_spell(hero, spell, target.pos, self)
 		"cleanse":
-			if float(hero.slow_timer) > 0.0:
+			# 项 4：净化要在**任何控制**下都能交，不只是减速。
+			# 原来只判 slow_timer，于是被眩晕/沉默时 bot 挨打也不解控 ——
+			# 净化这张牌在 AI 手里等于不存在。
+			if ControlRules.dominant_status(hero) != "" or float(hero.get("slow_timer", 0.0)) > 0.0:
 				SkillSystem.cast_summoner_spell(hero, spell, hero.pos, self)
 		"flash":
+			if target.is_empty():
+				return
 			if hp_ratio < 0.3 and distance < 3.0:
 				SkillSystem.cast_summoner_spell(hero, spell, hero.pos + (hero.pos - target.pos), self)
 
@@ -952,6 +1091,12 @@ func _nearest_enemy(seeker: Dictionary, max_range: float) -> Dictionary:
 	for entity in state.entities:
 		if not entity.alive or entity.team == seeker.team or entity.id == seeker.id:
 			continue
+		# 项 3：投射物是**效果实体**，不是战斗单位，任何索敌都不能把它当目标。
+		# 它有 team/pos/alive，能通过下面所有距离判定；一旦被选为目标，
+		# _damage 会因为拿不到 hp 而刷 "Invalid access to property 'hp'"，
+		# 但小兵的攻击会和投射物互相"拦截"，表现为伤害凭空消失。
+		if str(entity.get("type", "")) == "projectile":
+			continue
 		if entity.type == "hero":
 			var hero_dist: float = seeker.pos.distance_to(entity.pos) - 0.65
 			if hero_dist < best_dist:
@@ -1005,7 +1150,7 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 			if entity.pos.distance_to(target.pos) <= radius:
 				_damage(entity, damage, hero, dtype)
 				if kind == "slow":
-					entity.slow_timer = maxf(float(entity.get("slow_timer", 0.0)), 2.5)
+					ControlRules.apply_slow(entity, 2.5)
 	else:
 		_damage(target, damage, hero, dtype)
 	return true
@@ -1040,7 +1185,7 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 			if entity.type != "hero" and entity.type != "minion" and entity.type != "monster":
 				continue
 			if entity.pos.distance_to(target.pos) <= 3.0:
-				entity.slow_timer = maxf(float(entity.get("slow_timer", 0.0)), 2.5)
+				ControlRules.apply_slow(entity, 2.5)
 				# 项 2：E 的伤害也走等级缩放，与 Q/W/R 同源。
 				_damage(entity, HeroDefs.scaled_damage(hero, "e"), hero, str(skill.get("damage_type", "magic")))
 	hero.mp = float(hero.mp) - float(skill.cost)
@@ -1260,6 +1405,10 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 	_emit("hit", {
 		"target": target.id,
 		"target_type": target.type,
+		# 表现层靠这两个字段找到出手者：野怪/小兵没有独立的 attack 事件，
+		# 不给 source 就只能看到目标掉血、看不到谁打的。
+		"source": int(source.get("id", -1)) if not source.is_empty() else -1,
+		"source_type": str(source.get("type", "")),
 		"x": float(target.pos.x),
 		"y": float(target.pos.y),
 		"amount": remaining,
@@ -1901,6 +2050,14 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["attack_cd"] = float(entity.attack_cd)
 		data["haste_timer"] = float(entity.haste_timer)
 		data["slow_timer"] = float(entity.slow_timer)
+		# 硬控（项 4，链路 3）：客机要靠这些画头顶状态图标。
+		# 同时下发聚合状态码 cc_status，免得客机自己按优先级重算一遍 ——
+		# "哪个控更重"属于规则，双实现必然漂移。空串表示未被控。
+		data["stun_timer"] = float(entity.get("stun_timer", 0.0))
+		data["knockup_timer"] = float(entity.get("knockup_timer", 0.0))
+		data["silence_timer"] = float(entity.get("silence_timer", 0.0))
+		data["root_timer"] = float(entity.get("root_timer", 0.0))
+		data["cc_status"] = ControlRules.dominant_status(entity)
 		data["moving"] = bool(entity.get("moving", false))
 		data["last_killer_name"] = str(entity.get("last_killer_name", ""))
 		data["recalling"] = bool(entity.get("recalling", false))
@@ -1946,6 +2103,20 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["objective_id"] = str(entity.get("objective_id", ""))
 		data["name"] = str(entity.get("name", "野怪"))
 		data["respawn_timer"] = float(entity.get("respawn_timer", 0.0)) if not bool(entity.get("alive", true)) else 0.0
+	elif entity.type == "projectile":
+		# 项 3（链路 3）：客机必须能画出真实弹道，否则就是"血凭空掉"。
+		# 方向拍平成 dir_x/dir_y 两个标量：协议层只接受数值字段做钳制，
+		# 传 Vector2 会在 _sanitize_entity 里被 _number() 吃成 0，弹道全变成横向直线。
+		var dir: Vector2 = entity.get("dir", Vector2.RIGHT)
+		data["dir_x"] = float(dir.x)
+		data["dir_y"] = float(dir.y)
+		data["speed"] = float(entity.get("speed", 0.0))
+		data["lifetime"] = float(entity.get("lifetime", 0.0))
+		data["age"] = float(entity.get("age", 0.0))
+		data["kind"] = str(entity.get("kind", ""))
+		data["slot"] = str(entity.get("slot", ""))
+		data["owner_id"] = int(entity.get("owner_id", 0))
+		data["aoe_radius"] = float(entity.get("aoe_radius", 0.0))
 	return data
 
 func get_last_kill() -> Dictionary:

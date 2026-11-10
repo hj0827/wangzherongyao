@@ -67,6 +67,42 @@ func test_base_is_locked_until_a_high_tower_falls() -> void:
 	high.alive = false
 	check(TowerRules.is_base_vulnerable(base, entities), "任意一路高地塔倒下后基地暴露")
 
+func test_base_exposes_on_any_single_lane_in_a_three_lane_map() -> void:
+	# 这条守的是 5v5 的真实语义，旧测试永远抓不到：
+	# 既有用例都只造一路塔（duel / 单路 fixture），在单路下
+	# "任意一路倒下" 与 "所有路都倒下" 恰好等价，于是实现写成 ALL 也一直绿。
+	# 后果不是"略慢"而是**打不完** —— 实测 5v5 在推掉两路高地后彻底停滞。
+	var base := _base(9, "red")
+	var entities := [base]
+	for lane in ["mid", "top", "bottom"]:
+		entities.append(_tower(10 + entities.size(), "red", lane, "outer"))
+		entities.append(_tower(20 + entities.size(), "red", lane, "inner"))
+		entities.append(_tower(30 + entities.size(), "red", lane, "high"))
+	check(not TowerRules.is_base_vulnerable(base, entities), "三路高地塔全在时基地锁定")
+	# 只倒掉中路高地塔，另两路完好。
+	for e in entities:
+		if str(e.get("type", "")) == "tower" and str(e.get("tier", "")) == "high" and str(e.get("lane", "")) == "mid":
+			e["alive"] = false
+	check(TowerRules.is_base_vulnerable(base, entities),
+		"任意一路高地塔倒下就必须暴露基地（旧实现要求三路全倒，5v5 因此打不完）")
+
+func test_guard_unlocks_on_any_single_lane_too() -> void:
+	# 双子塔解锁与基地暴露必须同一口径。两处曾各自写成 ALL，
+	# 导致 5v5 里双子塔永久免疫、水晶护盾永不破碎。
+	var Crystal = preload("res://sim/map/crystal.gd")
+	var guard := {"id": 90, "type": "guard", "team": "red", "side": "left", "alive": true,
+		"pos": Vector2.ZERO, "radius": 2.0, "hp": 3200.0, "max_hp": 3200.0}
+	var entities := [guard]
+	for lane in ["mid", "top", "bottom"]:
+		entities.append(_tower(100 + entities.size(), "red", lane, "high"))
+	check(not Crystal.is_guard_vulnerable(guard, entities), "三路高地塔全在时双子塔受保护")
+	for e in entities:
+		if str(e.get("type", "")) == "tower" and str(e.get("lane", "")) == "bottom":
+			e["alive"] = false
+	check(Crystal.is_guard_vulnerable(guard, entities),
+		"任意一路高地塔倒下就必须解锁双子塔（旧实现要求三路全倒）")
+
+
 func test_tower_prefers_minions_but_switches_to_diving_hero() -> void:
 	var tower := _tower(10, "blue", "mid", "outer", Vector2.ZERO)
 	var own_hero := {

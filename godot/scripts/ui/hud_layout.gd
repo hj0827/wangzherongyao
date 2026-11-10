@@ -44,6 +44,7 @@ const MODE_W := 512.0
 const MODE_H := 84.0
 const MODE_GAP := 8.0
 const HERO_W := 640.0
+# 152 是状态卡（头像/血蓝/KDA）的实测高度；装备格并进副标题行后仍在这个高度内。
 const HERO_H := 152.0
 const HINT_W := 840.0
 # 两行键位 + 底板内边距。原来 24px 只够一行，第二行会被裁掉。

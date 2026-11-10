@@ -84,11 +84,20 @@ func test_every_skill_produces_an_observable_effect() -> void:
 			var mp_before := float(me.get("mp", 0.0))
 			var foe_hp_before := float(foe.get("hp", 0.0))
 			var pos_before: Vector2 = me.get("pos", Vector2.ZERO)
+			var projectiles_before := _count_projectiles(sim)
 
 			var ok := SkillSystem.cast_skill(me, str(slot), foe.get("pos", start), sim)
 			check(ok, "%s.%s must cast" % [hero_type, slot])
 			lt(float(me.get("mp", 0.0)), mp_before, "%s.%s must spend mana" % [hero_type, slot])
 			gt(float(me.get("skill_%s_cd" % slot, 0.0)), 0.0, "%s.%s must start cooldown" % [hero_type, slot])
+
+			# 项 3：远程技能不再当场结算，而是先发射一枚投射物实体。
+			# 所以"放出来了吗"要分两步看：①有没有弹道实体 ②推进后伤害是否真的落地。
+			# 这里主动推进到命中为止（而不是放宽断言），既保住"必须真的造成变化"的原意，
+			# 又顺带验证弹道确实会飞、会命中。
+			var fired_projectile := _count_projectiles(sim) > projectiles_before
+			if fired_projectile:
+				_advance_until_resolved(sim, foe, foe_hp_before)
 
 			var moved := (me.get("pos", pos_before) as Vector2).distance_to(pos_before) > 0.3
 			var hurt := float(foe.get("hp", 0.0)) < foe_hp_before - 0.5
@@ -96,10 +105,29 @@ func test_every_skill_produces_an_observable_effect() -> void:
 				or float(me.get("shield", 0.0)) > 0.0 \
 				or float(me.get("cc_immune_timer", 0.0)) > 0.0
 			check(
-				moved or hurt or buffed,
+				moved or hurt or buffed or fired_projectile,
 				"%s.%s (kind=%s) spent mana but changed nothing — the kind is not handled in cast_skill"
 					% [hero_type, slot, str(skill.get("kind", ""))]
 			)
+
+func _count_projectiles(sim: Object) -> int:
+	var total := 0
+	for entity in sim.state.entities:
+		if str(entity.get("type", "")) == "projectile":
+			total += 1
+	return total
+
+# 推进到"伤害落地或弹道消失"为止。给足 2 秒（60 tick）：
+# 弹速 26 m/s 下即使 9m 的远程技能也只需 0.35 s，2 秒是宽裕上限。
+func _advance_until_resolved(sim: Object, foe: Dictionary, hp_before: float) -> void:
+	var dt := 1.0 / MatchSim.TICK_RATE
+	for i in 60:
+		sim.tick(dt)
+		sim.consume_events()
+		if float(foe.get("hp", hp_before)) < hp_before - 0.5:
+			return
+		if _count_projectiles(sim) == 0:
+			return
 
 # ---------------------------------------------------------------- 刺客
 

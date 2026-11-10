@@ -26,14 +26,22 @@ const COMPOSITIONS := [
 ]
 
 var _samples := 8
+# 调参时要能快速迭代：--limit= 缩短单局上限，--mode= 只跑一种模式，
+# --comps= 限制阵容数。默认值仍是"完整抽样"，加参数只是为了让中间过程跑得快。
+var _limit := MATCH_LIMIT
+var _only_mode := ""
+var _max_comps := COMPOSITIONS.size()
 
 
 func _init() -> void:
 	_parse_args()
-	print("== pacing report: samples=%d compositions=%d limit=%.0fs ==" % [_samples, COMPOSITIONS.size(), MATCH_LIMIT])
+	print("== pacing report: samples=%d compositions=%d limit=%.0fs mode=%s ==" % [
+		_samples, _max_comps, _limit, _only_mode if _only_mode != "" else "both"])
 	_field_report()
-	_mode_report("duel")
-	_mode_report("team")
+	if _only_mode == "" or _only_mode == "duel":
+		_mode_report("duel")
+	if _only_mode == "" or _only_mode == "team":
+		_mode_report("team")
 	_event_overflow_report()
 	quit()
 
@@ -43,6 +51,12 @@ func _parse_args() -> void:
 		var text := str(arg)
 		if text.begins_with("--samples="):
 			_samples = maxi(1, int(text.split("=")[1]))
+		elif text.begins_with("--limit="):
+			_limit = maxf(60.0, float(text.split("=")[1]))
+		elif text.begins_with("--mode="):
+			_only_mode = str(text.split("=")[1])
+		elif text.begins_with("--comps="):
+			_max_comps = clampi(int(text.split("=")[1]), 1, COMPOSITIONS.size())
 
 
 func _field_report() -> void:
@@ -64,7 +78,7 @@ func _mode_report(mode: String) -> void:
 	var total := 0
 	var blue_wins := 0
 	var levels: Array[float] = []
-	for comp_index in COMPOSITIONS.size():
+	for comp_index in _max_comps:
 		for sample in _samples:
 			var cfg := _config_for(mode, comp_index, sample)
 			var result := _run_one(cfg)
@@ -80,14 +94,14 @@ func _mode_report(mode: String) -> void:
 			if float(result["first_blood"]) > 0.0:
 				first_bloods.append(float(result["first_blood"]))
 			levels.append(float(result["median_level"]))
-	print("=== mode=%s (n=%d, compositions=%d x seeds=%d) ===" % [mode, total, COMPOSITIONS.size(), _samples])
+	print("=== mode=%s (n=%d, compositions=%d x seeds=%d) ===" % [mode, total, _max_comps, _samples])
 	if durations.is_empty():
-		print("  decided=0  undecided=%d  <-- 所有样本都没在 %.0fs 内结束" % [undecided, MATCH_LIMIT])
+		print("  decided=0  undecided=%d  <-- 所有样本都没在 %.0fs 内结束" % [undecided, _limit])
 	else:
 		durations.sort()
 		var decided := durations.size()
 		print("  decided=%d/%d (%.0f%%)  undecided=%d  timeout_at=%.0fs" % [
-			decided, total, 100.0 * float(decided) / float(total), undecided, MATCH_LIMIT])
+			decided, total, 100.0 * float(decided) / float(total), undecided, _limit])
 		print("  duration  min=%s  median=%s  p90=%s  max=%s" % [
 			_fmt(durations[0]), _fmt(_pct(durations, 0.5)), _fmt(_pct(durations, 0.9)), _fmt(durations[decided - 1])])
 		# 目标带 8–12 分钟：命中率是最该看的一个数（验收表 6.2）。
@@ -140,7 +154,7 @@ func _run_one(match_config: Dictionary) -> Dictionary:
 	var dt := 1.0 / MatchSim.TICK_RATE
 	var first_tower := -1.0
 	var first_blood := -1.0
-	while not sim.ended and sim.state.time < MATCH_LIMIT:
+	while not sim.ended and sim.state.time < _limit:
 		sim.tick(dt)
 		for ev in sim.consume_events():
 			var t := str(ev.get("type", ""))
@@ -182,7 +196,7 @@ func _event_overflow_report() -> void:
 	var max_seen := 0
 	var pending := 0
 	var flush_timer := 0.0
-	while not sim.ended and sim.state.time < MATCH_LIMIT:
+	while not sim.ended and sim.state.time < _limit:
 		sim.tick(dt)
 		pending += sim.consume_events().size()
 		flush_timer += dt

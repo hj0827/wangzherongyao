@@ -5,13 +5,32 @@ extends RefCounted
 
 const MAX_LOCK_DISTANCE := 14.0
 
+## 什么算"可被选中的战斗单位"。
+## 项 3 引入投射物实体后，这个判定必须有唯一真身：
+## 投射物同样带 team / pos / alive / radius，能通过下面所有距离与阵营检查，
+## 一旦被选成目标，_damage 会因为拿不到 hp 而刷 "Invalid access to property 'hp'"，
+## 并且普攻会"打在弹道上"，表现为伤害凭空消失。
+## 放在这里而不是各个调用点：新增索敌路径会自动继承，不会再漏。
+static func is_combat_unit(entity: Dictionary) -> bool:
+	if not bool(entity.get("alive", true)):
+		return false
+	# 排除投影物是这条守卫的**唯一目的**（项 3）。
+	# 其余类型一律放行：普攻/推塔键本来就要能选中防御塔与基地/双子塔，
+	# 早期版本只白名单 hero/minion/monster，直接把"推塔键"废掉了（有测试为证）。
+	if str(entity.get("type", "")) == "projectile":
+		return false
+	# 防御性：_damage 硬依赖 hp 键。当前数据下所有可选中单位都带 hp
+	# （probe_units 实测 hero/minion/monster/tower/base/guard 全部有），
+	# 所以这一行不可达、也不为它写断言 —— 保留是为了未来新类型不会刷一屏脚本错误。
+	return entity.has("hp")
+
 static func is_lock_valid(hero: Dictionary, locked_id: int, entities: Array) -> bool:
 	if locked_id <= 0:
 		return false
 	var hero_pos: Vector2 = hero.get("pos", Vector2.ZERO)
 	for e in entities:
 		if int(e.get("id", -1)) == locked_id:
-			if not bool(e.get("alive", false)):
+			if not is_combat_unit(e):
 				return false
 			var pos: Vector2 = e.get("pos", Vector2.ZERO)
 			if hero_pos.distance_to(pos) > MAX_LOCK_DISTANCE:
@@ -40,7 +59,7 @@ static func resolve_attack_target(
 		var best_wheel: Dictionary = {}
 		var max_dot := -2.0
 		for e in entities:
-			if not bool(e.get("alive", false)):
+			if not is_combat_unit(e):
 				continue
 			if str(e.get("team", "")) == hero_team:
 				continue
@@ -59,7 +78,7 @@ static func resolve_attack_target(
 
 	var candidates: Array = []
 	for e in entities:
-		if not bool(e.get("alive", false)):
+		if not is_combat_unit(e):
 			continue
 		if str(e.get("team", "")) == hero_team:
 			continue

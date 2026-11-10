@@ -26,18 +26,27 @@ static func is_tower_vulnerable(tower: Dictionary, entities: Array) -> bool:
 		return not bool(entity.get("alive", true))
 	return true
 
-static func is_base_vulnerable(base: Dictionary, entities: Array) -> bool:
-	var team := str(base.get("team", ""))
-	var found := false
+# 基地/双子塔是否解锁：**任意一路**高地塔倒下即可。
+#
+# 这里曾经写成「所有高地塔都倒才暴露」，与注释、测试名
+# （test_base_is_locked_until_a_high_tower_falls）、以及王者峡谷的实际规则都不符。
+# 后果不是「略慢」而是**打不完**：3 路地图要求 9 座塔全拆，实测 5v5 在 8 分钟推掉
+# 两路高地后就彻底停滞（塔血 12 分钟不动），对局拖到 20 分钟以上仍无法结束。
+#
+# 为什么旧测试没抓到：所有相关用例都只造一路塔（duel/单路 fixture），
+# ANY 与 ALL 在单路下恰好等价。现在由 test_map_towers 的三路用例专门守住。
+static func has_lost_any_high_tower(team: String, entities: Array) -> bool:
 	for entity in entities:
 		if str(entity.get("type", "")) != "tower":
 			continue
 		if str(entity.get("team", "")) != team or str(entity.get("tier", "")) != "high":
 			continue
-		found = true
-		if bool(entity.get("alive", true)):
-			return false
-	return found
+		if not bool(entity.get("alive", true)):
+			return true
+	return false
+
+static func is_base_vulnerable(base: Dictionary, entities: Array) -> bool:
+	return has_lost_any_high_tower(str(base.get("team", "")), entities)
 
 static func damage_scale(structure: Dictionary, time: float) -> float:
 	if str(structure.get("type", "")) == "tower" and time < EARLY_PROTECTION_TIME:

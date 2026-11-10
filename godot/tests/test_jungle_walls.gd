@@ -248,6 +248,42 @@ func test_buff_camps_are_enclosed_by_rings_not_parallel_slabs() -> void:
 				break
 		eq(registered, points.size() - 1, "围栏的每一段都必须进 WALLS：%s" % str(camp.id))
 
+func test_buff_ring_opening_faces_own_base_not_enemy() -> void:
+	# 2026-11-10 玩家反馈：红蓝 buff 围墙的开口原来朝河道/敌方一侧，
+	# 等于自家 buff 窝的门开在敌境方向。镜子规律：开口中心 θ 经 mirror()
+	# 落在 −θ−90，所以四座营地逐座校验「开口中心 → 己方基地」的夹角。
+	# 阈值取 40°：当前数据最偏的一座只差 6°，40° 给将来挪营地留足余量，
+	# 同时远小于「朝敌方」需要的 >90°。
+	for camp in MapLayout.CAMPS:
+		var buff := str(camp.get("buff", ""))
+		if buff == "":
+			continue
+		var camp_id := str(camp.id)
+		var team := "blue" if camp_id.ends_with("_blue_side") else "red"
+		var own_base: Vector2 = MapData.BLUE_BASE if team == "blue" else MapData.RED_BASE
+		var enemy_base: Vector2 = MapData.RED_BASE if team == "blue" else MapData.BLUE_BASE
+		var ring: Dictionary = MapLayout.camp_ring(camp_id)
+		check(not ring.is_empty(), "buff 营地必须有围栏：" + camp_id)
+		if ring.is_empty():
+			continue
+		var points: Array = ring.points
+		var center: Vector2 = camp.pos
+		var gap_dir := ((points[0] as Vector2) + (points[points.size() - 1] as Vector2)) * 0.5 - center
+		gt(gap_dir.length(), 0.01, "开口端点重合，没有进出方向：%s" % camp_id)
+		if gap_dir.length() < 0.01:
+			continue
+		gap_dir = gap_dir.normalized()
+		var own_dir := (own_base - center).normalized()
+		var enemy_dir := (enemy_base - center).normalized()
+		gt(
+			gap_dir.dot(own_dir),
+			cos(deg_to_rad(40.0)),
+			"%s 的围栏开口要朝己方基地方向（当前夹角 %.1f°）" % [
+				camp_id, rad_to_deg(acos(clampf(gap_dir.dot(own_dir), -1.0, 1.0))),
+			]
+		)
+		lt(gap_dir.dot(enemy_dir), 0.0, "%s 的围栏开口不能朝敌方基地方向" % camp_id)
+
 func test_every_ring_segment_has_a_mirror_twin() -> void:
 	# 围栏的红方那两座是从蓝方镜像出来的，两边必须逐段对上。
 	# 单独写一条：test_map_layout 只校验 a 点，这里把两端一起校验。

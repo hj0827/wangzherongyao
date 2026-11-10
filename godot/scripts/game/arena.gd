@@ -27,6 +27,7 @@ const BushFeedback = preload("res://scripts/game/bush_feedback.gd")
 const ChannelFeedback = preload("res://scripts/game/channel_feedback.gd")
 const ChannelFx = preload("res://scripts/game/channel_fx.gd")
 const SkillFx = preload("res://scripts/game/skill_fx.gd")
+const FxTextures = preload("res://scripts/game/fx_textures.gd")
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const AudioDirector = preload("res://scripts/game/audio_director.gd")
 const HitStopManager = preload("res://scripts/view/hit_stop_manager.gd")
@@ -2698,6 +2699,66 @@ func _build_map_features() -> void:
 		# 站在草地上、不压阵眼，也不立在路面正中挡小兵。
 		_add_map_totem(pad.pos + Vector2(pad.get("totem", Vector2(0.0, -2.8))), 2.6, pad_color)
 
+	# 墙脚草：让石壁和草地之间有一圈植被过渡，而不是一条灰色石头直接插在绿地上。
+	_build_wall_tufts()
+
+# 墙脚草簇：一个 MultiMesh 批次。只铺在墙的半厚之外，不参与碰撞；
+# 野区墙两侧都铺，边界墙只铺朝可玩区那一侧（外侧贴着地形抬升，铺了也看不见）。
+func _build_wall_tufts() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77821
+	var points: Array[Vector2] = []
+	for wall in MapView.map_marks().walls:
+		_append_wall_tuft_points(wall.a, wall.b, points, rng, false)
+	for wall in MapLayout.boundary_walls():
+		_append_wall_tuft_points(wall.a, wall.b, points, rng, true)
+	if points.is_empty():
+		return
+	var mesh := GrassField.build_mesh()
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = points.size()
+	for i in points.size():
+		var point: Vector2 = points[i]
+		var scale := rng.randf_range(0.62, 1.15)
+		var basis := Basis(Vector3.UP, rng.randf_range(0.0, TAU)).scaled(Vector3(scale, scale * rng.randf_range(0.8, 1.2), scale))
+		multimesh.set_instance_transform(i, Transform3D(basis, Vector3(point.x, _terrain_height(point.x, point.y) - 0.02, point.y)))
+	var node := MultiMeshInstance3D.new()
+	# 名字不能以 wall_ 开头：test_wall_look 把所有 wall_* 当作石构件统计材质，
+	# 草簇混进去会误报"石壁有两份材质"。wallfoot_ 不属于石构件前缀。
+	node.name = "wallfoot_grass"
+	node.multimesh = multimesh
+	node.set_meta("tuft_points", points.duplicate())
+	node.material_override = GrassField.build_material()
+	node.custom_aabb = AABB(Vector3(-62.0, -2.0, -62.0), Vector3(124.0, 6.0, 124.0))
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(node)
+
+func _append_wall_tuft_points(a: Vector2, b: Vector2, out: Array[Vector2], rng: RandomNumberGenerator, boundary: bool) -> void:
+	var length := a.distance_to(b)
+	if length < 1.2:
+		return
+	var dir := (b - a) / length
+	var perp := Vector2(-dir.y, dir.x)
+	var count := maxi(2, int(round(length / (3.2 if boundary else 2.4))))
+	var thickness := MapLayout.BOUNDARY_THICK if boundary else MapLayout.WALL_THICKNESS
+	var center := (a + b) * 0.5
+	# 边界墙只铺朝可玩区的一侧；野区墙两侧都铺。判定口径与 _build_boundary_walls 同源。
+	var sides: Array[float] = []
+	if boundary:
+		sides = [1.0 if center.dot(perp) < 0.0 else -1.0]
+	else:
+		sides = [-1.0, 1.0]
+	for i in count:
+		var t := (float(i) + 0.5) / float(count)
+		var p := a.lerp(b, t)
+		for side in sides:
+			if rng.randf() < 0.16:
+				continue
+			var offset := thickness * 0.5 + rng.randf_range(0.18, 0.85)
+			out.append(p + perp * side * offset + dir * rng.randf_range(-0.55, 0.55))
+
 # 岩脊单块：fit_scene 先把高度对齐，再在水平方向拉伸成更宽的岩块。
 # 不能直接给 fit_scene 传 max_width：Rock.glb 本身高瘦，按宽度封顶会把它压矮。
 # meta 里带 wall_id / side / kind / along，测试靠它分组、量间距、找岩脊；
@@ -3373,7 +3434,15 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 			_structure_views[entity_id] = record
 		var alive := bool(entity.get("alive", false))
 		var root: Node3D = record.get("root")
-		root.visible = alive
+		# 死掉的建筑不能整座隐藏：塔位留着残骸，玩家才知道这里曾经有塔。
+		if root:
+			root.visible = true
+		for node in record.get("destroy_hide", []):
+			if node:
+				node.visible = alive
+		var rubble := record.get("rubble") as Node3D
+		if rubble:
+			rubble.visible = not alive
 		if not alive:
 			continue
 		var spin: Node3D = record.get("spin")
@@ -3574,6 +3643,8 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	# 英雄走近时要让路的部件，见 scripts/game/occlusion_fade.gd。
 	# 只收「立体、挡人」的那几件；贴地圆盘 dais 故意不收。
 	var crystal_fade_parts: Array = []
+	# 建筑死亡时要隐藏的活体部件；残骸单独建，死亡时显示。
+	var destroy_hide: Array = []
 	if entity_type == "base":
 		var stone := StandardMaterial3D.new()
 		stone.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
@@ -3671,6 +3742,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		light.position = Vector3(0, 4.0, 0)
 		light.shadow_enabled = false
 		root.add_child(light)
+		destroy_hide.append(light)
 		var beam := MeshInstance3D.new()
 		var beam_mesh := CylinderMesh.new()
 		beam_mesh.top_radius = 0.5
@@ -3690,6 +3762,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		beam.position = Vector3(0, 13.0, 0)
 		beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		root.add_child(beam)
+		destroy_hide.append(beam)
 		# 水晶护盾：双塔存活且基地已暴露时罩住整座水晶，破碎后直接消失。
 		var bubble := MeshInstance3D.new()
 		var bubble_mesh := SphereMesh.new()
@@ -3712,6 +3785,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		bubble.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		root.add_child(bubble)
 		crystal_shield = bubble
+		destroy_hide.append(bubble)
 	else:
 		# 参考图里的塔：米黄石雕裙摆 + 收分塔柱 + 笼状塔冠 + 发光核心 + 塔脚光池。
 		# 石构件由 TowerVisual 一次拼好（一个网格），光效拆成独立节点方便每帧调色。
@@ -3823,7 +3897,14 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	range_band.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	range_band.visible = false
 	root.add_child(range_band)
+	# 残骸：建筑死亡后保留在战场上，不再让整座塔凭空消失。
+	var rubble := _build_structure_rubble(entity_type, team_color, visual_scale, int(entity.get("id", 0)))
+	rubble.visible = false
+	root.add_child(rubble)
 	var fill := _add_structure_bar(root, bar_height, bar_width, team_color)
+	for node in [model, ring, shield, range_ring, range_band, spin_node, glow_node, crystal_shield, fill[0].get_parent()]:
+		if node:
+			destroy_hide.append(node)
 	return {
 		"root": root,
 		"model": model,
@@ -3841,10 +3922,112 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		"range_band_mat": band_mat,
 		"core": core_node,
 		"glow": glow_node,
+		"rubble": rubble,
+		"destroy_hide": destroy_hide,
 		"scale": visual_scale,
 		"tier": tier,
 		"team_color": team_color,
 	}
+
+# 建筑残骸：塔毁后留一圈碎石 + 断柱 + 阵营色晶屑；主堡毁后留更大的碎晶台。
+# 纯表现、不参与碰撞；建视图时一次性生成，死亡时只切 visible。
+func _build_structure_rubble(entity_type: String, team_color: Color, visual_scale: float, seed_value: int) -> Node3D:
+	var root := Node3D.new()
+	root.name = "Rubble"
+	root.set_meta("rubble_kind", entity_type)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 6113 + seed_value * 97
+	var stone := StandardMaterial3D.new()
+	stone.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
+	stone.albedo_color = Color(0.42, 0.40, 0.37)
+	stone.roughness = 1.0
+	stone.uv1_scale = Vector3(2.0, 2.0, 2.0)
+	var is_base := entity_type == "base"
+	var spread := (4.2 if is_base else 1.55) * visual_scale
+	var pieces := 12 if is_base else 8
+	# 碎石走 MultiMesh：18 座塔全毁时，逐块 MeshInstance 会多出两百多个 draw call。
+	var debris_mesh := BoxMesh.new()
+	debris_mesh.size = Vector3.ONE
+	var debris := MultiMesh.new()
+	debris.transform_format = MultiMesh.TRANSFORM_3D
+	debris.mesh = debris_mesh
+	debris.instance_count = pieces
+	for i in pieces:
+		var angle := TAU * float(i) / float(pieces) + rng.randf_range(-0.28, 0.28)
+		var radius := rng.randf_range(0.35, spread)
+		var size := Vector3(rng.randf_range(0.32, 0.78), rng.randf_range(0.12, 0.42), rng.randf_range(0.32, 0.78))
+		var basis := Basis(Vector3.UP, rng.randf_range(0.0, TAU)) \
+			.rotated(Vector3.RIGHT, rng.randf_range(-0.35, 0.35)) \
+			.rotated(Vector3.FORWARD, rng.randf_range(-0.35, 0.35)) \
+			.scaled(size)
+		debris.set_instance_transform(i, Transform3D(basis, Vector3(cos(angle) * radius, size.y * 0.5, sin(angle) * radius)))
+	var debris_node := MultiMeshInstance3D.new()
+	debris_node.multimesh = debris
+	debris_node.material_override = stone
+	debris_node.custom_aabb = AABB(Vector3(-spread, 0.0, -spread), Vector3(spread * 2.0, 2.0, spread * 2.0))
+	debris_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(debris_node)
+	var stump := MeshInstance3D.new()
+	var stump_mesh := CylinderMesh.new()
+	stump_mesh.top_radius = 0.42 if is_base else 0.30
+	stump_mesh.bottom_radius = 0.62 if is_base else 0.46
+	stump_mesh.height = 0.55 if is_base else 0.42
+	stump_mesh.radial_segments = 8
+	stump.mesh = stump_mesh
+	stump.material_override = stone
+	stump.position.y = stump_mesh.height * 0.5
+	stump.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(stump)
+	var shard_mat := StandardMaterial3D.new()
+	shard_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.75)
+	shard_mat.emission_enabled = true
+	shard_mat.emission = team_color
+	shard_mat.emission_energy_multiplier = 1.1
+	shard_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var shard_count := 5 if is_base else 3
+	var shard_mesh := CylinderMesh.new()
+	shard_mesh.top_radius = 0.02
+	shard_mesh.bottom_radius = 0.14 if is_base else 0.10
+	shard_mesh.height = 1.0
+	shard_mesh.radial_segments = 4
+	var shards := MultiMesh.new()
+	shards.transform_format = MultiMesh.TRANSFORM_3D
+	shards.mesh = shard_mesh
+	shards.instance_count = shard_count
+	for i in shard_count:
+		var angle := TAU * float(i) / float(shard_count) + 0.4
+		var shard_height := rng.randf_range(0.45, 0.95) if is_base else rng.randf_range(0.28, 0.55)
+		var basis := Basis(Vector3.UP, rng.randf_range(0.0, TAU)) \
+			.rotated(Vector3.RIGHT, rng.randf_range(-0.4, 0.4)) \
+			.rotated(Vector3.FORWARD, rng.randf_range(-0.4, 0.4)) \
+			.scaled(Vector3(1.0, shard_height, 1.0))
+		shards.set_instance_transform(i, Transform3D(basis, Vector3(cos(angle) * spread * 0.35, shard_height * 0.5, sin(angle) * spread * 0.35)))
+	var shard_node := MultiMeshInstance3D.new()
+	shard_node.multimesh = shards
+	shard_node.material_override = shard_mat
+	shard_node.custom_aabb = AABB(Vector3(-spread, 0.0, -spread), Vector3(spread * 2.0, 2.0, spread * 2.0))
+	shard_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(shard_node)
+	var glow_ring := MeshInstance3D.new()
+	var glow_torus := TorusMesh.new()
+	glow_torus.inner_radius = spread * 0.72
+	glow_torus.outer_radius = spread * 0.80
+	glow_torus.rings = 40
+	glow_torus.ring_segments = 5
+	glow_ring.mesh = glow_torus
+	var glow_mat := StandardMaterial3D.new()
+	glow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	glow_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	glow_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.20)
+	glow_mat.emission_enabled = true
+	glow_mat.emission = team_color
+	glow_mat.emission_energy_multiplier = 0.6
+	glow_ring.material_override = glow_mat
+	glow_ring.position.y = 0.06
+	glow_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(glow_ring)
+	return root
 
 func _add_structure_bar(root: Node3D, height: float, width: float, color: Color) -> Array:
 	var holder := Node3D.new()
@@ -3884,6 +4067,12 @@ func _process_events(events: Array) -> void:
 				hud.announce(str(banner.get("text", "")), banner_color, float(banner.get("duration", 1.6)))
 			hud.add_feed(str(banner.get("feed", "")), banner_color)
 		match str(event.get("type", "")):
+			"projectile_spawned":
+				# 项 3：弹道是**真实飞行的实体**，不是施法瞬间补的一段特效。
+				# 这里只负责把"发射了"变成画面上的一个弹丸；命中时另收 projectile_hit。
+				_handle_projectile_spawned(event)
+			"projectile_hit":
+				_handle_projectile_hit(event)
 			"attack":
 				_handle_hero_attack(event)
 			"hit":
@@ -4148,10 +4337,19 @@ func _handle_hit_event(event: Dictionary) -> void:
 	var target_type := str(event.get("target_type", ""))
 	var color := Color(1.0, 0.92, 0.72) if amount >= 150.0 else Color(0.95, 0.96, 1.0)
 	_spawn_damage_number(pos + Vector3(0, 1.7 if target_type == "hero" else 1.0, 0), amount, color)
+	# 受击反馈对所有单位生效：英雄/小兵/野怪被命中时都要缩身 + 闪白，
+	# 否则打野和清兵只剩飘字，模型毫无反应。
+	var view: UnitVisual = _views.get(target_id)
+	if view:
+		view.play_hit()
+	# 出手者反馈：野怪/小兵没有独立的 attack 事件，用 hit 的来源 id 补一次前倾。
+	var source_id := int(event.get("source", -1))
+	var source_type := str(event.get("source_type", ""))
+	if (source_type == "monster" or source_type == "minion") and source_id >= 0:
+		var attacker: UnitVisual = _views.get(source_id)
+		if attacker:
+			attacker.play_attack_reaction()
 	if target_type == "hero":
-		var view: UnitVisual = _views.get(target_id)
-		if view:
-			view.play_hit()
 		_spawn_particles(pos + Vector3(0, 1.0, 0), Color(1.0, 0.72, 0.4), 10, 3.0)
 		if target_id == _local_entity_id:
 			_camera_shake = maxf(_camera_shake, 0.12)
@@ -4255,6 +4453,7 @@ func _init_vfx_pools() -> void:
 		material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 		material.vertex_color_use_as_albedo = true
+		material.albedo_texture = FxTextures.soft_glow()
 		quad.material = material
 		p.draw_pass_1 = quad
 		p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -4461,6 +4660,37 @@ func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, si
 		_hit_particles_active.erase(p)
 		_hit_particles_pool.append(p)
 	)
+
+## 项 3：投射物发射的表现。
+## 关键点是"画面上弹丸的飞行时间必须等于 sim 的飞行时间"：
+## sim 里 6m / 26 m/s ≈ 0.23s，若这里随手给 0.22s，近乎一致；
+## 但如果给一个固定 0.5s，玩家看到的命中会明显晚于真实掉血 —— 手感立刻不对。
+## 所以时长由 **距离 / 速度** 算，与 sim 同源，而不是写死一个"看起来差不多"的值。
+func _handle_projectile_spawned(event: Dictionary) -> void:
+	var from := Vector3(float(event.get("x", 0.0)), 0.85, float(event.get("y", 0.0)))
+	var aim := Vector3(float(event.get("aim_x", 0.0)), 0.85, float(event.get("aim_y", 0.0)))
+	var kind := str(event.get("kind", ""))
+	var color := _projectile_color(kind, str(event.get("team", "")))
+	# 速度与 sim 的 DEFAULT_SPEED 对齐；距离用 xz 平面距离（与 sim 的 2D 判定同口径）。
+	var flat_from := Vector2(from.x, from.z)
+	var flat_aim := Vector2(aim.x, aim.z)
+	var travel := flat_from.distance_to(flat_aim)
+	var duration := clampf(travel / 26.0, 0.06, 1.2)
+	_spawn_projectile(from, aim, color, duration)
+
+func _handle_projectile_hit(event: Dictionary) -> void:
+	# 命中反馈：小范围火花 + 轻微顿帧。单体弹与范围弹用同一套，命中本身就是"打到了"。
+	var pos := Vector3(float(event.get("x", 0.0)), 0.9, float(event.get("y", 0.0)))
+	_spawn_particles(pos, _projectile_color("", str(event.get("team", ""))), 8, 2.4)
+
+func _projectile_color(kind: String, team: String) -> Color:
+	# 按技能族给色：法师偏紫、射手偏金、其余取阵营色。
+	# 不做逐技能配色：玩家需要区分的是"这是谁的弹"，不是"这是第几个技能"。
+	if kind == "burst" or kind == "line" or kind == "meteor_storm":
+		return Color(0.72, 0.52, 1.0)
+	if kind == "arrow" or kind == "aoe_shot" or kind == "arrow_barrage":
+		return Color(1.0, 0.86, 0.46)
+	return RED if team == "red" else BLUE
 
 func _spawn_projectile(from: Vector3, to: Vector3, color: Color, duration: float) -> void:
 	var orb := MeshInstance3D.new()
@@ -4679,6 +4909,7 @@ func _build_ambient_particles() -> void:
 	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	material.vertex_color_use_as_albedo = true
+	material.albedo_texture = FxTextures.soft_glow()
 	quad.material = material
 	particles.draw_pass_1 = quad
 	particles.position = Vector3(0, 5.0, 0)

@@ -21,18 +21,11 @@ static func alive_guards(team: String, entities: Array) -> int:
 			total += 1
 	return total
 
+# 双子塔解锁：**任意一路**高地塔倒下即可（与 tower_rules.is_base_vulnerable 同一口径）。
+# 旧实现要求三路高地塔全倒，与本节开头"任意一路高地塔倒下后双子塔解锁"的说明矛盾。
+# 后果是 5v5 里双子塔永久免疫：实测推掉两路高地后仍打不动，对局无法收尾。
 static func is_guard_vulnerable(guard: Dictionary, entities: Array) -> bool:
-	var team := str(guard.get("team", ""))
-	var found := false
-	for entity in entities:
-		if str(entity.get("type", "")) != "tower":
-			continue
-		if str(entity.get("team", "")) != team or str(entity.get("tier", "")) != "high":
-			continue
-		found = true
-		if bool(entity.get("alive", true)):
-			return false
-	return found
+	return TowerRules.has_lost_any_high_tower(str(guard.get("team", "")), entities)
 
 static func shield_max_for(team: String, entities: Array) -> float:
 	return float(alive_guards(team, entities)) * SHIELD_PER_GUARD

@@ -3,6 +3,9 @@ extends RefCounted
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const Collision = preload("res://sim/map/collision.gd")
 const Jungle = preload("res://sim/map/jungle.gd")
+const ProjectileSystem = preload("res://sim/projectile_system.gd")
+const TargetingRules = preload("res://sim/targeting_rules.gd")
+const ControlRules = preload("res://sim/control_rules.gd")
 
 const SUMMONER_SPELLS := {
 	"flash": {
@@ -129,34 +132,33 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 			var target_pos: Vector2 = hero_pos + dir * range_val
 			target_pos = Collision.move(hero_pos, target_pos, float(hero.get("radius", 0.55)))
 			hero["pos"] = target_pos
-			_apply_aoe_damage(hero, target_pos, 2.5, damage, sim, dtype)
+			_apply_aoe_damage(hero, target_pos, 2.5, damage, sim, dtype, skill.get("control", {}))
 		"aoe_shot":
-			var target_pos: Vector2 = aim
-			if (target_pos - hero_pos).length() > range_val:
-				target_pos = hero_pos + (target_pos - hero_pos).normalized() * range_val
-			_apply_aoe_damage(hero, target_pos, 2.8, damage, sim, dtype)
+			# 项 3：远程技能不再当场结算，改为发射投射物，飞行途中才判定命中。
+			# 落点仍在按下瞬间确定（这是"预判"而不是"锁头"），
+			# 但目标可以靠走位离开判定范围 —— 这才有 MOBA 的操作上限。
+			_fire_projectile(hero, slot, kind, aim, damage, dtype, range_val, 2.8, 0.0, sim)
 		"leap_slam":
 			var target_pos: Vector2 = aim
 			if (target_pos - hero_pos).length() > range_val:
 				target_pos = hero_pos + (target_pos - hero_pos).normalized() * range_val
 			target_pos = Collision.move(hero_pos, target_pos, float(hero.get("radius", 0.55)))
 			hero["pos"] = target_pos
-			_apply_aoe_damage(hero, target_pos, 3.2, damage, sim, dtype)
+			_apply_aoe_damage(hero, target_pos, 3.2, damage, sim, dtype, skill.get("control", {}))
 		"meteor_storm":
-			var target_pos: Vector2 = aim
-			if (target_pos - hero_pos).length() > range_val:
-				target_pos = hero_pos + (target_pos - hero_pos).normalized() * range_val
-			_apply_aoe_damage(hero, target_pos, 4.0, damage, sim, dtype)
+			_fire_projectile(hero, slot, kind, aim, damage, dtype, range_val, 4.0, 0.0, sim)
 		"taunt_aura":
 			hero["shield"] = float(hero.get("shield", 0.0)) + 350.0
 			hero["shield_timer"] = 5.0
 			_apply_aoe_damage(hero, hero_pos, range_val, damage, sim, dtype)
 		"arrow_barrage":
-			var dir: Vector2 = (aim - hero_pos).normalized()
-			if dir == Vector2.ZERO:
-				dir = facing
-			hero["facing"] = dir
-			_apply_cone_damage(hero, hero_pos, dir, range_val, damage, sim, dtype)
+			_fire_projectile(hero, slot, kind, aim, damage, dtype, range_val, 2.4, 0.0, sim)
+		"arrow":
+			_fire_projectile(hero, slot, kind, aim, damage, dtype, range_val, 0.0, 0.0, sim)
+		"burst":
+			_fire_projectile(hero, slot, kind, aim, damage, dtype, range_val, 0.0, 0.0, sim)
+		"line":
+			_fire_projectile(hero, slot, kind, aim, damage, dtype, range_val, 0.0, 2.0, sim)
 		_:
 			if damage > 0.0:
 				var target: Dictionary = _find_target_near(hero, aim, range_val, sim)
@@ -182,6 +184,38 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 			"aim_y": float(aim.y),
 		})
 	return true
+
+## 发射投射物（项 3）。aim 会先按射程裁剪，避免"点很远的地板"让弹道飞出地图。
+## sim 为 null（纯工具单测）时退回当场结算，保证函数仍可用且行为可预期：
+## 这一条很重要——很多既有测试直接 new 一个裸字典调 cast_skill，没有 sim。
+static func _fire_projectile(hero: Dictionary, slot: String, kind: String, aim: Vector2,
+		damage: float, dtype: String, range_val: float, aoe_radius: float, slow_sec: float,
+		sim: Object) -> void:
+	var hero_pos: Vector2 = hero.get("pos", Vector2.ZERO)
+	var clamped := aim
+	var delta := clamped - hero_pos
+	if delta.length() > range_val:
+		clamped = hero_pos + delta.normalized() * range_val
+		delta = clamped - hero_pos
+	# 显式类型：三元表达式在这里推不出 Vector2，会让整个脚本解析失败
+	# （症状是 20 条测试连带红，而不是只报这一行）。
+	var new_facing: Vector2 = hero.get("facing", Vector2.UP)
+	if delta.length() > 0.01:
+		new_facing = delta.normalized()
+	hero["facing"] = new_facing
+	if sim == null or not sim.has_method("spawn_projectile"):
+		# 退化路径：没有 sim 就没有实体容器，只能当场结算。
+		# 这不是"偷偷绕过弹道"——它只影响没有世界状态的工具级调用；
+		# 任何真实对局（含 bot）都走下面的 spawn_projectile。
+		if damage > 0.0:
+			if aoe_radius > 0.0:
+				_apply_aoe_damage(hero, clamped, aoe_radius, damage, sim, dtype)
+			else:
+				var target: Dictionary = _find_target_near(hero, clamped, range_val, sim)
+				if not target.is_empty():
+					_deal_damage(hero, target, damage, sim, dtype)
+		return
+	sim.spawn_projectile(hero, slot, kind, clamped, damage, dtype, aoe_radius, slow_sec)
 
 static func cast_summoner_spell(hero: Dictionary, spell_id: String, aim: Vector2, sim: Object) -> bool:
 	if not bool(hero.get("alive", true)):
@@ -217,6 +251,11 @@ static func cast_summoner_spell(hero: Dictionary, spell_id: String, aim: Vector2
 			# 否则高护甲坦克蹲泉水就能无视斩杀线。
 			_deal_damage(hero, enemy, true_damage, sim, "true")
 		"cleanse":
+			# 项 4：净化必须清掉**所有**控制，不只是减速。
+			# 技能描述写的是"解除所有控制与负面状态"，只清 slow 就是
+			# 描述与实现不一致——玩家交了净化还被眩晕按在地上，这张牌就是假的。
+			for kind in ControlRules.KINDS:
+				hero[ControlRules.timer_field(kind)] = 0.0
 			hero["slow_timer"] = 0.0
 			hero["cc_immune_timer"] = float(spell.get("duration", 1.5))
 		"heal":
@@ -286,10 +325,14 @@ static func on_hero_attack_hit(attacker: Dictionary, target: Dictionary, sim: Ob
 static func _find_target_near(hero: Dictionary, center: Vector2, max_dist: float, sim: Object) -> Dictionary:
 	var best: Dictionary = {}
 	var best_dist: float = max_dist
+	var hero_team := str(hero.get("team", ""))
 	for e in sim.state.entities:
-		if not bool(e.get("alive", true)):
+		# 项 3：投射物带 team/pos/alive，能通过下面的距离与阵营检查；
+		# 一旦被选中，_deal_damage → _damage 会因为拿不到 hp 刷脚本错误，
+		# 而且技能会"打在弹道上"。统一用 TargetingRules 的判定，不再各写一份。
+		if not TargetingRules.is_combat_unit(e):
 			continue
-		if str(e.get("team", "")) == str(hero.get("team", "")):
+		if str(e.get("team", "")) == hero_team:
 			continue
 		var pos: Vector2 = e.get("pos", Vector2.ZERO)
 		var dist: float = (pos - center).length()
@@ -303,7 +346,8 @@ static func _find_lowest_hp_ally(hero: Dictionary, max_dist: float, sim: Object)
 	var min_hp_ratio: float = 1.1
 	var hero_pos: Vector2 = hero.get("pos", Vector2.ZERO)
 	for e in sim.state.entities:
-		if not bool(e.get("alive", true)):
+		# 只找己方英雄当治疗目标；用统一判定而非裸 alive，保持与其它索敌同一口径。
+		if not TargetingRules.is_combat_unit(e):
 			continue
 		if str(e.get("team", "")) != str(hero.get("team", "")) or str(e.get("type", "")) != "hero":
 			continue
@@ -316,21 +360,42 @@ static func _find_lowest_hp_ally(hero: Dictionary, max_dist: float, sim: Object)
 				best = e
 	return best
 
-static func _apply_aoe_damage(hero: Dictionary, center: Vector2, radius: float, damage: float, sim: Object, dtype := "physical") -> void:
+static func _apply_aoe_damage(hero: Dictionary, center: Vector2, radius: float, damage: float, sim: Object, dtype := "physical", control := {}) -> void:
+	var hero_team := str(hero.get("team", ""))
 	for e in sim.state.entities:
-		if not bool(e.get("alive", true)):
+		# 项 3：投射物带 team/pos/alive，能通过下面的范围判定。必须排除，
+		# 否则 AOE 会把伤害打在弹道上（_damage 拿不到 hp 刷脚本错误）。
+		if not TargetingRules.is_combat_unit(e):
 			continue
-		if str(e.get("team", "")) == str(hero.get("team", "")):
+		if str(e.get("team", "")) == hero_team:
 			continue
 		var pos: Vector2 = e.get("pos", Vector2.ZERO)
 		if (pos - center).length() <= radius:
 			_deal_damage(hero, e, damage, sim, dtype)
+			# 项 4：技能可附带控制（如刺客大招眩晕、坦克冲锋击飞）。
+			# control 为空字典时什么都不做 —— 绝大多数技能不带控。
+			_apply_control(e, control, hero)
+
+## 施加技能附带的控制。control 形如 {"kind": "stun", "duration": 0.8}。
+## 免疫判定在 ControlRules.apply 内部，这里不重复判。
+static func _apply_control(target: Dictionary, control: Variant, source: Dictionary) -> void:
+	if not (control is Dictionary):
+		return
+	var c: Dictionary = control
+	if c.is_empty():
+		return
+	var kind := str(c.get("kind", ""))
+	var duration := float(c.get("duration", 0.0))
+	if not ControlRules.is_known(kind):
+		return
+	ControlRules.apply(target, kind, duration, source.get("pos", Vector2.ZERO))
 
 static func _apply_line_damage(hero: Dictionary, start: Vector2, dir: Vector2, length: float, damage: float, sim: Object, slow_sec: float, dtype := "physical") -> void:
+	var hero_team := str(hero.get("team", ""))
 	for e in sim.state.entities:
-		if not bool(e.get("alive", true)):
+		if not TargetingRules.is_combat_unit(e):
 			continue
-		if str(e.get("team", "")) == str(hero.get("team", "")):
+		if str(e.get("team", "")) == hero_team:
 			continue
 		var pos: Vector2 = e.get("pos", Vector2.ZERO)
 		var to_e: Vector2 = pos - start
@@ -343,10 +408,11 @@ static func _apply_line_damage(hero: Dictionary, start: Vector2, dir: Vector2, l
 					e["slow_timer"] = slow_sec
 
 static func _apply_cone_damage(hero: Dictionary, origin: Vector2, dir: Vector2, range_val: float, damage: float, sim: Object, dtype := "physical") -> void:
+	var hero_team := str(hero.get("team", ""))
 	for e in sim.state.entities:
-		if not bool(e.get("alive", true)):
+		if not TargetingRules.is_combat_unit(e):
 			continue
-		if str(e.get("team", "")) == str(hero.get("team", "")):
+		if str(e.get("team", "")) == hero_team:
 			continue
 		var pos: Vector2 = e.get("pos", Vector2.ZERO)
 		var to_e: Vector2 = pos - origin

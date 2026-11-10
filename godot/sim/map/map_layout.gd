@@ -69,29 +69,33 @@ const STRAIGHT_WALLS := [
 #    逆时针，可以超过 360）+ 半径。写极坐标而不是绝对 xy，是因为营地会挪、
 #    半场要镜像 —— 半径表挪营地时不用重算，镜像也只是角度取反。
 # 2. 折线是**开口**的：首尾之间那一段不放墙，就是进出的口子。
-#    开口一律朝河道那一侧，因为河岸坡本来就圈不进去（地形高度在那里掉到 -0.6）。
-# 3. 半径不是拍脑袋：每个顶点都过了探针（tools/probe_ring_fit.gd），
-#    同时满足地形平坦、不压兵线、不盖营地/草丛/首领坑/传送阵、与保留石壁留出净宽。
+#    **开口朝己方基地那一侧**（2026-11-10 玩家反馈：原来朝河道/敌方一侧，打野要
+#    绕进敌境才能进自家 buff 窝）。镜子规律：开口中心 θ 镜像后落在 −θ−90，
+#    所以蓝方两座把开口对准蓝基地方向，红方两座经 mirror() 后自动对准红基地。
+# 3. 开口换边后，墙段会压到河岸坡：朝河一侧（营地 → 河心方向）的顶点半径刻意
+#    收小（3.6~4.2 米），把墙留在干岸上 —— 河岸坡从离河心线约 10.8 米开始进水
+#    （水面 -0.42），这些顶点保证 river_d ≥ 10.9，墙基（1.25 米）不会泡水悬空。
 # 4. 蓝方半场两座定义形状，红方半场两座由 mirror() 得到 —— 与其它地形数据同一套对称。
 #
-# 半径的**起伏**是这条数据存在的理由：4.35（贴着法阵盘边）~ 7.00（往深野区凸出一块）。
+# 半径的**起伏**是这条数据存在的理由：3.60（河岸坡收口）~ 6.75（往深野区凸出一块）。
 # 一条等距圆弧俯视读起来还是「围栏」；有鼓有收、段与段之间还拐着弯，才读成山体。
 const CAMP_RINGS := [
 	{
 		"id": "ring_blue_buff_blue_side",
 		"camp": "blue_buff_blue_side",
 		"points": [
-			[195.0, 4.70], [230.0, 6.15], [265.0, 6.00], [300.0, 6.75],
-			[335.0, 4.85], [10.0, 5.75], [45.0, 4.70], [80.0, 4.90],
+			[30.0, 4.40], [65.0, 5.75], [100.0, 4.00], [135.0, 3.60],
+			[170.0, 4.70], [205.0, 5.75], [250.0, 6.30], [270.0, 6.75],
+			[275.0, 4.85],
 		],
 	},
 	{
 		"id": "ring_blue_buff_red_side",
 		"camp": "blue_buff_red_side",
 		"points": [
-			[60.0, 5.20], [85.0, 6.40], [110.0, 6.90], [135.0, 6.40],
-			[160.0, 6.20], [185.0, 6.80], [210.0, 5.90], [235.0, 5.60],
-			[250.0, 4.90],
+			[210.0, 5.20], [245.0, 6.20], [280.0, 4.20], [315.0, 3.90],
+			[350.0, 4.20], [25.0, 4.10], [60.0, 4.20], [85.0, 6.40],
+			[110.0, 4.90],
 		],
 	},
 ]
@@ -517,10 +521,24 @@ static func point_along_lane(lane: String, progress: float) -> Vector2:
 		total -= segment
 	return path[path.size() - 1]
 
+# 塔位锚点。
+#
+# 关键：**红方塔必须由蓝方塔点对称镜像得出**，而不是各自由"沿路径量弧长"算。
+# 边路的路径采样点并不关于基地点对称（蓝方 top 与红方 bottom 是镜像关系，
+# 但顶点密度不同），于是同一 progress 落在不同位置：实测边路两侧塔离自家基地
+# 相差 0.295 m（中路恰好为 0）。偏差虽小，方向却恒定，等于给一侧稳定的对线优势。
+#
+# 镜像用与出生点一致的点对称：(x, y) -> (-x, -y)（地图绕中心 180°）。
+# 点对称会把 top 与 bottom 互换，所以红方某路的塔取自蓝方**对侧路**的锚点再翻转。
+const LANE_MIRROR := {"mid": "mid", "top": "bottom", "bottom": "top"}
+
 static func tower_anchor(lane: String, team: String, tier: String) -> Vector2:
 	var from_own_base := float(TOWER_PROGRESS.get(tier, 0.36))
-	var progress := from_own_base if team == "blue" else 1.0 - from_own_base
-	return point_along_lane(lane, progress)
+	if team == "blue":
+		return point_along_lane(lane, from_own_base)
+	var mirror_lane := str(LANE_MIRROR.get(lane, lane))
+	var blue_anchor := point_along_lane(mirror_lane, from_own_base)
+	return Vector2(-blue_anchor.x, -blue_anchor.y)
 
 static func tower_slots() -> Array:
 	var slots: Array = []

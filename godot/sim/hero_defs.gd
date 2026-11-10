@@ -78,7 +78,7 @@ const HEROES := {
 		"attack_interval": 1.0,
 		"passive": {"name": "不屈重甲", "desc": "生命值低于40%时触发减伤与自动回血护盾。"},
 		"q": {"name": "震地", "cost": 55.0, "cooldown": 6.0, "range": 4.5, "damage": 145.0, "damage_grow": 40.0, "kind": "quake", "damage_type": "physical"},
-		"w": {"name": "野蛮冲撞", "cost": 50.0, "cooldown": 8.0, "range": 5.5, "damage": 120.0, "damage_grow": 35.0, "kind": "charge", "damage_type": "physical"},
+		"w": {"name": "野蛮冲撞", "cost": 50.0, "cooldown": 8.0, "range": 5.5, "damage": 120.0, "damage_grow": 35.0, "kind": "charge", "damage_type": "physical", "control": {"kind": "knockup", "duration": 0.6}},
 		"e": {"name": "守护壁垒", "cost": 65.0, "cooldown": 12.0, "range": 0.0, "damage": 0.0, "kind": "shield"},
 		"r": {"name": "不破要塞", "cost": 90.0, "cooldown": 30.0, "range": 5.0, "damage": 220.0, "damage_grow": 70.0, "kind": "taunt_aura", "damage_type": "magic"},
 		"skill_plan": ["q", "w", "r", "e", "q", "r", "w", "e", "r", "q", "w", "e", "q", "w"],
@@ -126,7 +126,7 @@ const HEROES := {
 		"q": {"name": "影袭", "cost": 55.0, "cooldown": 4.2, "range": 4.5, "damage": 170.0, "damage_grow": 50.0, "kind": "charge", "damage_type": "physical"},
 		"w": {"name": "毒牙", "cost": 50.0, "cooldown": 6.0, "range": 3.4, "damage": 150.0, "damage_grow": 42.0, "kind": "burst", "damage_type": "physical"},
 		"e": {"name": "匿踪", "cost": 45.0, "cooldown": 9.0, "range": 0.0, "damage": 0.0, "kind": "evade", "duration": 2.5, "immune": 1.2},
-		"r": {"name": "绝影处决", "cost": 100.0, "cooldown": 26.0, "range": 6.0, "damage": 400.0, "damage_grow": 120.0, "kind": "leap_slam", "damage_type": "physical"},
+		"r": {"name": "绝影处决", "cost": 100.0, "cooldown": 26.0, "range": 6.0, "damage": 400.0, "damage_grow": 120.0, "kind": "leap_slam", "damage_type": "physical", "control": {"kind": "stun", "duration": 0.9}},
 		"skill_plan": ["q", "w", "r", "e", "q", "r", "w", "e", "r", "q", "w", "e", "q", "w"],
 	},
 }
@@ -156,6 +156,41 @@ static func scaled_damage(hero: Dictionary, slot: String) -> float:
 	if lv <= 1:
 		return base
 	return base + grow * float(lv - 1)
+
+## 控制效果的中文展示（项 4.4）。空 control 返回空串。
+static func control_label(control: Variant) -> String:
+	if not (control is Dictionary):
+		return ""
+	var c: Dictionary = control
+	var kind := str(c.get("kind", ""))
+	var duration := float(c.get("duration", 0.0))
+	if duration <= 0.0:
+		return ""
+	match kind:
+		"stun":
+			return "眩晕 %.1f 秒" % duration
+		"knockup":
+			return "击飞 %.1f 秒" % duration
+		"silence":
+			return "沉默 %.1f 秒" % duration
+		"root":
+			return "定身 %.1f 秒" % duration
+	return ""
+
+## 技能一句话说明。**由技能表生成，不手写第二份**。
+## 4.4 的要求就是这条：文案与数据同源。手写的描述一旦和表里的 control 脱节，
+## 就会出现"描述说眩晕、实际只减速"这种玩家能立刻发现的不一致（§5.1 教训）。
+static func skill_summary(skill: Dictionary) -> String:
+	var parts: Array = []
+	var dmg := float(skill.get("damage", 0.0))
+	if dmg > 0.0:
+		var dtype := "法术" if str(skill.get("damage_type", "physical")) == "magic" else "物理"
+		parts.append("%s伤害 %.0f" % [dtype, dmg])
+	var control := control_label(skill.get("control", {}))
+	if control != "":
+		parts.append(control)
+	parts.append("冷却 %.0f 秒" % float(skill.get("cooldown", 0.0)))
+	return "，".join(parts)
 
 ## 技能为什么放不出来（项 2）。空串 = 可以放 / 不该由本函数否决。
 ## 做成 static 且只读"快照里就有的字段"（mp / skill_*_cd / skill_*_level），

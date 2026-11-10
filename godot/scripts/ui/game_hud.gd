@@ -18,6 +18,7 @@ signal map_focus_released
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const ControlRules = preload("res://sim/control_rules.gd")
 const SkillSystem = preload("res://sim/skill_system.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
@@ -74,6 +75,7 @@ var _layout: Dictionary = {}
 var _hp_bar: ProgressBar
 var _hp_text: Label
 var _hp_style: StyleBoxFlat
+var _equip_icons: Array[TextureRect] = []
 var _mp_bar: ProgressBar
 var _mp_text: Label
 var _level_label: Label
@@ -514,11 +516,13 @@ func _build_bottom_panel() -> void:
 	name_row.add_child(_name_label)
 	_level_label = _make_label("Lv.1", 13 if touch_mode else 18, GameTheme.GOLD_LIGHT)
 	name_row.add_child(_level_label)
-	# 手机端不挂「射手 · 逐星之矢」这行副标题：234 宽的柱子里它只会被省略成半句话，
-	# 而英雄定位在选人界面已经说过了。
-	_role_label = _make_label("", 13, GameTheme.MUTED)
+	# 英雄定位并进名字行：单开一行会占掉装备格需要的 ~20px，状态卡高度就会被顶破。
+	# 手机端不挂这行副标题（234 宽会被省略成半句话）；桌面端超长时用省略号。
+	_role_label = _make_label("", 11 if not touch_mode else 13, GameTheme.MUTED)
 	_role_label.visible = not touch_mode
-	info.add_child(_role_label)
+	_role_label.clip_text = true
+	_role_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	name_row.add_child(_role_label)
 	var hp_root := _make_stat_bar(GameTheme.GREEN, 14.0 if touch_mode else 20.0)
 	_hp_bar = hp_root.get_meta("bar")
 	_hp_text = hp_root.get_meta("label")
@@ -540,6 +544,30 @@ func _build_bottom_panel() -> void:
 	meta_row.add_child(_kd_label)
 	_gold_label = _make_label("金币 0", 11 if touch_mode else 13, GameTheme.GOLD)
 	meta_row.add_child(_gold_label)
+
+	# 装备格：复用商店的 256² 图标，缩到 16/20px。没有装备就留空槽，
+	# 不再让状态卡只回答"我是谁、我还剩多少血"，却看不出出了什么装。
+	var equip_row := HBoxContainer.new()
+	equip_row.add_theme_constant_override("separation", 3)
+	info.add_child(equip_row)
+	var equip_size := 16.0 if touch_mode else 20.0
+	for i in 6:
+		var frame := PanelContainer.new()
+		frame.custom_minimum_size = Vector2(equip_size, equip_size)
+		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var frame_style := GameTheme.style(Color(0.02, 0.03, 0.04, 0.9), Color(0.32, 0.28, 0.20, 0.8), 1, 3, 0, 0.0)
+		frame_style.content_margin_left = 0
+		frame_style.content_margin_right = 0
+		frame_style.content_margin_top = 0
+		frame_style.content_margin_bottom = 0
+		frame.add_theme_stylebox_override("panel", frame_style)
+		var icon := TextureRect.new()
+		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		frame.add_child(icon)
+		equip_row.add_child(frame)
+		_equip_icons.append(icon)
 
 	if not touch_mode:
 		# 技能从状态卡里搬出来，单独贴右下角：状态卡只回答「我是谁 / 我还剩多少血」。
@@ -1150,6 +1178,15 @@ func update_snapshot(data: Dictionary) -> void:
 	var gold := int(local.get("gold", 0))
 	if _gold_label != null:
 		_gold_label.text = "金币 %d" % gold
+	if not _equip_icons.is_empty():
+		var inventory: Array = local.get("inventory", [])
+		var icon_size := 16 if touch_mode else 20
+		for i in _equip_icons.size():
+			_equip_icons[i].texture = (
+				GameTheme.item_icon(str(inventory[i]), icon_size)
+				if i < inventory.size()
+				else null
+			)
 	# 左上角那行金币：写得短，钱多了折成 15.4k，否则会把塔数挤出去。
 	if _map_gold_label != null:
 		_map_gold_label.text = _short_gold(gold)
@@ -1168,6 +1205,12 @@ func update_snapshot(data: Dictionary) -> void:
 		role_text += " [回城中...]"
 	if bool(local.get("teleporting", false)):
 		role_text += " [传送中...]"
+	# 项 4：被控时必须告诉玩家**为什么动不了**。
+	# 手机上没有 CD 数字可看，玩家被眩晕后只看到"按了没反应"，
+	# 最容易误判成游戏卡死。这条提示走既有的状态行，不新增 UI 元素。
+	var cc_text := control_status_caption(local)
+	if cc_text != "":
+		role_text += " [%s]" % cc_text
 	# 项 2：剩余技能点。0 点时 caption 是空串，不会常驻一句"技能点 0"。
 	var points_caption := skill_points_caption(local)
 	if points_caption != "":
@@ -1231,6 +1274,21 @@ static func skill_points_caption(local: Dictionary) -> String:
 	if points <= 0:
 		return ""
 	return "技能点 %d" % points
+
+## 被控提示（项 4，链路 6）。静态函数便于内容守卫直接调用。
+## 手机上没有 CD 数字可看，玩家被眩晕后只看到"按了没反应"，
+## 最容易误判成游戏卡死 —— 所以必须有一句明说"你被控住了"。
+## 文案按 ControlRules 的同一套数据生成，不另写一份枚举。
+static func control_status_caption(local: Dictionary) -> String:
+	var parts: Array = []
+	for kind in ControlRules.KINDS:
+		var remaining := float(local.get("%s_timer" % kind, 0.0))
+		if remaining <= 0.0:
+			continue
+		parts.append("%s %.1f秒" % [ControlRules.display_name(kind), remaining])
+	if parts.is_empty():
+		return ""
+	return "被" + "、".join(parts)
 
 func _find_local_hero(data: Dictionary) -> Dictionary:
 	for entity in data.get("entities", []):

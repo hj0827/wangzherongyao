@@ -92,13 +92,21 @@ func test_unknown_monster_type_falls_back_to_wolf_instead_of_nothing() -> void:
 # --- 2. 形态两两剪影互异 ----------------------------------------------------
 
 func test_camp_forms_have_distinct_silhouettes() -> void:
-	var camp_forms := ["wolf", "lizard", "boar", "bird"]
+	# wolf 走 UnitVisual 的 Wolf.glb 分支；MonsterForms.build("wolf") 按设计返回空字典，
+	# 不能直接塞进 _footprint(spec) —— 那会在断言前抛错，测试却仍然 PASS（假绿）。
+	var camp_forms := ["lizard", "boar", "bird"]
 	var seen: Array[String] = []
 	for form in camp_forms:
 		var spec := MonsterForms.build(form)
 		var shape := "%s" % str(_footprint(spec))
 		check(not seen.has(shape), "剪影不能和别的野怪一模一样：%s" % form)
 		seen.append(shape)
+	var wolf := UnitVisual.new()
+	wolf.setup("monster", "neutral", "wolf", "双狼", false, "blue")
+	var wolf_box := ModelUtils.relative_aabb(wolf.model_root)
+	var wolf_shape := "%s" % str(Vector2(maxf(wolf_box.size.x, wolf_box.size.z), wolf_box.size.y))
+	check(not seen.has(wolf_shape), "狼的剪影不能和程序化野怪撞脸")
+	wolf.free()
 
 func test_buff_sentinels_differ_in_both_silhouette_and_colour() -> void:
 	var blue := MonsterForms.build("blue_sentinel")

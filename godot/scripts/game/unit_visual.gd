@@ -75,7 +75,8 @@ const HERO_SETUPS := {
 		"outfit": preload("res://assets/characters/outfit_ranger_m.glb"),
 		"hair": preload("res://assets/characters/hair_buzzed.glb"),
 		"weapon": preload("res://assets/weapons/Claymore.glb"),
-		"weapon_scale": 0.26,
+		"body_scale": Vector3(1.06, 1.0, 1.02),
+		"weapon_scale": 0.28,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -88,7 +89,8 @@ const HERO_SETUPS := {
 		"outfit": preload("res://assets/characters/outfit_ranger_f.glb"),
 		"hair": preload("res://assets/characters/hair_long.glb"),
 		"weapon": preload("res://assets/weapons/Scythe.glb"),
-		"weapon_scale": 0.26,
+		"body_scale": Vector3(0.96, 1.0, 0.96),
+		"weapon_scale": 0.30,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -101,7 +103,8 @@ const HERO_SETUPS := {
 		"outfit": preload("res://assets/characters/outfit_peasant_m.glb"),
 		"hair": preload("res://assets/characters/hair_beard.glb"),
 		"weapon": preload("res://assets/weapons/Hammer_Double.glb"),
-		"weapon_scale": 0.31,
+		"body_scale": Vector3(1.18, 1.0, 1.10),
+		"weapon_scale": 0.35,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -114,7 +117,8 @@ const HERO_SETUPS := {
 		"outfit": preload("res://assets/characters/outfit_ranger_f.glb"),
 		"hair": preload("res://assets/characters/hair_buns.glb"),
 		"weapon": preload("res://assets/weapons/Bow_Wooden2.glb"),
-		"weapon_scale": 0.26,
+		"body_scale": Vector3(0.90, 1.0, 0.92),
+		"weapon_scale": 0.31,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_l",
@@ -127,7 +131,8 @@ const HERO_SETUPS := {
 		"outfit": preload("res://assets/characters/outfit_peasant_f.glb"),
 		"hair": preload("res://assets/characters/hair_buns.glb"),
 		"weapon": preload("res://assets/weapons/Dagger.glb"),
-		"weapon_scale": 0.20,
+		"body_scale": Vector3(0.84, 1.0, 0.88),
+		"weapon_scale": 0.24,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
@@ -150,6 +155,16 @@ const DEATH_FALL_SECONDS := 0.9
 # 死亡后视图停留多久（秒）。倒地进度是**从这个值往回算**的（见 _update_death_pose）：
 # 用「剩余时间」当进度会算反 —— death_timer 从 2.4 递减，进度要拿 2.4 - 剩余。
 const DEATH_LINGER_SECONDS := 2.4
+# 倒地之后再用 0.6s 沉进地面；重生从 0.25 倍缩放回 1.0。
+# 这两个阶段只影响程序化野怪，不改变死亡停留时间与复活逻辑。
+const DEATH_SINK_SECONDS := 0.6
+const DEATH_SINK_SCALE := 0.18
+const SPAWN_SCALE_SECONDS := 0.25
+# 受击/攻击反馈的时长。全部是表现层计时，不进快照、不进协议。
+const HIT_FLASH_SECONDS := 0.10
+const HIT_SQUASH_SECONDS := 0.16
+const ATTACK_LUNGE_SECONDS := 0.18
+const ATTACK_LUNGE_DISTANCE := 0.16
 
 const ANIM_ATTACK := {
 	"blade": "Sword_Regular_A",
@@ -193,6 +208,8 @@ const ANIM_R := {
 static var _source_animations: Dictionary = {}
 static var _library_cache: Dictionary = {}
 static var _font: Font = null
+# 小兵配件材质按颜色缓存：池里的几十个小兵不各自 new 一份。
+static var _minion_mat_cache: Dictionary = {}
 
 var kind := "hero"
 var team := "blue"
@@ -219,6 +236,21 @@ var _monster_spec: Dictionary = {}
 # 装配完成时的静止姿态，倒地动画要在它之上叠加（见 _capture_model_rest_pose）。
 var _model_rest_scale := Vector3.ONE
 var _model_rest_position := Vector3.ZERO
+var _hit_flash_timer := 0.0
+var _hit_squash_timer := 0.0
+var _attack_lunge_timer := 0.0
+var _spawn_scale_timer := 0.0
+var flash_mesh: MeshInstance3D = null
+var shield_bubble: MeshInstance3D = null
+var buff_aura: MeshInstance3D = null
+var slow_ring: MeshInstance3D = null
+# 硬控状态环（项 4，链路 5）：眩晕/击飞/沉默/定身各有各的环，
+# 玩家必须一眼看出"对方是被打晕了"还是"被封了技能"——这两种的应对完全不同。
+# 复用 _make_status_ring，不再另造一套几何。
+var cc_rings: Dictionary = {}
+var _buff_aura_key := ""
+var _minion_props: Dictionary = {}
+var _minion_base_scale := Vector3.ONE
 
 var model_root: Node3D
 var body_root: Node3D
@@ -342,6 +374,26 @@ func reset_minion(new_team: String, new_pos: Vector3, new_type := "melee") -> vo
 	_shown_level = -1
 	_shown_bar_visible = true
 	visible = true
+	_hit_flash_timer = 0.0
+	_hit_squash_timer = 0.0
+	_attack_lunge_timer = 0.0
+	if flash_mesh:
+		flash_mesh.visible = false
+	if shield_bubble:
+		shield_bubble.visible = false
+	if buff_aura:
+		buff_aura.visible = false
+	if slow_ring:
+		slow_ring.visible = false
+	for entry in CC_RING_SPECS:
+		var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
+		if cc_ring != null:
+			cc_ring.visible = false
+	if model_root:
+		model_root.position = _model_rest_position
+		model_root.rotation = Vector3.ZERO
+	_apply_minion_type_look(new_type)
+	_spawn_scale_timer = SPAWN_SCALE_SECONDS
 	_has_pos = false
 	_initialized = false
 	position = new_pos
@@ -405,13 +457,18 @@ func _build_hero() -> void:
 		_attach_retargeted_player(model)
 	var measured_height := ModelUtils.relative_aabb(model_root).size.y
 	model_root.scale = Vector3.ONE * scale_for_height(measured_height, HERO_HEIGHT)
+	# 只压/放横轴：身高仍锚在 HERO_HEIGHT，剪影靠肩宽与武器区分。
+	var body_scale: Vector3 = setup_data.get("body_scale", Vector3.ONE)
+	model_root.scale = Vector3(model_root.scale.x * body_scale.x, model_root.scale.y, model_root.scale.z * body_scale.z)
 	_equip_weapon(setup_data)
+	_capture_model_rest_pose()
 	_add_ring(0.9)
 	if is_local:
 		local_ring = _make_ring(1.15, GOLD, 0.55)
 		local_ring.position.y = 0.02
 		add_child(local_ring)
 	_add_health_bar(HERO_HEIGHT + 0.30)
+	_build_status_fx(HERO_HEIGHT, 0.62)
 	idle_anim = str(setup_data.get("idle", "Idle"))
 	_set_anim(idle_anim, true)
 	process_priority = 10
@@ -436,9 +493,15 @@ func _build_minion() -> void:
 		if player:
 			animation_players.append(player)
 			player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
+	_minion_base_scale = model_root.scale
+	_build_minion_props()
+	_apply_minion_type_look(minion_type)
+	_capture_model_rest_pose()
 	_add_ring(0.44)
 	_add_health_bar(MINION_HEIGHT + 0.16, 0.62)
+	_build_status_fx(MINION_HEIGHT, 0.40)
 	_set_anim("Idle", true)
+	_spawn_scale_timer = SPAWN_SCALE_SECONDS
 	ModelUtils.enable_shadows(self, false)
 
 func _build_monster() -> void:
@@ -471,11 +534,13 @@ func _build_procedural_monster(spec: Dictionary) -> void:
 	_capture_model_rest_pose()
 	# 脚下环贴着形态的真实体量：石像比蜥蜴宽一圈，首领占满整个坑。
 	_add_ring(MonsterForms.ring_radius(monster_form))
+	_build_status_fx(target_height, clampf(target_height * 0.28, 0.45, 2.4))
 	if is_objective:
 		_add_health_bar(target_height + 0.55, bar_width)
 	else:
 		_add_health_bar(target_height + 0.25, bar_width)
 	_set_anim("Idle", true)
+	_spawn_scale_timer = SPAWN_SCALE_SECONDS
 	ModelUtils.enable_shadows(self, false)
 
 # 狼：现成模型（双狼营地本来就是狼），只补两处 —— 高度对齐、眼睛点亮。
@@ -495,8 +560,10 @@ func _build_wolf_monster() -> void:
 	_polish_wolf(model_root)
 	_capture_model_rest_pose()
 	_add_ring(MonsterForms.ring_radius("wolf"))
+	_build_status_fx(WOLF_HEIGHT, 0.52)
 	_add_health_bar(WOLF_HEIGHT + 0.25, 0.9)
 	_set_anim("Idle", true)
+	_spawn_scale_timer = SPAWN_SCALE_SECONDS
 	ModelUtils.enable_shadows(self, false)
 
 # 狼原本是一团灰白：在草地上、和石头一个色，玩家要凑近才认得出是活物。
@@ -545,6 +612,7 @@ func _build_river_spirit() -> void:
 	root.name = "Model"
 	model_root = root
 	add_child(root)
+	_capture_model_rest_pose()
 	var body := MeshInstance3D.new()
 	var sphere := SphereMesh.new()
 	sphere.radius = 0.62
@@ -584,6 +652,7 @@ func _build_river_spirit() -> void:
 	root.add_child(halo)
 	_add_ring(0.7)
 	_add_health_bar(2.0, 0.9)
+	_build_status_fx(2.0, 0.55)
 	_set_anim("Idle", true)
 	ModelUtils.enable_shadows(self, false)
 
@@ -612,6 +681,328 @@ func _make_ring(radius: float, color: Color, alpha: float) -> MeshInstance3D:
 	ring.material_override = material
 	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return ring
+
+# ---------- 受击 / 攻击 / 状态表现 ----------
+#
+# 这些节点全部在装配时建好、战斗路径只切 visible 与参数：
+# 硬规则 4 不允许在受击帧里 new 网格/材质。
+
+func _build_status_fx(height: float, radius: float) -> void:
+	# 受击白闪：加色球挂在 UnitVisual 根上，不参与 model_root 的 AABB，
+	# 否则会撑大野怪/小兵的体型契约。
+	flash_mesh = MeshInstance3D.new()
+	flash_mesh.name = "HitFlash"
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.5
+	sphere.height = 1.0
+	sphere.radial_segments = 12
+	sphere.rings = 6
+	flash_mesh.mesh = sphere
+	var flash_mat := StandardMaterial3D.new()
+	flash_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	flash_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	flash_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	flash_mat.albedo_color = Color(1.0, 0.95, 0.86, 0.58)
+	flash_mat.emission_enabled = true
+	flash_mat.emission = Color(1.0, 0.95, 0.86)
+	flash_mat.emission_energy_multiplier = 2.0
+	flash_mesh.material_override = flash_mat
+	flash_mesh.scale = Vector3(maxf(radius * 1.7, 0.45), maxf(height * 0.52, 0.5), maxf(radius * 1.7, 0.45))
+	flash_mesh.position = Vector3(0.0, height * 0.5, 0.0)
+	flash_mesh.visible = false
+	flash_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(flash_mesh)
+
+	# 护盾泡：半透明加色球，只在 shield > 0 时出现。
+	shield_bubble = MeshInstance3D.new()
+	shield_bubble.name = "ShieldBubble"
+	var bubble_mesh := SphereMesh.new()
+	bubble_mesh.radius = 0.5
+	bubble_mesh.height = 1.0
+	bubble_mesh.radial_segments = 16
+	bubble_mesh.rings = 8
+	shield_bubble.mesh = bubble_mesh
+	var bubble_mat := StandardMaterial3D.new()
+	bubble_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bubble_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bubble_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	bubble_mat.albedo_color = Color(0.55, 0.82, 1.0, 0.18)
+	bubble_mat.emission_enabled = true
+	bubble_mat.emission = Color(0.5, 0.8, 1.0)
+	bubble_mat.emission_energy_multiplier = 1.1
+	bubble_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	shield_bubble.material_override = bubble_mat
+	shield_bubble.scale = Vector3(radius * 2.6, height * 0.58, radius * 2.6)
+	shield_bubble.position = Vector3(0.0, height * 0.5, 0.0)
+	shield_bubble.visible = false
+	shield_bubble.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(shield_bubble)
+
+	# 红/蓝 BUFF 光环：贴地双环，颜色在 _update_status_fx 里按快照切换。
+	buff_aura = _make_status_ring(maxf(radius * 1.05, 0.55), 0.055, Color(1.0, 0.35, 0.2, 0.65))
+	buff_aura.name = "BuffAura"
+	buff_aura.position.y = 0.055
+	buff_aura.visible = false
+	add_child(buff_aura)
+	var inner := _make_status_ring(maxf(radius * 0.72, 0.38), 0.035, Color(1.0, 0.35, 0.2, 0.45))
+	inner.name = "BuffAuraInner"
+	inner.position.y = 0.04
+	buff_aura.add_child(inner)
+
+	# 减速环：冰蓝色，单独一层，避免和 BUFF 光环抢颜色。
+	slow_ring = _make_status_ring(maxf(radius * 0.9, 0.45), 0.045, Color(0.45, 0.8, 1.0, 0.55))
+	slow_ring.name = "SlowRing"
+	slow_ring.position.y = 0.07
+	slow_ring.visible = false
+	add_child(slow_ring)
+
+	# 硬控环：每种控一个环，颜色与控制含义对应。
+	# 高度分层：眩晕最内、沉默最外，避免多个控同时存在时完全重叠成一团。
+	for entry in CC_RING_SPECS:
+		var kind := str(entry[0])
+		var ring := _make_status_ring(
+			maxf(radius * (0.95 + float(entry[1]) * 0.12), 0.45),
+			0.05,
+			entry[2]
+		)
+		ring.name = "CCRing_" + kind
+		ring.position.y = 0.09 + float(entry[1]) * 0.05
+		ring.visible = false
+		add_child(ring)
+		cc_rings[kind] = ring
+
+## 硬控状态环规格（项 4）：[kind, 半径档位, 颜色]
+## 颜色按玩家应对方式区分，不是按伤害类型：
+##   眩晕 = 金（完全动不了，等它结束） 击飞 = 橙（被推开）
+##   沉默 = 紫（能走能打但放不出技能） 定身 = 青（能放技能但走不了）
+const CC_RING_SPECS := [
+	["stun", 0.0, Color(1.0, 0.82, 0.28, 0.75)],
+	["knockup", 1.0, Color(1.0, 0.55, 0.25, 0.75)],
+	["silence", 2.0, Color(0.76, 0.48, 1.0, 0.72)],
+	["root", 3.0, Color(0.35, 0.92, 0.95, 0.72)],
+]
+
+func _make_status_ring(radius: float, width: float, color: Color) -> MeshInstance3D:
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = maxf(0.05, radius - width)
+	torus.outer_radius = radius
+	torus.rings = 40
+	torus.ring_segments = 6
+	ring.mesh = torus
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = Color(color.r, color.g, color.b)
+	material.emission_energy_multiplier = 1.3
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	ring.material_override = material
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return ring
+
+func _update_status_fx(data: Dictionary) -> void:
+	if dead:
+		if shield_bubble:
+			shield_bubble.visible = false
+		if buff_aura:
+			buff_aura.visible = false
+		if slow_ring:
+			slow_ring.visible = false
+		for entry in CC_RING_SPECS:
+			var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
+			if cc_ring != null:
+				cc_ring.visible = false
+		return
+	if shield_bubble:
+		shield_bubble.visible = shield_ratio > 0.001
+	if buff_aura:
+		var red := float(data.get("buff_red_timer", 0.0))
+		var blue := float(data.get("buff_blue_timer", 0.0))
+		var key := ""
+		if red > 0.0 and red >= blue:
+			key = "red"
+		elif blue > 0.0:
+			key = "blue"
+		if key != _buff_aura_key:
+			_buff_aura_key = key
+			var color := Color(1.0, 0.35, 0.2) if key == "red" else Color(0.28, 0.58, 1.0)
+			var material := buff_aura.material_override as StandardMaterial3D
+			if material:
+				material.albedo_color = Color(color.r, color.g, color.b, 0.62)
+				material.emission = color
+			var inner := buff_aura.get_node_or_null("BuffAuraInner") as MeshInstance3D
+			if inner:
+				var inner_mat := inner.material_override as StandardMaterial3D
+				if inner_mat:
+					inner_mat.albedo_color = Color(color.r, color.g, color.b, 0.42)
+					inner_mat.emission = color
+		buff_aura.visible = key != ""
+	if slow_ring:
+		slow_ring.visible = float(data.get("slow_timer", 0.0)) > 0.0
+	# 硬控环（项 4）：按各控的剩余时间点亮。
+	# 用计时而不是只用 cc_status：cc_status 只给"最重的那一个"，
+	# 同时中两种控时另一个也会亮，玩家才能看到完整状态。
+	for entry in CC_RING_SPECS:
+		var kind := str(entry[0])
+		var ring: MeshInstance3D = cc_rings.get(kind, null)
+		if ring == null:
+			continue
+		ring.visible = float(data.get("%s_timer" % kind, 0.0)) > 0.0
+
+func _update_hit_reaction(delta: float) -> void:
+	if _hit_flash_timer > 0.0:
+		_hit_flash_timer = maxf(0.0, _hit_flash_timer - delta)
+		if flash_mesh:
+			flash_mesh.visible = _hit_flash_timer > 0.0
+	if _hit_squash_timer > 0.0:
+		_hit_squash_timer = maxf(0.0, _hit_squash_timer - delta)
+	if _attack_lunge_timer > 0.0:
+		_attack_lunge_timer = maxf(0.0, _attack_lunge_timer - delta)
+	if _spawn_scale_timer > 0.0:
+		_spawn_scale_timer = maxf(0.0, _spawn_scale_timer - delta)
+	if model_root == null or dead:
+		return
+	var squash := 1.0
+	if _hit_squash_timer > 0.0:
+		var t := 1.0 - _hit_squash_timer / HIT_SQUASH_SECONDS
+		squash = 1.0 - sin(t * PI) * 0.12
+	var lunge := 0.0
+	if _attack_lunge_timer > 0.0:
+		var t := 1.0 - _attack_lunge_timer / ATTACK_LUNGE_SECONDS
+		lunge = sin(t * PI) * ATTACK_LUNGE_DISTANCE
+	var spawn_scale := 1.0
+	if _spawn_scale_timer > 0.0:
+		var t := 1.0 - _spawn_scale_timer / SPAWN_SCALE_SECONDS
+		spawn_scale = lerpf(0.25, 1.0, t * t)
+	if not is_equal_approx(squash, 1.0) or lunge > 0.0001 or spawn_scale < 0.999:
+		var side := 1.0 + (1.0 - squash) * 0.55
+		model_root.scale = Vector3(
+			_model_rest_scale.x * side * spawn_scale,
+			_model_rest_scale.y * squash * spawn_scale,
+			_model_rest_scale.z * side * spawn_scale
+		)
+		model_root.position = _model_rest_position + Vector3(0.0, 0.0, lunge)
+	else:
+		model_root.scale = _model_rest_scale
+		model_root.position = _model_rest_position
+
+func _minion_material(key: String, color: Color, metallic := 0.0) -> StandardMaterial3D:
+	if _minion_mat_cache.has(key):
+		return _minion_mat_cache[key]
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.roughness = 0.82
+	material.metallic = metallic
+	_minion_mat_cache[key] = material
+	return material
+
+func _add_prop_box(parent: Node3D, size: Vector3, material: Material, pos: Vector3, rot_deg := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = size
+	mi.mesh = box
+	mi.material_override = material
+	mi.position = pos
+	mi.rotation_degrees = rot_deg
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+	return mi
+
+func _add_prop_cylinder(parent: Node3D, radius: float, height: float, material: Material, pos: Vector3, rot_deg := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var cylinder := CylinderMesh.new()
+	cylinder.top_radius = radius
+	cylinder.bottom_radius = radius
+	cylinder.height = height
+	cylinder.radial_segments = 10
+	mi.mesh = cylinder
+	mi.material_override = material
+	mi.position = pos
+	mi.rotation_degrees = rot_deg
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+	return mi
+
+# 小兵四类型的"一眼可辨"配件：远程举杖/炮车有炮管/超级兵有肩甲与背旗。
+# 配件挂在 model_root 上，跟着身体一起播放骨骼动作；不做手部骨骼绑定，
+# 因为俯视 21m 下"背后多一根杖/一辆车"的剪影比手指位置更重要。
+func _build_minion_props() -> void:
+	if model_root == null:
+		return
+	var wood := _minion_material("minion_wood", Color(0.27, 0.19, 0.11), 0.0)
+	var metal := _minion_material("minion_metal", Color(0.42, 0.44, 0.47), 0.55)
+	var glow := _minion_material("minion_glow", Color(0.35, 0.8, 1.0), 0.0)
+	glow.emission_enabled = true
+	glow.emission = Color(0.35, 0.8, 1.0)
+	glow.emission_energy_multiplier = 2.0
+	glow.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	var ranged := Node3D.new()
+	ranged.name = "RangedKit"
+	model_root.add_child(ranged)
+	_add_prop_cylinder(ranged, 0.035, 1.2, wood, Vector3(0.28, 0.62, -0.08), Vector3(0.0, 0.0, -12.0))
+	var orb := MeshInstance3D.new()
+	var orb_mesh := SphereMesh.new()
+	orb_mesh.radius = 0.085
+	orb_mesh.height = 0.17
+	orb.mesh = orb_mesh
+	orb.material_override = glow
+	orb.position = Vector3(0.40, 1.23, -0.08)
+	orb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	ranged.add_child(orb)
+
+	var cannon := Node3D.new()
+	cannon.name = "CannonKit"
+	model_root.add_child(cannon)
+	_add_prop_box(cannon, Vector3(0.56, 0.18, 0.74), wood, Vector3(0.0, 0.18, 0.02))
+	for side in [-1.0, 1.0]:
+		for front in [-1.0, 1.0]:
+			_add_prop_cylinder(cannon, 0.14, 0.08, metal, Vector3(side * 0.3, 0.14, front * 0.22), Vector3(0.0, 0.0, 90.0))
+	_add_prop_cylinder(cannon, 0.10, 0.72, metal, Vector3(0.0, 0.52, 0.34), Vector3(90.0, 0.0, 0.0))
+	var muzzle := MeshInstance3D.new()
+	var muzzle_mesh := SphereMesh.new()
+	muzzle_mesh.radius = 0.12
+	muzzle_mesh.height = 0.24
+	muzzle.mesh = muzzle_mesh
+	muzzle.material_override = glow
+	muzzle.position = Vector3(0.0, 0.52, 0.70)
+	muzzle.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	cannon.add_child(muzzle)
+
+	var super_kit := Node3D.new()
+	super_kit.name = "SuperKit"
+	model_root.add_child(super_kit)
+	for side in [-1.0, 1.0]:
+		_add_prop_box(super_kit, Vector3(0.20, 0.12, 0.28), metal, Vector3(side * 0.27, 0.88, 0.0), Vector3(0.0, 0.0, side * 12.0))
+	_add_prop_box(super_kit, Vector3(0.05, 0.62, 0.36), _minion_material("minion_banner", Color(0.45, 0.12, 0.10), 0.0), Vector3(0.0, 0.92, -0.22))
+	_add_prop_box(super_kit, Vector3(0.04, 0.16, 0.34), metal, Vector3(0.0, 0.70, -0.22))
+
+	_minion_props = {"melee": null, "ranged": ranged, "cannon": cannon, "super": super_kit}
+	for key in _minion_props:
+		var node: Node3D = _minion_props[key]
+		if node:
+			node.visible = false
+
+func _apply_minion_type_look(new_type: String) -> void:
+	if model_root == null:
+		return
+	for key in _minion_props:
+		var node: Node3D = _minion_props[key]
+		if node:
+			node.visible = key == new_type
+	var scale := _minion_base_scale
+	match new_type:
+		"cannon":
+			scale *= 1.10
+		"super":
+			scale *= 1.22
+		"ranged":
+			scale *= 0.98
+	model_root.scale = scale
+	_model_rest_scale = scale
 
 func _make_bar(size: Vector2, fill_color: Color, padding: float = 0.032) -> Array:
 	var quad := QuadMesh.new()
@@ -902,6 +1293,7 @@ func set_snapshot(data: Dictionary, delta: float = 0.016, alpha: float = 1.0, pr
 		level_label.text = "Lv.%d" % level
 	haste = float(data.get("haste_timer", 0.0)) > 0.0
 	_update_dead_state(bool(data.get("alive", true)))
+	_update_status_fx(data)
 
 # 回城落地 / 传送抵达：直接落位，把插值区间收拢到落点。
 # set_snapshot 里「距离 > 14 米直接落位」兜不住近距离瞬移（从自家野区回城可能只跳十来米），
@@ -940,6 +1332,24 @@ func _update_dead_state(alive: bool) -> void:
 	if alive and dead:
 		dead = false
 		_restore_model_rest_pose()
+		_hit_flash_timer = 0.0
+		_hit_squash_timer = 0.0
+		_attack_lunge_timer = 0.0
+		if kind == "monster" or kind == "minion":
+			_spawn_scale_timer = SPAWN_SCALE_SECONDS
+		if flash_mesh:
+			flash_mesh.visible = false
+		if shield_bubble:
+			shield_bubble.visible = false
+		if buff_aura:
+			buff_aura.visible = false
+		if slow_ring:
+			slow_ring.visible = false
+		# 硬控环同样要清：复活后若还留着眩晕环，玩家会以为"复活了还是被控着"。
+		for entry in CC_RING_SPECS:
+			var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
+			if cc_ring != null:
+				cc_ring.visible = false
 		_shown_hp = -1.0
 		_shown_shield = -1.0
 		_shown_mp = -1.0
@@ -961,6 +1371,17 @@ func _update_dead_state(alive: bool) -> void:
 		death_timer = DEATH_LINGER_SECONDS
 		_set_anim(_death_anim(), false)
 		action_timer = 0.0
+		_hit_flash_timer = 0.0
+		_hit_squash_timer = 0.0
+		_attack_lunge_timer = 0.0
+		if flash_mesh:
+			flash_mesh.visible = false
+		if shield_bubble:
+			shield_bubble.visible = false
+		if buff_aura:
+			buff_aura.visible = false
+		if slow_ring:
+			slow_ring.visible = false
 		_shown_hp = 0.0
 		if bar_material:
 			bar_material.set_shader_parameter("ratio", 0.0)
@@ -1021,10 +1442,25 @@ func play_skill(slot: String) -> void:
 func play_hit() -> void:
 	if dead:
 		return
+	_hit_flash_timer = HIT_FLASH_SECONDS
+	_hit_squash_timer = HIT_SQUASH_SECONDS
+	if flash_mesh:
+		flash_mesh.visible = true
 	if action_timer <= 0.0:
-		play_action("Hit_Chest" if kind == "hero" else "Hit_A")
+		if kind == "hero":
+			play_action("Hit_Chest")
+		elif kind == "minion":
+			play_action("Hit_A")
+
+# 野怪/小兵出手：没有骨骼攻击动作的形态靠身体前倾读"这一下打出去了"。
+# 英雄仍走 attack 事件里的 play_attack()，不会重复触发。
+func play_attack_reaction() -> void:
+	if dead:
+		return
+	_attack_lunge_timer = ATTACK_LUNGE_SECONDS
 
 func process_visual(delta: float) -> void:
+	_update_hit_reaction(delta)
 	if bush_eye != null and bush_eye.visible:
 		# 轻微呼吸 + 透明度起伏：静止的眼睛会被当成贴图污点。
 		_bush_eye_time += delta
@@ -1064,9 +1500,15 @@ func _update_death_pose() -> void:
 	if not _monster_spec.is_empty() and animation_players.is_empty() and model_root != null:
 		var elapsed := clampf((DEATH_LINGER_SECONDS - death_timer) / DEATH_FALL_SECONDS, 0.0, 1.0)
 		var eased := elapsed * elapsed
+		# 倒地之后继续下沉/缩小：2.4 秒的停留时间里，尸体不会一直以 0.82 倍
+		# 完整地杵在地上，而是在最后 0.6 秒收进地面，给重生留出"空场"。
+		var sink_start := DEATH_LINGER_SECONDS - DEATH_FALL_SECONDS
+		var sink_t := clampf((sink_start - death_timer) / DEATH_SINK_SECONDS, 0.0, 1.0)
+		var sink_eased := sink_t * sink_t
+		var fallen_scale := lerpf(1.0, 0.82, eased)
 		model_root.rotation.x = -1.42 * eased
-		model_root.scale = _model_rest_scale * lerp(1.0, 0.82, eased)
-		model_root.position = _model_rest_position + Vector3(0.0, -0.12 * eased, 0.0)
+		model_root.scale = _model_rest_scale * lerpf(fallen_scale, DEATH_SINK_SCALE, sink_eased)
+		model_root.position = _model_rest_position + Vector3(0.0, -0.12 * eased - 0.28 * sink_eased, 0.0)
 
 func _update_locomotion() -> void:
 	if dead:
