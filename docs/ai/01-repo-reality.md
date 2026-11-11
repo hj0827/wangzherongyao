@@ -31,6 +31,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   │   ├── monster_forms.gd    ★ 野怪形态派发 + 程序化动画（无骨骼）
 │   │   ├── monster_forms_jungle.gd  ★ 蓝/红石像 + 蜥蜴/三猪/红鸟
 │   │   ├── monster_forms_boss.gd    ★ 暴君 / 主宰
+│   │   ├── portal_visual.gd         ★ 传送阵造型与状态（石台/符文轮/方尖柱/晶体）
 │   │   ├── map_view.gd         ✅ 地图表现，**唯一真正接线的新模块**
 │   │   ├── bush_eye.gd         进草头顶斜划眼（程序化 96px 贴图 + 静态缓存）
 │   │   ├── input_assist.gd     键鼠/触控 → 战局方向向量
@@ -52,6 +53,7 @@ godot/                          ← Godot 工程根（project.godot 在这层）
 │   └── infra/                  ⚠️ 只有 README.md，**空壳**
 ├── shaders/billboard_bar.gdshader   血条/蓝条自定义 billboard
 ├── shaders/camp_sigil.gdshader      营地/首领坑贴地旋转符阵（随野怪存活亮暗）
+├── shaders/teleport_rune.gdshader   传送阵符文轮（差速齿环/六芒星/读数指针/裂开）
 ├── scenes/                     只有 main_menu.tscn 与 preview.tscn
 ├── tests/                      test_*.gd + test_base.gd + run_tests.gd
 ├── tools/                      截图 / 性能 / 资源巡检 / 设备验收

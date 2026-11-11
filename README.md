@@ -89,11 +89,14 @@ run.cmd
 godot --headless --path godot --script res://tests/run_tests.gd
 
 :: 全流程 UI 截图（输出到 godot/shots/，不入库）
-godot --path godot --script res://tools/ui_shot.gd
+:: 截图工具需要真实渲染上下文，必须走隐藏桌面，否则会在桌面上弹窗
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\ui_shot.gd
 
 :: 主菜单连拍（验证背景视频在动）
-godot --path godot --script res://tools/menu_shot.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\menu_shot.gd
 ```
+
+> `godot\tools\shot_offscreen.ps1` 在隐藏的 Windows 桌面上启动 Godot，窗口不会出现在你的屏幕上，产物路径不变。直接 `godot --path godot --script res://tools/xxx_shot.gd` 会闪窗。
 
 > Windows 下若命令行里 `APPDATA` 为空，启动 Godot 前请显式设置，
 > 否则 `user://` 会退化到工作目录，生成类似 `godot/Godot/app_userdata/` 的垃圾目录。

@@ -86,11 +86,11 @@ git status --porcelain
 - [ ] 5v5 满员（10 英雄 + 多波小兵）时没有糊成一片
 
 ```cmd
-godot --path godot --script res://tools/ui_shot.gd
-godot --path godot --script res://tools/mobile_shot.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\ui_shot.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\mobile_shot.gd
 ```
 
-截图落 `godot/shots/`，**不入库**。
+截图落 `godot/shots/`，**不入库**。截图工具必须走 `shot_offscreen.ps1`（隐藏桌面），直接 `godot --path godot --script` 会在用户桌面上闪窗，见 `02-godot-pitfalls.md` §1.1。
 
 ---
 

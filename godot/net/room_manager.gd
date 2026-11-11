@@ -1,6 +1,7 @@
 extends RefCounted
 
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const SkillSystem = preload("res://sim/skill_system.gd")
 
 const CODE_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 const CODE_LENGTH := 5
@@ -59,6 +60,7 @@ func start_match(peer_id: int, code: String) -> Dictionary:
 			"name": player.name,
 			"team": player.team,
 			"hero_type": player.hero_type,
+			"summoner_spell": player.summoner_spell,
 		})
 	var match_config := {
 		"mode": room.mode,
@@ -78,6 +80,19 @@ func set_hero(peer_id: int, code: String, hero_type: String) -> Dictionary:
 	for player in room.players:
 		if int(player.id) == peer_id:
 			player.hero_type = hero_type
+			return {"ok": true, "room": room, "player": player}
+	return {"ok": false, "error": "not_in_room"}
+
+func set_summoner(peer_id: int, code: String, spell: String) -> Dictionary:
+	code = code.strip_edges().to_upper()
+	if not rooms.has(code):
+		return {"ok": false, "error": "room_not_found"}
+	if not SkillSystem.SUMMONER_SPELLS.has(spell):
+		return {"ok": false, "error": "invalid_summoner"}
+	var room: Dictionary = rooms[code]
+	for player in room.players:
+		if int(player.id) == peer_id:
+			player.summoner_spell = spell
 			return {"ok": true, "room": room, "player": player}
 	return {"ok": false, "error": "not_in_room"}
 
@@ -110,6 +125,7 @@ func _new_player(peer_id: int, display_name: String, team: String) -> Dictionary
 		"name": display_name.strip_edges() if display_name.strip_edges() != "" else "玩家%d" % peer_id,
 		"team": team,
 		"hero_type": "blade",
+		"summoner_spell": "flash",
 		"ready": false,
 	}
 

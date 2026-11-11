@@ -29,6 +29,7 @@ const AttackCluster = preload("res://scripts/ui/attack_cluster.gd")
 const AttackModeButton = preload("res://scripts/ui/attack_mode_button.gd")
 const LockBar = preload("res://scripts/ui/lock_bar.gd")
 const ShopPanel = preload("res://scripts/ui/shop_panel.gd")
+const SettingsPanel = preload("res://scripts/ui/settings_panel.gd")
 const Scoreboard = preload("res://scripts/ui/scoreboard.gd")
 const TouchJoystick = preload("res://scripts/ui/touch_joystick.gd")
 const TouchActionButton = preload("res://scripts/ui/touch_action_button.gd")
@@ -61,6 +62,9 @@ var _wave_label: Label
 var _score_line: Label
 ## 小地图下方那行左边的金币。手机端没有横着的状态卡，钱要在左上角一眼看到。
 var _map_gold_label: Label
+## 客机延迟读数：紧挨金币行右侧，主机不显示（自己到自己的 RTT 没有意义）。
+var _rtt_label: Label
+var _shown_rtt := -2
 var _objective_label: Label
 var _score_panel: PanelContainer
 var _econ_panel: PanelContainer
@@ -205,7 +209,8 @@ func _apply_layout() -> void:
 	if viewport.x < 1.0 or viewport.y < 1.0:
 		# 还没进场景树（无头测试）时按设计基准算，保证取值确定、不依赖节点尺寸。
 		viewport = Vector2(1600.0, 900.0)
-	_layout = HudLayout.zones(viewport, touch_mode)
+	var insets := _safe_insets(viewport)
+	_layout = HudLayout.zones(viewport, touch_mode, insets)
 	_place_zone(_score_panel, _layout["score"])
 	# 经济条贴在比分板右侧；窗口太窄时分区宽度会被压到 0，这时整条隐藏，
 	# 而不是让它压在商店按钮上。
@@ -222,9 +227,10 @@ func _apply_layout() -> void:
 		_place_zone(_joystick, _layout["joystick"])
 		_place_zone(_pause_button, _layout["pause"])
 		_place_zone(_recall_bar, _layout["recall"])
-		_place_touch_skills(viewport)
-		_place_mode_buttons(viewport)
-		_place_utility_buttons(viewport)
+		_place_touch_skills(viewport, insets)
+		_place_mode_buttons(viewport, insets)
+		_place_utility_buttons(viewport, insets)
+		_place_attack_button(insets)
 	else:
 		# 键鼠：技能条贴右下，攻击模式条压在它上面（低频率控件不进战场正中）。
 		_place_zone(_attack_cluster, _layout["mode"])
@@ -244,19 +250,33 @@ func _place_zone(node: Control, rect: Rect2) -> void:
 	node.offset_right = rect.end.x
 	node.offset_bottom = rect.end.y
 
+## 引擎安全区换算。只在 mobile 上生效；桌面端返回 0，窗口移动不会推动 HUD。
+func _safe_insets(viewport: Vector2) -> Rect2i:
+	return HudLayout.safe_insets(
+		Vector2(DisplayServer.window_get_size()),
+		DisplayServer.get_display_safe_area(),
+		OS.has_feature("mobile"),
+		viewport
+	)
+
+## 拇指控件都锚在右下角；只用右/下 inset 收缩可用视口，左/上由分区表处理。
+func _touch_viewport(viewport: Vector2, insets: Rect2i) -> Vector2:
+	return viewport - Vector2(float(insets.size.x), float(insets.size.y))
+
 ## 触屏端的攻击模式圆按钮：位置全从 TouchLayout 取，跟攻击键、技能弧共享同一套几何。
-func _place_mode_buttons(viewport: Vector2) -> void:
-	var rects := TouchLayout.mode_button_rects(viewport)
+func _place_mode_buttons(viewport: Vector2, insets := Rect2i()) -> void:
+	var safe := _touch_viewport(viewport, insets)
+	var rects := TouchLayout.mode_button_rects(safe)
 	for i in _mode_buttons.size():
 		if i < rects.size():
 			_place_zone(_mode_buttons[i], rects[i])
 	if _lock_bar != null:
-		_lock_bar.set_viewport_size(viewport)
+		_lock_bar.set_viewport_size(safe)
 
 ## 回城 / 传送 / 召唤师：底部横排，紧贴技能弧左侧（详见 TouchLayout.utility_button_rects）。
 ## 顺序从远到近是 回城 → 传送 → 召唤师，召唤师离技能最近。
-func _place_utility_buttons(viewport: Vector2) -> void:
-	var rects := TouchLayout.utility_button_rects(viewport)
+func _place_utility_buttons(viewport: Vector2, insets := Rect2i()) -> void:
+	var rects := TouchLayout.utility_button_rects(_touch_viewport(viewport, insets))
 	var nodes := [_recall_button, _teleport_button, _summoner_button]
 	for i in nodes.size():
 		if i < rects.size():
@@ -407,6 +427,23 @@ func set_bush_hidden(value: bool) -> void:
 		return
 	_bush_label.visible = value
 
+## 客机延迟读数。负数 = 不显示（单机/主机/还没测到）。
+## 阈值：<80 绿、<160 黄、>=160 红 —— 红不是禁止玩，是提示走位要多留提前量。
+func set_rtt(ms: int) -> void:
+	if _rtt_label == null or ms == _shown_rtt:
+		return
+	_shown_rtt = ms
+	if ms < 0:
+		_rtt_label.text = ""
+		return
+	_rtt_label.text = "%dms" % ms
+	var color := GameTheme.GREEN
+	if ms >= 160:
+		color = GameTheme.RED
+	elif ms >= 80:
+		color = Color(0.95, 0.78, 0.3)
+	_rtt_label.add_theme_color_override("font_color", color)
+
 func _build_minimap() -> void:
 	_minimap_panel = PanelContainer.new()
 	_minimap_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.82), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
@@ -436,11 +473,18 @@ func _build_minimap() -> void:
 		meta_row.add_theme_constant_override("separation", 8)
 		box.add_child(meta_row)
 		meta_row.add_child(_map_gold_label)
+		# 延迟紧跟金币右侧：这是同一行里玩家最常扫的位置。
+		_rtt_label = _make_label("", 12, GameTheme.GREEN)
+		_rtt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		meta_row.add_child(_rtt_label)
 		_objective_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		_objective_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		meta_row.add_child(_objective_label)
 	else:
 		box.add_child(_objective_label)
+		_rtt_label = _make_label("", 12, GameTheme.GREEN)
+		_rtt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		box.add_child(_rtt_label)
 
 func _on_minimap_location_clicked(world: Vector2) -> void:
 	map_focus_requested.emit(world)
@@ -1128,9 +1172,20 @@ func _build_touch_controls() -> void:
 	_recall_bar = RecallBar.new()
 	add_child(_recall_bar)
 
-func _place_touch_skills(viewport: Vector2) -> void:
+## 普攻键用锚点贴右下；inset 只能在这里补，否则它仍会压进手势条。
+func _place_attack_button(insets := Rect2i()) -> void:
+	if _attack_button == null:
+		return
+	var right := float(insets.size.x)
+	var bottom := float(insets.size.y)
+	_attack_button.offset_left = -right - TouchLayout.ATTACK_MARGIN.x - TouchLayout.ATTACK_BUTTON_SIZE
+	_attack_button.offset_top = -bottom - TouchLayout.ATTACK_MARGIN.y - TouchLayout.ATTACK_BUTTON_SIZE
+	_attack_button.offset_right = -right - TouchLayout.ATTACK_MARGIN.x
+	_attack_button.offset_bottom = -bottom - TouchLayout.ATTACK_MARGIN.y
+
+func _place_touch_skills(viewport: Vector2, insets := Rect2i()) -> void:
 	var nodes := [_skill_q, _skill_w, _skill_e, _skill_r]
-	var centers := TouchLayout.skill_arc_centers(viewport)
+	var centers := TouchLayout.skill_arc_centers(_touch_viewport(viewport, insets))
 	var half := TouchLayout.SKILL_TOUCH_SIZE * 0.5
 	for i in nodes.size():
 		if i >= centers.size():
@@ -1199,6 +1254,11 @@ func _build_pause_overlay() -> void:
 	resume.custom_minimum_size = Vector2(0, button_height)
 	resume.pressed.connect(func(): resume_requested.emit())
 	box.add_child(resume)
+	var settings := Button.new()
+	settings.text = "设置"
+	settings.custom_minimum_size = Vector2(0, button_height)
+	settings.pressed.connect(_open_settings_from_pause)
+	box.add_child(settings)
 	var leave := Button.new()
 	leave.text = "离开对局"
 	leave.custom_minimum_size = Vector2(0, button_height)
@@ -1208,6 +1268,11 @@ func _build_pause_overlay() -> void:
 	_pause_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_pause_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	box.add_child(_pause_hint)
+
+func _open_settings_from_pause() -> void:
+	var panel := SettingsPanel.new()
+	panel.name = "SettingsPanel"
+	add_child(panel)
 
 func _build_result_overlay() -> void:
 	_result_overlay = ColorRect.new()

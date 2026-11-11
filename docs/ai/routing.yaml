@@ -17,11 +17,12 @@ always_read:
   - docs/ai/01-repo-reality.md
 
 # 全局验证命令
+version_note: "需要开窗口的渲染工具一律经 godot/tools/shot_offscreen.ps1 走隐藏桌面；直接 godot --path godot --script 会在用户桌面上闪窗。"
 verify:
   tests: "godot --headless --path godot --script res://tests/run_tests.gd"
-  ui_shot: "godot --path godot --script res://tools/ui_shot.gd"
-  mobile_shot: "godot --path godot --script res://tools/mobile_shot.gd"
-  perf: "godot --path godot --script res://tools/perf_check.gd"
+  ui_shot: "powershell -ExecutionPolicy Bypass -File godot/tools/shot_offscreen.ps1 tools/ui_shot.gd"
+  mobile_shot: "powershell -ExecutionPolicy Bypass -File godot/tools/shot_offscreen.ps1 tools/mobile_shot.gd"
+  perf: "powershell -ExecutionPolicy Bypass -File godot/tools/shot_offscreen.ps1 tools/perf_check.gd"
   device: "cd godot && python tools/device_checks.py"
   clean_check: "git status --porcelain"
   wiring_check: "grep -rn <ClassName> --include=*.gd godot/scripts godot/sim godot/net"

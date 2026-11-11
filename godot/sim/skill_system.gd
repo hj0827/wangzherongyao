@@ -15,14 +15,13 @@ const SUMMONER_SPELLS := {
 		"cooldown": 90.0,
 		"range": 4.8,
 	},
-	"execute": {
-		"id": "execute",
-		"name": "终结",
-		"desc": "对身旁残血敌人造成基于已损生命的真实伤害。",
+	"sprint": {
+		"id": "sprint",
+		"name": "疾跑",
+		"desc": "短时间内大幅提升移动速度，用于追击或逃生。",
 		"cooldown": 90.0,
-		"range": 4.0,
-		"base_damage": 120.0,
-		"missing_hp_pct": 0.14,
+		"range": 0.0,
+		"duration": 8.0,
 	},
 	"cleanse": {
 		"id": "cleanse",
@@ -241,15 +240,9 @@ static func cast_summoner_spell(hero: Dictionary, spell_id: String, aim: Vector2
 			# nearest_free 兜住两件事：落点不许卡在墙里，以及地图可走边界
 			# （内部 clamp_bounds 让出相机安全边距），所以闪现闪不出地图。
 			hero["pos"] = Collision.nearest_free(hero_pos + dir * dist, float(hero.get("radius", 0.55)))
-		"execute":
-			var enemy: Dictionary = _find_target_near(hero, hero_pos, range_val, sim)
-			if enemy.is_empty():
-				return false
-			var missing_hp: float = maxf(0.0, float(enemy.get("max_hp", 1.0)) - float(enemy.get("hp", 0.0)))
-			var true_damage: float = float(spell.get("base_damage", 120.0)) + missing_hp * float(spell.get("missing_hp_pct", 0.14))
-			# 终结是真实伤害（项 1.2）：描述写「真实伤害」，实现必须走 "true" 分型，
-			# 否则高护甲坦克蹲泉水就能无视斩杀线。
-			_deal_damage(hero, enemy, true_damage, sim, "true")
+		"sprint":
+			# 疾跑走的是已有的加速计时器，与治疗/装备加速同一条结算路径。
+			hero["haste_timer"] = maxf(float(hero.get("haste_timer", 0.0)), float(spell.get("duration", 8.0)))
 		"cleanse":
 			# 项 4：净化必须清掉**所有**控制，不只是减速。
 			# 技能描述写的是"解除所有控制与负面状态"，只清 slow 就是

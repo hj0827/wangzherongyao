@@ -4,6 +4,7 @@ const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
 const UnitVisualScript = preload("res://scripts/game/unit_visual.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
+const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const Arena = preload("res://scripts/game/arena.gd")
 
 func test_back_key_is_delivered_to_game() -> void:
@@ -103,6 +104,23 @@ func test_utility_buttons_form_a_bottom_row_like_honor_of_kings() -> void:
 		var arc := TouchLayout.skill_arc_centers(viewport_size)
 		var q_left := arc[0].x - TouchLayout.SKILL_TOUCH_SIZE.x * 0.5
 		near(slots[2].end.x, q_left - TouchLayout.UTILITY_SKILL_GAP, 0.001, "summoner sits next to the skill arc")
+
+func test_rtt_readout_sits_next_to_gold_and_colors_by_latency() -> void:
+	var hud := GameHUD.new()
+	hud.setup("p1", "blue", "blade", "你", true, false)
+	hud._ready()
+	check(hud._rtt_label != null, "touch HUD builds an RTT readout")
+	check(hud._rtt_label.get_parent() == hud._map_gold_label.get_parent(), "RTT shares the gold row")
+	hud.set_rtt(-1)
+	eq(hud._rtt_label.text, "", "unknown RTT (host/offline) shows nothing")
+	hud.set_rtt(45)
+	eq(hud._rtt_label.text, "45ms", "RTT renders in milliseconds")
+	eq(hud._rtt_label.get_theme_color("font_color"), GameTheme.GREEN, "45ms is green")
+	hud.set_rtt(120)
+	check(hud._rtt_label.get_theme_color("font_color") != GameTheme.GREEN, "120ms leaves green")
+	hud.set_rtt(200)
+	eq(hud._rtt_label.get_theme_color("font_color"), GameTheme.RED, "200ms is red")
+	hud.free()
 
 func test_touch_skill_drag_aims_and_cancels() -> void:
 	var hud := GameHUD.new()

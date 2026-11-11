@@ -149,9 +149,11 @@ hero 分支逐字段列举并钳制范围。W/R/召唤师冷却、金币、装�
 
 ### 4.4 事件白名单（`_sanitize_event`）
 
-只放行固定键名列表：`type / hero / source / source_type / target / target_type / slot / hero_type / minion_type / team / x / y / aim_x / aim_y / target_x / target_y / value / damage / wave / level / winner / entity_type / killer* / victim* / tier / buff / objective_id / name`。
+只放行固定键名列表：`type / hero / source / source_type / target / target_type / slot / hero_type / minion_type / monster_type / camp_id / buff_type / objective / team / x / y / aim_x / aim_y / target_x / target_y / value / damage / wave / level / winner / entity_type / killer* / victim* / tier / buff / objective_id / name / kind / id / owner_id`。
 
-`minion_attack`（小兵普攻）与 `structure_attack`（塔/主堡开火）的表现靠 `minion_type / source_type / target_type / tier` 选刀光、弹丸或光束；漏掉任何一个，客机会退回默认特效。
+`minion_attack`（小兵普攻）、`monster_attack`（野怪/首领普攻）与 `structure_attack`（塔/主堡开火）的表现靠 `minion_type / monster_type / camp_id / buff_type / objective / source_type / target_type / tier` 选刀光、爪光、弹丸或光束；漏掉任何一个，客机会退回默认特效。
+
+`monster_attack` 的 4 个野怪专属键（2026-11-11 加入）：`monster_type`（爪光形状）、`buff_type`（红/蓝石像配色）、`camp_id`（营地点位）、`objective`（首领砸地 vs 普通野点）。`test_monster_attack_fx` 的 `test_net_whitelist_keeps_monster_attack_fields` 逐条守。
 
 **自定义事件里带的新键会被丢掉**——比如你想发 `{"type":"gold_gain","amount":50}`，`amount` 不在名单里，客机收到的事件里没有金额。
 

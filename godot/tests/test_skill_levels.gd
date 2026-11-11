@@ -654,6 +654,32 @@ func test_composed_name_actually_prints_the_level() -> void:
 
 # ---------------------------------------------------------------- bot 侧（不能因新规则卡死）
 
+func test_manual_mode_only_holds_points_for_humans_not_bots() -> void:
+	# 设置里关掉自动加点只该影响玩家自己的英雄：bot 没有人点，
+	# 若也攒点就会整局不成长（改设置 = 队友变弱），且不报错。
+	# 「人类攒点」已由 test_manual_mode_keeps_points_for_the_player 覆盖。
+	var sim := MatchSim.new({
+		"mode": "team", "humans": [], "bot_fill": true, "bot_ai": true,
+		"auto_skill_points": false,
+	})
+	var tick := 1.0 / MatchSim.TICK_RATE
+	for i in int(300.0 * MatchSim.TICK_RATE):
+		sim.tick(tick)
+		sim.state.events.clear()
+	var bots := 0
+	var leveled := 0
+	for entity in sim.state.entities:
+		if str(entity.get("type", "")) != "hero":
+			continue
+		if str(entity.get("controller", "")) != "bot":
+			continue
+		bots += 1
+		if int(entity.get("level", 1)) > 1:
+			leveled += 1
+		eq(int(entity.get("skill_points", -1)), 0, "bot 不受玩家自动加点开关影响，点数必须花掉")
+	gt(bots, 0, "这局必须有 bot，否则用例空转")
+	gt(leveled, 0, "bot 必须真的升过级，否则「点数已花掉」是空断言")
+
 func test_bots_level_their_skills_and_cast_their_ultimate() -> void:
 	# 验收表 2.4 的真机口径：不操作也能正常成长。bot 走同一套自动方案。
 	var sim := MatchSim.new({

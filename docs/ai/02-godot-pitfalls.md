@@ -21,6 +21,29 @@ run.cmd
 "D:\Software\Godot\Godot_v4.7-stable_win64.exe" --path godot
 ```
 
+### 1.1 需要渲染 / 截图时：只走隐藏桌面
+
+`tools/*_shot.gd` 和其它画廊工具依赖 `RenderingServer.frame_post_draw`，`--headless` 下这个信号**永远不触发**，进程会一直挂着（实测 20 秒无任何输出，只能 kill）。所以它们必须带真实渲染上下文跑；而直接跑会在用户可见桌面上弹窗。
+
+`--position 5200,3200` / `--resolution 1x1` 只是"跑起来之后挪走"，**盖不住 0.9 秒前的那一闪**：实测窗口在 `t=0.3s` 出现在 (152,39) 居中的 1616×939，到 `t=0.86s` 才移到 5200,3200。
+
+正确做法是 `godot/tools/shot_offscreen.ps1`：用 `CreateDesktop()` 建一个不属于可见桌面的桌面，把 Godot 起在上面。窗口照样创建、OpenGL 照样初始化、截图逐像素一致，但用户看不到。
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\ui_shot.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\unit_attack_shot.gd --fixed-fps 30
+```
+
+脚本会自动加 `--audio-driver Dummy`（否则 WASAPI 报错刷屏）、把 stdout 落到 `.tmp/offscreen_*.log`、跑完列出新增的 `godot/shots/*.png`。额外参数**直接跟在脚本名后面**，不要加 `--` 分隔符（Windows PowerShell 会把裸 `--` 当成有歧义的参数名直接报错）：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\unit_attack_shot.gd --fixed-fps 30
+```
+
+**验收方法**：跑的时候用 `EnumWindows` 查该 pid 在可见桌面上没有窗口——本仓库 2026-11-11 用这个对照法验证过（直接跑能抓到 "烽火峡谷 (DEBUG)"，走脚本抓到 0 个）。
+
+注意 `--fixed-fps` 是**引擎参数**，不是脚本参数：它会生效（实测 `_process` 的 delta 从 0.0033 变 0.03），但不会出现在 `OS.get_cmdline_args()` 里。所以脚本内部不要指望读到它。
+
 ---
 
 ## 2. APPDATA 为空 → `user://` 会污染工程目录

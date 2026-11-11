@@ -45,6 +45,60 @@ func _overlaps(zones: Dictionary, names: Array) -> Array:
 
 # ---------------------------------------------------------------- 桌面端
 
+const PHONE_INSETS := Rect2i(0, 60, 90, 48)
+const EXTREME_INSETS := Rect2i(0, 300, 200, 120)
+
+func test_safe_insets_keep_desktop_zones_inside_the_safe_rect() -> void:
+	var viewport := Vector2(1600.0, 900.0)
+	var zones := HudLayout.zones(viewport, false, PHONE_INSETS)
+	var m := HudLayout.MARGIN
+	var inner := Rect2(
+		Vector2(PHONE_INSETS.position),
+		viewport - Vector2(PHONE_INSETS.size) - Vector2(PHONE_INSETS.position)
+	)
+	for name in PC_ZONES:
+		var rect: Rect2 = zones[name]
+		check(rect.position.x >= inner.position.x + m - 0.01, "%s leaks into the left inset" % name)
+		check(rect.position.y >= inner.position.y + m - 0.01, "%s leaks into the top inset" % name)
+		check(rect.end.x <= inner.end.x - m + 0.01, "%s leaks into the right inset" % name)
+		check(rect.end.y <= inner.end.y - m + 0.01, "%s leaks into the bottom inset" % name)
+
+func test_safe_insets_never_make_desktop_zones_overlap() -> void:
+	for insets in [PHONE_INSETS, EXTREME_INSETS]:
+		var zones := HudLayout.zones(Vector2(1600.0, 900.0), false, insets)
+		var bad := _overlaps(zones, PC_ZONES)
+		eq(bad.size(), 0, "HUD zones collide with insets %s: %s" % [insets, bad])
+
+func test_safe_insets_keep_touch_zones_inside_the_safe_rect() -> void:
+	var viewport := Vector2(1600.0, 900.0)
+	var zones := HudLayout.zones(viewport, true, PHONE_INSETS)
+	var m := HudLayout.MARGIN
+	var inner := Rect2(
+		Vector2(PHONE_INSETS.position),
+		viewport - Vector2(PHONE_INSETS.size) - Vector2(PHONE_INSETS.position)
+	)
+	for name in TOUCH_ZONES:
+		var rect: Rect2 = zones[name]
+		# 摇杆是贴边控件，旧布局就用 12px 而不是 16px；这里只要求不进入 inset。
+		var left_pad := 0.0 if name == "joystick" else m
+		check(rect.position.x >= inner.position.x + left_pad - 0.01, "touch %s leaks into the left inset" % name)
+		check(rect.position.y >= inner.position.y + m - 0.01, "touch %s leaks into the top inset" % name)
+		check(rect.end.x <= inner.end.x - m + 0.01, "touch %s leaks into the right inset" % name)
+		check(rect.end.y <= inner.end.y - m + 0.01, "touch %s leaks into the bottom inset" % name)
+
+func test_zero_insets_match_the_legacy_layout() -> void:
+	var viewport := Vector2(1600.0, 900.0)
+	for touch in [false, true]:
+		var legacy := HudLayout.zones(viewport, touch)
+		var explicit := HudLayout.zones(viewport, touch, Rect2i())
+		eq(legacy, explicit, "zero insets must be byte-identical to the old layout (touch=%s)" % touch)
+
+func test_safe_insets_conversion_scales_with_viewport_and_ignores_desktop() -> void:
+	var safe := Rect2i(0, 60, 1510, 792)
+	eq(HudLayout.safe_insets(Vector2(1600.0, 900.0), safe, false, Vector2(1600.0, 900.0)), Rect2i(), "desktop must not shift")
+	var scaled := HudLayout.safe_insets(Vector2(1600.0, 900.0), safe, true, Vector2(800.0, 450.0))
+	eq(scaled, Rect2i(0, 30, 45, 24), "mobile insets scale with the viewport")
+
 func test_desktop_zones_never_overlap_each_other() -> void:
 	for viewport in DESKTOP_SIZES:
 		var zones := HudLayout.zones(viewport, false)

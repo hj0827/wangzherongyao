@@ -8,7 +8,8 @@ extends SceneTree
 # 这个工具复刻 arena 的 environment，把三种关系的血条各渲一格，
 # 采样中心像素，打印「设定色 -> 实际渲染色」，改色前先跑它。
 #
-# 用法：godot --path godot --script res://tools/bar_color_shot.gd
+# 用法：powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\bar_color_shot.gd
+#       （别直接 godot --path godot --script：会开窗口闪一下；脚本走隐藏桌面）
 # 产物：godot/shots/bar_colors.png（不入库）
 
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")

@@ -372,7 +372,10 @@ func _setup_teams() -> void:
 		if not HeroDefs.is_valid(hero_type):
 			hero_type = "blade"
 		var display_name: String = str(data.get("name", owner_id))
-		_spawn_hero(owner_id, display_name, team, "human", hero_type, slots[team])
+		var summoner := str(data.get("summoner_spell", "flash"))
+		if not SkillSystem.SUMMONER_SPELLS.has(summoner):
+			summoner = "flash"
+		_spawn_hero(owner_id, display_name, team, "human", hero_type, slots[team], summoner)
 		slots[team] += 1
 		human_counts[team] += 1
 
@@ -410,7 +413,7 @@ func _spawn_point(team: String, slot: int) -> Vector2:
 	var limit := MapData.BOUNDS - 1.0
 	return Vector2(clampf(point.x, -limit, limit), clampf(point.y, -limit, limit))
 
-func _spawn_hero(owner_id: String, display_name: String, team: String, controller: String, hero_type: String, slot: int) -> void:
+func _spawn_hero(owner_id: String, display_name: String, team: String, controller: String, hero_type: String, slot: int, summoner := "flash") -> void:
 	var hero_def: Dictionary = HeroDefs.get_hero(hero_type)
 	var lane := "mid"
 	# 红方是否走镜像路（top↔bottom）。
@@ -501,7 +504,7 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"skill_e_level": 1,
 		"skill_r_level": 0,
 		"skill_points": 0,
-		"summoner_spell": "flash",
+		"summoner_spell": summoner,
 		"summoner_cd": 0.0,
 		"attack_mode": "default",
 		"locked_target": -1,
@@ -799,6 +802,24 @@ func _update_monsters(dt: float) -> void:
 			if float(entity.attack_cd) <= 0.0:
 				entity.attack_cd = float(entity.attack_interval)
 				entity.facing = (target.pos - entity.pos).normalized()
+				# 野怪出手必须发事件：在此之前它只结算伤害，表现层只能从 hit 的 source
+				# 反推「有东西打了我」，于是打野时怪一动不动、没有爪光、没有音效 ——
+				# 玩家读不出「它在还手」。字段与 minion_attack 同构，客机靠同一份白名单还原。
+				_emit("monster_attack", {
+					"source": entity.id,
+					"team": entity.team,
+					"monster_type": str(entity.get("monster_type", "wolf")),
+					"camp_id": str(entity.get("camp_id", "")),
+					"buff_type": str(entity.get("buff_type", "")),
+					"objective": bool(entity.get("objective", false)),
+					"objective_id": str(entity.get("objective_id", "")),
+					"x": float(entity.pos.x),
+					"y": float(entity.pos.y),
+					"target": target.id,
+					"target_type": target.type,
+					"target_x": float(target.pos.x),
+					"target_y": float(target.pos.y),
+				})
 				_damage(target, float(entity.attack_damage), entity)
 		elif not bool(entity.get("objective", false)):
 			var home: Vector2 = entity.get("home_pos", entity.pos)
@@ -1152,12 +1173,10 @@ func _use_bot_summoner(hero: Dictionary, target: Dictionary, distance: float) ->
 		"heal":
 			if hp_ratio < 0.55:
 				SkillSystem.cast_summoner_spell(hero, spell, hero.pos, self)
-		"execute":
-			if target.is_empty():
-				return
-			var target_ratio := float(target.get("hp", 0.0)) / maxf(1.0, float(target.get("max_hp", 1.0)))
-			if distance <= 4.0 and target_ratio < 0.4:
-				SkillSystem.cast_summoner_spell(hero, spell, target.pos, self)
+		"sprint":
+			# 疾跑：残血拉扯或距离拉远时开，追击/逃生都用得上。
+			if hp_ratio < 0.6 or (not target.is_empty() and distance > 6.0):
+				SkillSystem.cast_summoner_spell(hero, spell, hero.pos, self)
 		"cleanse":
 			# 项 4：净化要在**任何控制**下都能交，不只是减速。
 			# 原来只判 slow_timer，于是被眩晕/沉默时 bot 挨打也不解控 ——
@@ -1977,7 +1996,8 @@ func _add_xp(hero: Dictionary, amount: float) -> void:
 		hero.mp = minf(float(hero.max_mp), float(hero.mp) + float(hero_def.mp_growth))
 		# 项 2：每升 1 级给 1 点技能点。1 级（出生）不给，所以发点数发生在升级之后。
 		hero.skill_points = int(hero.get("skill_points", 0)) + 1
-		if bool(config.get("auto_skill_points", true)):
+		# 自动加点是玩家的本地偏好；bot 没有手动加点入口，必须始终自动点。
+		if hero.controller == "bot" or bool(config.get("auto_skill_points", true)):
 			_auto_spend(hero)
 		_emit("level_up", {"hero": hero.id, "level": hero.level})
 

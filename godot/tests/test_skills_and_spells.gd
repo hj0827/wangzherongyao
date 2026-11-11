@@ -40,9 +40,9 @@ func test_hero_defs_has_full_four_skills_and_passive() -> void:
 func test_summoner_spells_registered() -> void:
 	var spells: Array = SkillSystem.get_available_summoner_spells()
 	check(spells.has("flash"), "must include flash")
-	check(spells.has("execute"), "must include execute")
-	check(spells.has("cleanse"), "must include cleanse")
 	check(spells.has("heal"), "must include heal")
+	check(spells.has("sprint"), "must include sprint")
+	check(spells.has("cleanse"), "must include cleanse")
 	
 	var flash: Dictionary = SkillSystem.get_summoner_spell("flash")
 	eq(flash.get("name"), "闪现", "flash name")
@@ -135,19 +135,27 @@ func _pick_wall_for_flash(radius: float, range_val: float) -> Array:
 		return [start, goal, normal, mid]
 	return []
 
-func test_summoner_execute_deals_missing_health_true_damage() -> void:
+func test_summoner_sprint_grants_a_speed_boost() -> void:
 	var sim := _create_sim()
 	var blue: Dictionary = sim.get_hero_by_player("p1")
-	var red: Dictionary = sim.get_hero_by_player("p2")
 	var bpos: Vector2 = blue.get("pos", Vector2.ZERO)
-	red["pos"] = bpos + Vector2(2.0, 0.0)
-	red["hp"] = 300.0
-	var hp_before: float = float(red.get("hp", 0.0))
-	
-	var rpos: Vector2 = red.get("pos", Vector2.ZERO)
-	var ok: bool = SkillSystem.cast_summoner_spell(blue, "execute", rpos, sim)
-	check(ok, "execute should succeed when enemy nearby")
-	lt(float(red.get("hp", 0.0)), hp_before, "execute deals missing health damage")
+	var ok: bool = SkillSystem.cast_summoner_spell(blue, "sprint", bpos, sim)
+	check(ok, "sprint should succeed")
+	gt(float(blue.get("haste_timer", 0.0)), 0.0, "sprint grants a haste window")
+	gt(float(blue.get("summoner_cd", 0.0)), 0.0, "sprint enters cooldown")
+
+func test_summoner_input_uses_the_hero_configured_spell() -> void:
+	# 守卫「输入路径写死 flash」：玩家在大厅选了疾跑，按技能键必须放疾跑。
+	var sim := _create_sim()
+	var blue: Dictionary = sim.get_hero_by_player("p1")
+	blue["summoner_spell"] = "sprint"
+	blue["summoner_cd"] = 0.0
+	blue["haste_timer"] = 0.0
+	blue["hp"] = float(blue.get("max_hp", 1.0))
+	sim.set_input("p1", {"summoner": true, "aim": blue.get("pos", Vector2.ZERO)})
+	sim.tick(1.0 / 30.0)
+	gt(float(blue.get("haste_timer", 0.0)), 0.0, "按技能键放的是英雄配置的疾跑")
+	gt(float(blue.get("summoner_cd", 0.0)), 0.0, "疾跑进入冷却")
 
 func test_summoner_cleanse_removes_slow_and_grants_immunity() -> void:
 	var sim := _create_sim()

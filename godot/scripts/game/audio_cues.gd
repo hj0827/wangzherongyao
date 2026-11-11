@@ -149,6 +149,10 @@ const CUE_RESPAWN := "respawn"
 const CUE_DENIED := "denied"
 const CUE_LOW_HP := "low_hp"
 const CUE_TOWER_SHOT := "tower_shot"
+# 野区：挥爪与首领砸地。两条都刻意**没有音高**（harm 留空），
+# 否则野区会变成一段旋律：打野一秒好几下，有音高的音会互相打架。
+const CUE_MONSTER_SWIPE := "monster_swipe"
+const CUE_MONSTER_SLAM := "monster_slam"
 const CUE_UI_CLICK := "ui_click"
 const CUE_UI_CONFIRM := "ui_confirm"
 const CUE_UI_BACK := "ui_back"
@@ -161,6 +165,7 @@ const NAMES := [
 	CUE_DEATH_HERO, CUE_DEATH_MINION, CUE_TOWER_DOWN, CUE_GUARD_DOWN, CUE_SHIELD_BREAK,
 	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
+	CUE_MONSTER_SWIPE, CUE_MONSTER_SLAM,
 	CUE_UI_CLICK, CUE_UI_CONFIRM, CUE_UI_BACK, CUE_UI_ERROR,
 	"enter_bush", "exit_bush",
 	"recall_channel", "recall_done", "recall_break",
@@ -226,6 +231,10 @@ static func cue(cue_name: String) -> AudioStreamWAV:
 			return low_hp()
 		CUE_TOWER_SHOT:
 			return tower_shot()
+		CUE_MONSTER_SWIPE:
+			return monster_swipe()
+		CUE_MONSTER_SLAM:
+			return monster_slam()
 		CUE_UI_CLICK:
 			return ui_click()
 		CUE_UI_CONFIRM:
@@ -437,6 +446,27 @@ static func low_hp() -> AudioStreamWAV:
 static func tower_shot() -> AudioStreamWAV:
 	return _cached(CUE_TOWER_SHOT, func() -> AudioStreamWAV:
 		return _synth(0.22, 4603, {"from": 900.0, "to": 300.0, "harm": [1.0, 0.3], "noise": 0.26, "noise_decay": 20.0, "decay": 2.8, "gain": 0.4})
+	)
+
+# ---------------- 野区 ----------------
+
+# 野怪挥爪：极短的一记"唰"，全是噪声扫频、没有音高。
+# 比 attack_swing（英雄挥砍，0.13s / 1900→480Hz）更短、更低、更闷：
+# 爪子是贴着地面刮过去的，不该和英雄的刀风抢同一个频段。
+static func monster_swipe() -> AudioStreamWAV:
+	return _cached(CUE_MONSTER_SWIPE, func() -> AudioStreamWAV:
+		return _synth(0.11, 5101, {"from": 1350.0, "to": 320.0, "harm": [], "noise": 0.7, "noise_decay": 22.0, "attack": 0.002, "decay": 3.4, "gain": 0.42})
+	)
+
+# 首领砸地：低频塌陷 + 碎石噪声长尾。全场都该听见「暴君拍下来了」，
+# 所以它比 tower_down（1.25s）短一点、但比任何一次普攻都长。
+static func monster_slam() -> AudioStreamWAV:
+	return _cached(CUE_MONSTER_SLAM, func() -> AudioStreamWAV:
+		return _layer(0.85, 5209, [
+			{"at": 0.0, "dur": 0.85, "spec": {"from": 84.0, "to": 30.0, "curve": 1.5, "harm": [1.0, 0.58], "noise": 0.52, "noise_decay": 6.0, "attack": 0.004, "decay": 2.0, "gain": 0.82}},
+			# 碎石层：紧跟一拍的高频粉噪，是"东西砸碎了"而不是"鼓敲了一下"。
+			{"at": 0.03, "dur": 0.34, "spec": {"freq": 220.0, "harm": [], "noise": 0.5, "noise_decay": 16.0, "attack": 0.002, "decay": 3.2, "gain": 0.3}},
+		])
 	)
 
 # ---------------- UI ----------------

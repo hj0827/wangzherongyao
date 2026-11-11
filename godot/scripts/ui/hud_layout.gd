@@ -86,49 +86,76 @@ static func skill_rect(skills_zone: Rect2, index: int) -> Rect2:
 		Vector2(SKILL_W, SKILL_H)
 	)
 
-static func safe_center(viewport: Vector2) -> Rect2:
+## 把引擎的屏幕安全区换算成「相对视口」的四边 inset。
+## 约定：返回 Rect2i 的 position=(左, 上)，size=(右, 下)。
+## 桌面端（mobile=false）始终返回 0，保证窗口位置变化不会推动 HUD。
+static func safe_insets(window_size: Vector2, safe_area: Rect2i, mobile: bool, viewport: Vector2) -> Rect2i:
+	if not mobile or window_size.x <= 0.0 or window_size.y <= 0.0:
+		return Rect2i()
+	if safe_area.size.x <= 0 or safe_area.size.y <= 0:
+		return Rect2i()
+	var scale := viewport / window_size
+	return Rect2i(
+		int(maxf(0.0, float(safe_area.position.x)) * scale.x),
+		int(maxf(0.0, float(safe_area.position.y)) * scale.y),
+		int(maxf(0.0, window_size.x - float(safe_area.end.x)) * scale.x),
+		int(maxf(0.0, window_size.y - float(safe_area.end.y)) * scale.y)
+	)
+
+static func safe_center(viewport: Vector2, insets := Rect2i()) -> Rect2:
+	var left := maxf(0.0, float(insets.position.x))
+	var top := maxf(0.0, float(insets.position.y))
+	var w := maxf(viewport.x - left - maxf(0.0, float(insets.size.x)), 640.0)
+	var h := maxf(viewport.y - top - maxf(0.0, float(insets.size.y)), 360.0)
 	return Rect2(
-		SAFE_CENTER.position.x * viewport.x,
-		SAFE_CENTER.position.y * viewport.y,
-		SAFE_CENTER.size.x * viewport.x,
-		SAFE_CENTER.size.y * viewport.y
+		left + SAFE_CENTER.position.x * w,
+		top + SAFE_CENTER.position.y * h,
+		SAFE_CENTER.size.x * w,
+		SAFE_CENTER.size.y * h
 	)
 
 ## 返回 { 分区名: Rect2 }。touch=true 走拇指操作区的排法，false 走键鼠排法。
-static func zones(viewport: Vector2, touch: bool) -> Dictionary:
-	var w := maxf(viewport.x, 640.0)
-	var h := maxf(viewport.y, 360.0)
+## insets 为屏幕安全区四边（刘海/圆角/手势条）；为零时布局与旧版逐像素一致。
+static func zones(viewport: Vector2, touch: bool, insets := Rect2i()) -> Dictionary:
+	var left := maxf(0.0, float(insets.position.x))
+	var top := maxf(0.0, float(insets.position.y))
+	var right := maxf(0.0, float(insets.size.x))
+	var bottom := maxf(0.0, float(insets.size.y))
+	var w := maxf(viewport.x - left - right, 640.0)
+	var h := maxf(viewport.y - top - bottom, 360.0)
+	var ox := left
+	var oy := top
 	var m := MARGIN
 	var z: Dictionary = {}
 
 	# —— 顶部信息带：小地图在左、比分居中、商店在右上、播报退到商店下面 ——
-	z["minimap"] = Rect2(m, m, MINIMAP_W, MINIMAP_H)
-	z["score"] = Rect2((w - SCORE_W) * 0.5, m, SCORE_W, SCORE_H)
-	var econ_left := (w + SCORE_W) * 0.5 + 10.0
-	var econ_right := w - m - SHOP_W - 10.0
-	z["econ"] = Rect2(econ_left, m, clampf(econ_right - econ_left, 0.0, ECON_W), ECON_H)
-	z["shop"] = Rect2(w - m - SHOP_W, m, SHOP_W, SHOP_H)
-	z["feed"] = Rect2(w - m - FEED_W, m + SHOP_H + 4.0, FEED_W, FEED_H)
+	z["minimap"] = Rect2(ox + m, oy + m, MINIMAP_W, MINIMAP_H)
+	z["score"] = Rect2(ox + (w - SCORE_W) * 0.5, oy + m, SCORE_W, SCORE_H)
+	var econ_left := ox + (w + SCORE_W) * 0.5 + 10.0
+	var econ_right := ox + w - m - SHOP_W - 10.0
+	z["econ"] = Rect2(econ_left, oy + m, clampf(econ_right - econ_left, 0.0, ECON_W), ECON_H)
+	z["shop"] = Rect2(ox + w - m - SHOP_W, oy + m, SHOP_W, SHOP_H)
+	z["feed"] = Rect2(ox + w - m - FEED_W, oy + m + SHOP_H + 4.0, FEED_W, FEED_H)
 	# 草丛状态是瞬时提示，放在比分正下方一行，不占分区，但也不许压住常驻控件。
-	z["bush"] = Rect2((w - 320.0) * 0.5, m + SCORE_H + 6.0, 320.0, 26.0)
+	z["bush"] = Rect2(ox + (w - 320.0) * 0.5, oy + m + SCORE_H + 6.0, 320.0, 26.0)
 
 	var skills_w := skills_width()
-	z["skills"] = Rect2(w - m - skills_w, h - m - SKILL_H, skills_w, SKILL_H)
+	z["skills"] = Rect2(ox + w - m - skills_w, oy + h - m - SKILL_H, skills_w, SKILL_H)
 	# 触屏端的攻击模式不再是横条面板，而是贴在攻击键旁的三颗圆（见 TouchLayout），
 	# 所以这里只给键鼠端留 mode 分区。
 	if not touch:
-		z["mode"] = Rect2(w - m - MODE_W, h - m - SKILL_H - MODE_GAP - MODE_H, MODE_W, MODE_H)
+		z["mode"] = Rect2(ox + w - m - MODE_W, oy + h - m - SKILL_H - MODE_GAP - MODE_H, MODE_W, MODE_H)
 
 	if touch:
 		# 拇指区：左下摇杆、右下攻击键 + 技能弧（弧由 TouchLayout 负责，这里只留摇杆）。
 		# 状态卡挂在小地图正下方，和小地图同宽同左沿：手机屏幕上「底部」和「中央」
 		# 都要留给战斗，能放常驻信息的只有左上这条已经存在的竖列。
-		z["hero"] = Rect2(m, m + MINIMAP_H + TOUCH_CARD_GAP, MINIMAP_W, TOUCH_HERO_H)
+		z["hero"] = Rect2(ox + m, oy + m + MINIMAP_H + TOUCH_CARD_GAP, MINIMAP_W, TOUCH_HERO_H)
 		# 回城条：左边是摇杆、右边是技能弧，中间这条 420 宽的带正好空着。
-		z["recall"] = Rect2((w - RECALL_W) * 0.5, h - m - RECALL_H, RECALL_W, RECALL_H)
+		z["recall"] = Rect2(ox + (w - RECALL_W) * 0.5, oy + h - m - RECALL_H, RECALL_W, RECALL_H)
 		z["joystick"] = Rect2(
-			JOYSTICK_MARGIN.x,
-			h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE,
+			ox + JOYSTICK_MARGIN.x,
+			oy + h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE,
 			JOYSTICK_SIZE,
 			JOYSTICK_SIZE
 		)
@@ -137,23 +164,32 @@ static func zones(viewport: Vector2, touch: bool) -> Dictionary:
 		# 放回左上角这条竖列，是因为右侧下半屏已经全给了拇指
 		# （技能弧 + 攻击键 + 模式圆 + 功能列）。
 		z["pause"] = Rect2(
-			m + MINIMAP_W + 8.0,
-			m + MINIMAP_H + TOUCH_CARD_GAP,
+			ox + m + MINIMAP_W + 8.0,
+			oy + m + MINIMAP_H + TOUCH_CARD_GAP,
 			TouchLayout.PAUSE_BUTTON_SIZE.x,
 			TouchLayout.PAUSE_BUTTON_SIZE.y
 		)
 		# 提示行整块落在摇杆上方。HINT_H 从 24 涨到 46 之后，旧的固定 "-32" 会压到摇杆顶上。
-		z["hints"] = Rect2(
-			m + 4.0,
-			h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE - 8.0 - HINT_H,
-			560.0,
-			HINT_H
-		)
+		# 极端顶部 inset 把纵向空间压到小地图下方时，横移到小地图右侧，避免重叠。
+		var touch_hints_y := oy + h - JOYSTICK_MARGIN.y - JOYSTICK_SIZE - 8.0 - HINT_H
+		var touch_hints_x := ox + m + 4.0
+		if touch_hints_y < oy + m + MINIMAP_H + 8.0:
+			touch_hints_x = ox + m + MINIMAP_W + 8.0
+		z["hints"] = Rect2(touch_hints_x, touch_hints_y, 560.0, HINT_H)
 	else:
 		# 键鼠区：状态卡贴左下、技能条贴右下，中间那片（英雄脚下）刻意留空。
-		z["hero"] = Rect2(m, h - m - HERO_H, hero_width(w), HERO_H)
+		z["hero"] = Rect2(ox + m, oy + h - m - HERO_H, hero_width(w), HERO_H)
 		# 提示行和状态卡之间留 16px：10px 在 1600x900 缩到 1080p 窗口后只剩 6px，
 		# 视觉上两块会粘在一起，看起来像提示压住了卡片。
-		z["hints"] = Rect2(m, h - m - HERO_H - HINT_H - 16.0, hint_width(w), HINT_H)
+		# 极端顶部 inset 下同样横移到小地图右侧，而不是压上去。
+		var hints_y := oy + h - m - HERO_H - HINT_H - 16.0
+		var hints_x := ox + m
+		if hints_y < oy + m + MINIMAP_H + 8.0:
+			hints_x = ox + m + MINIMAP_W + 8.0
+		# 提示行永远不伸进右下操作簇的列，极端 inset 下宁可收窄也不压模式条。
+		var mode_left := ox + w - m - MODE_W
+		var hints_w := minf(hint_width(w), w - m - (hints_x - ox))
+		hints_w = maxf(0.0, minf(hints_w, mode_left - 8.0 - hints_x))
+		z["hints"] = Rect2(hints_x, hints_y, hints_w, HINT_H)
 
 	return z

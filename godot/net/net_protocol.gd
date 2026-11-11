@@ -14,7 +14,7 @@ const MAX_STRING := 48
 const MAX_AIM := 58.0
 const MODES := ["duel", "team"]
 const ATTACK_MODES := ["default", "minion", "tower"]
-const SUMMONER_SPELLS := ["flash", "execute", "cleanse", "heal"]
+const SUMMONER_SPELLS := ["flash", "heal", "sprint", "cleanse"]
 const ENTITY_TYPES := ["hero", "minion", "tower", "guard", "base", "monster", "projectile"]
 # 战斗属性（项 1，链路 4）的入站钳制上限。resist/CDR/攻速都按"非负 + 封顶"清洗，
 # 负值一律钳到 0，杜绝客机伪造"负护甲 = 增伤"这类越界数值。
@@ -37,6 +37,7 @@ const TYPES := [
 	"welcome",
 	"room_state",
 	"set_hero",
+	"set_summoner",
 	"start_match",
 	"input",
 	"snapshot",
@@ -46,6 +47,8 @@ const TYPES := [
 	"peer_left",
 	"ping",
 	"pong",
+	# 断线重连：主机确认凭证有效、对局仍在进行时回 resume，客机重新进入战斗。
+	"resume",
 	"error",
 ]
 
@@ -181,10 +184,17 @@ static func sanitize_hello(raw: Dictionary) -> Dictionary:
 	var mode := str(raw.get("mode", "duel"))
 	if not MODES.has(mode):
 		mode = "duel"
+	var summoner := str(raw.get("summoner", "flash"))
+	if not SUMMONER_SPELLS.has(summoner):
+		summoner = "flash"
 	return {
 		"name": sanitize_name(raw.get("name", "")),
 		"hero_type": hero_type,
 		"mode": mode,
+		"summoner": summoner,
+		# 重连凭证：只在内存里生成与比对，绝不写盘。长度与字符都钳死，
+		# 避免被当成任意字典键或塞进日志。
+		"token": _short_string(str(raw.get("token", "")), 64),
 	}
 
 static func make_room_state(room: Dictionary) -> Dictionary:
@@ -204,11 +214,15 @@ static func make_room_state(room: Dictionary) -> Dictionary:
 			var hero_type := str(player.get("hero_type", "blade"))
 			if not HeroDefs.is_valid(hero_type):
 				hero_type = "blade"
+			var summoner := str(player.get("summoner_spell", "flash"))
+			if not SUMMONER_SPELLS.has(summoner):
+				summoner = "flash"
 			players.append({
 				"id": int(player.get("id", 0)),
 				"name": sanitize_name(player.get("name", "")),
 				"team": "red" if str(player.get("team", "blue")) == "red" else "blue",
 				"hero_type": hero_type,
+				"summoner_spell": summoner,
 				"ready": _flag(player.get("ready", false)),
 			})
 	return {
@@ -246,6 +260,9 @@ static func sanitize_snapshot(raw: Variant) -> Dictionary:
 			var event := _sanitize_event(item)
 			if not event.is_empty():
 				events.append(event)
+	# 超限时静默 break 会让客机永久少播事件。把丢弃数量带出去，
+	# 由接收侧累计到诊断字段，至少能定位「团战少播」是不是容量问题。
+	var dropped_events := maxi(0, (raw_events as Array).size() - MAX_EVENTS) if raw_events is Array else 0
 	var mode := str(data.get("mode", "duel"))
 	if not MODES.has(mode):
 		mode = "duel"
@@ -260,6 +277,7 @@ static func sanitize_snapshot(raw: Variant) -> Dictionary:
 			"entities": entities,
 			"scores": _sanitize_scores(data.get("scores", {})),
 			"events": events,
+			"dropped_events": dropped_events,
 			"wave": clampi(int(_number(data.get("wave", 1))), 0, 9999),
 			"objectives": _sanitize_objectives(data.get("objectives", {})),
 			"river": _sanitize_river(data.get("river", {})),
@@ -284,6 +302,7 @@ static func sanitize_events(raw: Variant) -> Dictionary:
 	return {
 		"time": clampf(_number(payload.get("time", 0.0)), 0.0, 86400.0),
 		"events": events,
+		"dropped_events": maxi(0, (source as Array).size() - MAX_EVENTS) if source is Array else 0,
 	}
 
 # 计分板账本：只放公开统计，不放坐标。
@@ -345,10 +364,10 @@ static func _sanitize_board(raw: Variant) -> Dictionary:
 					"ability_power": clampf(_number(row.get("ability_power", 0.0)), 0.0, 100000.0),
 					"max_hp": clampf(_number(row.get("max_hp", 0.0)), 0.0, 1000000.0),
 					"speed": clampf(_number(row.get("speed", 0.0)), 0.0, 100.0),
-					"crit_rate": clampf(_number(row.get("crit_rate", 0.0)), 0.0, 5.0),
+					"crit_rate": clampf(_number(row.get("crit_rate", 0.0)), 0.0, 1.0),
 					# 项 1：新增 5 个属性的 board 清洗，上限直接复用实体路径的同一批常量，
-					# 不在这里另写数字。（crit_rate 的 5.0 与实体路径的 1.0 是**既有**双口径，
-					# 属验收表 10.2 的待办，本次不顺手改，免得牵动 net_protocol 的既有断言。）
+					# 不在这里另写数字。crit_rate 与实体快照统一钳到 1.0（验收表 10.2），
+					# 避免记分板显示 >100% 暴击、实体结算却是另一套上限。
 					"armor": clampf(_number(row.get("armor", 0.0)), 0.0, MAX_RESISTANCE),
 					"magic_resist": clampf(_number(row.get("magic_resist", 0.0)), 0.0, MAX_RESISTANCE),
 					"cooldown_reduction": clampf(_number(row.get("cooldown_reduction", 0.0)), 0.0, MAX_CDR),
@@ -573,6 +592,12 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		"pad", "to_x", "to_y", "spell_id", "caster_id",
 		"killer_id", "victim_id", "amount", "minion_type", "source_type", "target_type",
 		"announcement", "streak_title", "buy_item", "sell_slot", "crit",
+		# FX-10：技能/投射物事件的特效种类与实体归属。缺 kind 时客机只能靠
+		# hero_type + slot 猜特效，单机与联机的表现会不一致。
+		"kind", "id", "owner_id",
+		# 野怪普攻（monster_attack）：客机靠 monster_type / buff_type / camp_id 还原
+		# 「爪光 / 扬尘 / BUFF 配色 / 首领砸地」。漏一个就是「主机看得见爪痕、客机只有血在掉」。
+		"monster_type", "camp_id", "buff_type", "objective",
 	]:
 		if not source.has(key):
 			continue

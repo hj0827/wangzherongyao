@@ -1,6 +1,7 @@
 extends "res://tests/test_base.gd"
 
 const GameSession = preload("res://net/game_session.gd")
+const NetProtocol = preload("res://net/net_protocol.gd")
 
 func _pump(sessions: Array, seconds := 2.0) -> void:
 	var deadline := Time.get_ticks_msec() + int(seconds * 1000.0)
@@ -143,23 +144,134 @@ func test_disconnect_drops_guest_and_notifies_host() -> void:
 	host.peer_left.connect(func(peer_id): left.append(peer_id))
 	var peer_id: int = client.local_peer_id
 	client.close()
-	_pump([host], 4.0)
+	# close() 现在是「先发 leave、留 300ms 刷包」，客机也要继续 poll 才能送出去。
+	_pump([host, client], 0.6)
+	_pump([host], 0.6)
 	eq(host.room_state.players.size(), 1, "guest removed from room")
 	eq(left.size(), 1, "host notified once")
 	if left.size() == 1:
 		eq(left[0], peer_id, "notified with departing peer id")
 	host.close()
 
-func test_host_loss_is_reported_to_guest() -> void:
+func test_host_loss_enters_reconnect_then_times_out() -> void:
 	var host := _host()
 	var client := _join(host)
 	_pump([host, client])
+	client.reconnect_window_ms = 300
 	var errors: Array = []
 	client.error_received.connect(func(code): errors.append(code))
 	host.close()
-	_pump([client], 3.0)
-	eq(client.state, "disconnected", "guest notices host loss")
-	check(errors.has("host_disconnected"), "host loss error surfaced")
+	_pump([client], 0.6)
+	check(errors.has("reconnecting"), "链路刚断应先进入重连，而不是直接判死")
+	_pump([client], 1.2)
+	eq(client.state, "disconnected", "窗口耗尽后客机判定掉线")
+	check(errors.has("reconnect_timeout"), "重连超时要有明确错误码")
+	client.close()
+
+# 断线重连的核心承诺：60 秒内凭内存凭证回到原槽位，英雄不变，AI 交还操作。
+func test_guest_reconnects_into_the_same_slot_after_a_drop() -> void:
+	var host := _host()
+	var client := _join(host, "Bob", "mage")
+	_pump([host, client])
+	host.start_match()
+	_pump([host, client])
+	var peer_id: int = client.local_peer_id
+	eq(int(host.room_state.players[1].id), peer_id, "先确认客机槽位")
+	var left: Array = []
+	var returned: Array = []
+	host.peer_left.connect(func(id): left.append(id))
+	host.peer_returned.connect(func(id): returned.append(id))
+	client.reconnect_window_ms = 8000
+
+	# 模拟链路崩溃：不发 leave，直接关掉底层 peer。
+	client.peer.close()
+	# 只推进主机，让它先判定超时并保留槽位（英雄交给 AI）。
+	_pump([host], 3.5)
+	eq(host.room_state.players.size(), 2, "掉线后槽位必须保留，不能立刻清人")
+	eq(left.size(), 1, "主机只播一次离线，用于 AI 接管")
+	if left.size() == 1:
+		eq(int(left[0]), peer_id, "离线事件带的是槽位身份")
+
+	# 两边一起推进：客机自动重拨并凭 token 回到原槽位。
+	_pump([host, client], 6.0)
+	eq(client.state, "match", "重连后客机直接回到对局")
+	eq(client.local_peer_id, peer_id, "身份与槽位保持不变")
+	eq(returned.size(), 1, "主机播一次回归，交还操作")
+	if returned.size() == 1:
+		eq(int(returned[0]), peer_id, "回归事件带的是同一个槽位身份")
+	eq(host.room_state.players.size(), 2, "槽位没有重复膨胀")
+	eq(str(host.room_state.players[1].hero_type), "mage", "英雄选择保留")
+
+	# 新链路必须能继续双向通信：输入按原身份到达，快照按原身份下发。
+	var inputs: Array = []
+	host.input_received.connect(func(id, input): inputs.append({"id": id, "input": input}))
+	client.submit_input({"move": Vector2(1.0, 0.0)})
+	var received: Array = []
+	client.snapshot_received.connect(func(snapshot): received.append(snapshot))
+	host.broadcast_team_snapshots(func(_team: String) -> Dictionary:
+		return {
+			"time": 1.0, "mode": "duel", "bounds": 58.0, "ended": false, "winner": "",
+			"wave": 1, "scores": {}, "entities": [],
+		}
+	)
+	_pump([host, client], 1.5)
+	eq(inputs.size(), 1, "重连后的输入必须回到主机")
+	if inputs.size() == 1:
+		eq(int(inputs[0].id), peer_id, "输入仍标记为原槽位身份")
+	eq(received.size(), 1, "重连后的快照必须送到客机")
+	host.close()
+	client.close()
+
+func test_lobby_summoner_choice_reaches_the_match_config() -> void:
+	var host := _host()
+	var client := _join(host)
+	_pump([host, client])
+	client.choose_summoner("heal")
+	host.choose_summoner("sprint")
+	_pump([host, client])
+	eq(str(host.room_state.players[0].summoner_spell), "sprint", "房主的技能同步到房间")
+	eq(str(host.room_state.players[1].summoner_spell), "heal", "客机的技能同步到房间")
+	host.start_match()
+	_pump([host, client])
+	var found := {}
+	for human in host.match_config.humans:
+		if int(human.id) == int(client.local_peer_id):
+			found = human
+	eq(str(found.get("summoner_spell", "")), "heal", "开局配置要带上客机选的技能")
+	host.close()
+	client.close()
+
+# 凭证只驻留内存：这条守卫防止以后有人为了省事把它写进 settings.cfg。
+func test_reconnect_credentials_never_touch_disk() -> void:
+	var source := FileAccess.get_file_as_string("res://net/game_session.gd")
+	check(not source.contains("FileAccess"), "重连凭证不能经 FileAccess 落盘")
+	check(not source.contains("ConfigFile"), "重连凭证不能写进 ConfigFile")
+	check(not source.contains("user://"), "重连凭证不能落到 user://")
+
+func test_guest_measures_rtt_and_throttles_the_readout_to_two_seconds() -> void:
+	var host := _host()
+	var client := _join(host)
+	var updates: Array = []
+	client.rtt_updated.connect(func(ms): updates.append(ms))
+	_pump([host, client], 1.5)
+	gt(client.last_rtt_ms, -1, "客机必须真的量到 RTT，而不是永远 -1")
+	lt(float(client.last_rtt_ms), 5000.0, "本地回环的 RTT 不应离谱")
+	check(client.rtt_display_ms >= 0, "首包立即显示，不让玩家长时间看空白")
+	eq(updates.size(), 1, "2 秒窗口内只推送一次展示值")
+
+	var now := Time.get_ticks_msec()
+	client.rtt_display_ms = 77
+	client.last_rtt_ms = 77
+	client._rtt_refresh_at = now + 1000
+	client._ping_sent_at = now - 20
+	client._handle_packet(1, NetProtocol.encode("pong", {}), now)
+	eq(client.last_rtt_ms, 20, "采样值每次都更新")
+	eq(client.rtt_display_ms, 77, "2 秒窗口内展示值保持稳定，不跳数")
+	client._rtt_refresh_at = now - 1
+	client._ping_sent_at = now - 120
+	client._handle_packet(1, NetProtocol.encode("pong", {}), now)
+	eq(client.rtt_display_ms, 120, "超过 2 秒后展示值再刷新")
+	host.close()
 	client.close()
 
 # 状态快照丢了下一格就覆盖，走不可靠通道；击杀/结算/特效这类离散事件丢一次

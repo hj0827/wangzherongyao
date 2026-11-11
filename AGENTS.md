@@ -41,6 +41,21 @@
 
 ---
 
+## 环境硬约束：一律无窗口
+
+- **所有 godot 命令必须带 `--headless`**，禁止启动编辑器（`--editor`）、禁止拉起带窗口的实例。用户会在同一台机器上工作，弹出的游戏窗口会打断他。
+- `godot/tools/*_shot.gd`（17 个）、`*_gallery.gd`（`hero_ / monster_ / tower_` 3 个）与 `render_hero_showcase.gd` 依赖 `RenderingServer.frame_post_draw`，`--headless` 下**永远不触发、会挂死**。它们必须带真实渲染上下文跑，所以**不许直接调用**（会在用户桌面上闪窗）。
+- 确实需要渲染 / 截图时，**只许走隐藏桌面**（窗口建在不可见桌面上，产物路径不变）：
+
+  ```cmd
+  powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\ui_shot.gd
+  ```
+
+  脚本会自己加 `--audio-driver Dummy`、把 stdout 写进 `.tmp/offscreen_*.log`、跑完打印新增的 `godot/shots/*.png`。**不要绕过它直接 `godot --path godot --script res://tools/xxx_shot.gd`**，也不要靠 `--position 5200,3200` / `--resolution 1x1` 来"藏"窗口——窗口创建到 `_initialize()` 生效之间仍会在屏幕中央闪一下。
+- 发现残留的窗口化 godot 进程时**先报告再处理**，不要静默杀进程。
+
+---
+
 ## 基线命令
 
 ```cmd

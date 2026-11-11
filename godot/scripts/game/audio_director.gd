@@ -19,6 +19,7 @@ extends Node
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const BgmLibrary = preload("res://scripts/game/bgm_library.gd")
 const AudioPlan = preload("res://scripts/game/audio_plan.gd")
+const GameSettings = preload("res://scripts/app/settings.gd")
 
 const MUSIC_MENU := "menu"
 const MUSIC_BATTLE := "battle"
@@ -60,17 +61,21 @@ func _ensure_built() -> void:
 	if _built:
 		return
 	_built = true
+	GameSettings.ensure_buses()
 	_music = AudioStreamPlayer.new()
 	_music.name = "Music"
+	_music.bus = "Music"
 	_music.volume_db = SILENT_DB
 	add_child(_music)
 	_stem = AudioStreamPlayer.new()
 	_stem.name = "MusicStem"
+	_stem.bus = "Music"
 	_stem.volume_db = SILENT_DB
 	add_child(_stem)
 	for i in VOICE_COUNT:
 		var voice := AudioStreamPlayer.new()
 		voice.name = "Voice%02d" % i
+		voice.bus = "SFX"
 		voice.volume_db = 0.0
 		add_child(voice)
 		_voices.append(voice)

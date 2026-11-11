@@ -4,6 +4,7 @@ const Arena = preload("res://scripts/game/arena.gd")
 const GameSession = preload("res://net/game_session.gd")
 const LanDiscovery = preload("res://net/lan_discovery.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
+const SkillSystem = preload("res://sim/skill_system.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const InputAssist = preload("res://scripts/game/input_assist.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
@@ -20,6 +21,8 @@ const RibbonLayer = preload("res://scripts/ui/ribbon_layer.gd")
 const MenuLayout = preload("res://scripts/ui/menu_layout.gd")
 const VideoLineCycle = preload("res://scripts/ui/video_line_cycle.gd")
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
+const GameSettings = preload("res://scripts/app/settings.gd")
+const SettingsPanel = preload("res://scripts/ui/settings_panel.gd")
 
 # 选人界面按五大职业排列：坦克 / 战士 / 刺客 / 法师 / 射手
 const HERO_ORDER := ["tank", "blade", "assassin", "mage", "archer"]
@@ -49,6 +52,8 @@ const ERROR_TEXT := {
 	"room_full": "房间已满",
 	"already_started": "对局已经开始",
 	"host_disconnected": "与房主断开连接",
+	"reconnecting": "网络中断，正在重连…",
+	"reconnect_timeout": "重连超时，已离开对局",
 }
 
 var session: Object = null
@@ -56,6 +61,9 @@ var discovery: Object = null
 
 var screen := "menu"
 var local_hero := "blade"
+# 四个召唤师技能（闪现/治疗/疾跑/净化）的当前选择，单机与联机共用。
+var local_summoner := "flash"
+var _summoner_buttons := {}
 var player_name := "无名客"
 var _pending_online := false
 var _pending_mode := "duel"
@@ -99,6 +107,9 @@ var _lobby_status: Label
 var _next_refresh := 0
 
 func _ready() -> void:
+	GameSettings.load_from()
+	GameSettings.apply_audio()
+	GameSettings.apply_quality(get_viewport())
 	touch_mode = InputAssist.wants_touch_controls({}, OS.has_feature("mobile"), DisplayServer.is_touchscreen_available())
 	# HUD 是按 1600x900 排的，窗口再小就会整体缩到 0.7 以下、字先糊掉。
 	# 桌面端直接给窗口一个下限，别让玩家把界面拉成看不清的形状。
@@ -161,6 +172,7 @@ func _connect_session() -> void:
 	session.events_received.connect(_on_network_events)
 	session.input_received.connect(_on_network_input)
 	session.peer_left.connect(_on_network_peer_left)
+	session.peer_returned.connect(_on_network_peer_returned)
 	session.error_received.connect(_on_session_error)
 
 func _build_shell() -> void:
@@ -306,6 +318,10 @@ func _show_menu() -> void:
 
 	box.add_child(_make_label("联机通过局域网自动发现房间，无需服务器。", 12, GameTheme.MUTED))
 
+	var settings_button := _small_button("设置")
+	settings_button.pressed.connect(_open_settings)
+	right.add_child(settings_button)
+
 	var footer := _make_label("原型版本 0.9   ·   Godot 4.7   ·   本地权威模拟", 12, Color(0.62, 0.7, 0.76, 0.88))
 	right.add_child(footer)
 
@@ -315,6 +331,13 @@ func _show_menu() -> void:
 	_fade_in([_menu_panel], 0.12)
 	_fade_in(mode_buttons, 0.20, 0.05)
 	_fade_in([footer], 0.36)
+
+func _open_settings() -> void:
+	if _ui == null:
+		return
+	var panel := SettingsPanel.new()
+	panel.name = "SettingsPanel"
+	_ui.add_child(panel)
 
 func _on_mode_pressed(mode: String, online: bool) -> void:
 	_pending_mode = mode
@@ -383,6 +406,8 @@ func _show_hero_select() -> void:
 	_quote_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_quote_banner.add_child(_quote_label)
 
+	column.add_child(_summoner_picker())
+
 	var footer := HBoxContainer.new()
 	footer.add_theme_constant_override("separation", 18)
 	column.add_child(footer)
@@ -401,6 +426,36 @@ func _show_hero_select() -> void:
 	_hero_confirm.pressed.connect(_on_hero_confirm)
 	footer.add_child(_hero_confirm)
 	_refresh_hero_selection()
+
+## 召唤师技能选择条。选英雄旁与联机大厅共用同一组按钮，保证两处口径一致。
+func _summoner_picker() -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 10)
+	row.add_child(_make_label("召唤师技能", 14, GameTheme.MUTED))
+	_summoner_buttons.clear()
+	for spell_id in ["flash", "heal", "sprint", "cleanse"]:
+		var spell: Dictionary = SkillSystem.get_summoner_spell(spell_id)
+		var button := _small_button(str(spell.name))
+		button.custom_minimum_size = Vector2(130, _tap_height(42))
+		button.tooltip_text = str(spell.desc)
+		button.pressed.connect(_pick_summoner.bind(spell_id))
+		_summoner_buttons[spell_id] = button
+		row.add_child(button)
+	_refresh_summoner_buttons()
+	return row
+
+func _pick_summoner(spell_id: String) -> void:
+	local_summoner = spell_id
+	if session != null and session.is_online() and session.has_method("choose_summoner"):
+		session.choose_summoner(spell_id)
+	_refresh_summoner_buttons()
+
+func _refresh_summoner_buttons() -> void:
+	for spell_id in _summoner_buttons:
+		var button: Button = _summoner_buttons[spell_id]
+		var spell: Dictionary = SkillSystem.get_summoner_spell(str(spell_id))
+		button.text = ("✓ " if str(spell_id) == local_summoner else "") + str(spell.name)
 
 func _make_hero_card(hero_type: String) -> PanelContainer:
 	var definition: Dictionary = HeroDefs.get_hero(hero_type)
@@ -686,7 +741,7 @@ func _on_hero_confirm() -> void:
 func _start_offline() -> void:
 	var config := {
 		"mode": _pending_mode,
-		"humans": [{"id": "p1", "name": "你", "team": "blue", "hero_type": local_hero}],
+		"humans": [{"id": "p1", "name": "你", "team": "blue", "hero_type": local_hero, "summoner_spell": local_summoner}],
 		"bot_fill": true,
 		"bot_ai": true,
 	}
@@ -1021,6 +1076,8 @@ func _show_lobby() -> void:
 	picker.add_child(picker_spacer)
 	picker.add_child(_make_label("局域网房间码可被同网好友直接发现", 12, GameTheme.MUTED))
 
+	column.add_child(_summoner_picker())
+
 func _team_panel(
 	title: String,
 	subtitle: String,
@@ -1081,7 +1138,8 @@ func _player_slot(player: Variant, team: String) -> PanelContainer:
 	if int(player.id) == int(session.room_state.get("host_id", 0)):
 		name_line.add_child(_make_label("房主", 11, GameTheme.GOLD))
 	var hero_def: Dictionary = HeroDefs.get_hero(hero_type)
-	var hero_line := _make_label("%s · %s" % [hero_def.name, hero_def.role], 12, color)
+	var spell_def: Dictionary = SkillSystem.get_summoner_spell(str(player.get("summoner_spell", "flash")))
+	var hero_line := _make_label("%s · %s · %s" % [hero_def.name, hero_def.role, spell_def.name], 12, color)
 	info.add_child(hero_line)
 	if int(player.id) == _local_peer_id():
 		slot.add_theme_stylebox_override("panel", GameTheme.style(Color(0.07, 0.1, 0.12, 0.95), GameTheme.GOLD, 1, 8))
@@ -1105,6 +1163,10 @@ func _leave_online() -> void:
 	_show_online()
 
 func _enter_match(config: Dictionary, active_session: Object, authoritative: bool, owner: String) -> void:
+	# 自动加点是本地偏好：关掉后只影响玩家自己，bot 仍在 sim 内自动加点。
+	config = config.duplicate(true)
+	config["auto_skill_points"] = GameSettings.auto_skill_points
+	GameSettings.apply_quality(get_viewport())
 	screen = "game"
 	discovery.stop()
 	_lobby_signature = ""
@@ -1171,10 +1233,20 @@ func _on_network_peer_left(peer_id: int) -> void:
 	if screen == "game" and is_instance_valid(_arena):
 		_arena.on_peer_left(peer_id)
 
+func _on_network_peer_returned(peer_id: int) -> void:
+	if screen == "game" and is_instance_valid(_arena):
+		_arena.on_peer_returned(peer_id)
+
 func _on_session_state(value: String) -> void:
 	if value == "lobby":
 		if screen in ["online", "joining"]:
 			_show_lobby()
+	elif value == "reconnecting":
+		# 对局中不切屏、不销毁战场：等重连成功继续打，超时再走 disconnected。
+		if screen in ["online", "joining"]:
+			_set_online_status(_error_text("reconnecting"), false)
+		elif screen == "lobby":
+			_set_lobby_status(_error_text("reconnecting"), false)
 	elif value == "rejected":
 		if screen == "game":
 			return
@@ -1182,7 +1254,8 @@ func _on_session_state(value: String) -> void:
 		_set_online_status(_error_text(session.last_error), true)
 	elif value == "disconnected":
 		if screen == "game":
-			_on_session_error("host_disconnected")
+			# 战场内的提示与离场统一由 error_received 处理，避免同一次掉线弹两遍。
+			return
 		elif screen in ["online", "joining"]:
 			_show_online()
 			_set_online_status(_error_text(session.last_error), true)
@@ -1203,20 +1276,25 @@ func _on_match_started(config: Dictionary) -> void:
 	_enter_match(config, session, session.is_server, owner)
 
 func _on_session_error(code: String) -> void:
-	_play_ui_error()
+	# 重连中的提示不该配「错误」音效，也不该把人踢出对局。
+	if code != "reconnecting":
+		_play_ui_error()
 	if screen == "game":
 		if is_instance_valid(_arena) and _arena.hud != null:
-			_arena.hud.add_feed(_error_text(code), GameTheme.RED)
-			_arena.hud.announce("连接中断", GameTheme.RED, 2.0)
-		if code == "host_disconnected":
+			_arena.hud.add_feed(_error_text(code), GameTheme.MUTED if code == "reconnecting" else GameTheme.RED)
+			if code == "reconnecting":
+				_arena.hud.announce("正在重连", GameTheme.GOLD_LIGHT, 2.0)
+			else:
+				_arena.hud.announce("连接中断", GameTheme.RED, 2.0)
+		if code in ["host_disconnected", "reconnect_timeout"]:
 			await get_tree().create_timer(2.4).timeout
 			if screen == "game":
 				_leave_game()
 		return
 	if screen in ["online", "joining"]:
-		_set_online_status(_error_text(code), true)
+		_set_online_status(_error_text(code), code != "reconnecting")
 	elif screen == "lobby":
-		_set_lobby_status(_error_text(code), true)
+		_set_lobby_status(_error_text(code), code != "reconnecting")
 
 func _local_peer_id() -> int:
 	if session == null:

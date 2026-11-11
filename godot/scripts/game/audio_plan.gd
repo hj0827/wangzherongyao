@@ -43,6 +43,12 @@ const CUE_RESPAWN := "respawn"
 const CUE_DENIED := "denied"
 const CUE_LOW_HP := "low_hp"
 const CUE_TOWER_SHOT := "tower_shot"
+# 野区两条独立音色。为什么不复用 hit_minion：
+#   ① 打野时**出手**这一下本来就该有声音（hit 是打在英雄身上的那一下）；
+#   ② 野怪一直在打人、人也一直在打野怪，两者共用一条 cue 会被 0.10s 的
+#      同名冷却互相吃掉，听感上是「打野没有节奏」。
+const CUE_MONSTER_SWIPE := "monster_swipe"
+const CUE_MONSTER_SLAM := "monster_slam"
 
 # 本层能发出的全部 cue。测试会逐条核实「AudioCues 真的合成得出来」，
 # 少一条就是静默失效（事件来了，没声音，不报错）。
@@ -53,6 +59,7 @@ const CUES := [
 	CUE_DEATH_HERO, CUE_DEATH_MINION, CUE_TOWER_DOWN, CUE_GUARD_DOWN, CUE_SHIELD_BREAK,
 	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
+	CUE_MONSTER_SWIPE, CUE_MONSTER_SLAM,
 ]
 
 # 贴身半径：这个距离内不衰减。比英雄碰撞半径大得多，但远小于技能射程。
@@ -84,6 +91,8 @@ const COOLDOWN := {
 	"death_hero": 0.20,
 	"death_minion": 0.18,
 	"tower_shot": 0.30,
+	"monster_swipe": 0.12,
+	"monster_slam": 0.35,
 	"skill_ult": 0.25,
 	"summoner_spell": 0.20,
 	"low_hp": LOW_HP_COOLDOWN,
@@ -175,6 +184,12 @@ func cues_for(event: Dictionary, ctx: Dictionary) -> Array:
 			_push(out, CUE_SPIRIT_DOWN, _distance_gain(event, ctx))
 		"structure_attack":
 			_push(out, CUE_TOWER_SHOT, _distance_gain(event, ctx))
+		"monster_attack":
+			# 野怪出手：普通野点是一声短促的挥爪，首领是更重更长的砸地。
+			# 决定音色的是 objective，不是 monster_type —— 玩家在野区读的是「重不重」，
+			# 不是「这是猪还是狼」（后者已经由爪光形状和扬尘表达）。
+			var boss := bool(event.get("objective", false))
+			_push(out, CUE_MONSTER_SLAM if boss else CUE_MONSTER_SWIPE, _distance_gain(event, ctx))
 		"level_up":
 			if int(event.get("hero", -1)) == local_id:
 				_push(out, CUE_LEVEL_UP, 0.0)

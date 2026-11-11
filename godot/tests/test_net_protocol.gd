@@ -119,6 +119,12 @@ func test_hello_clamps_hero_and_mode() -> void:
 	eq(valid.hero_type, "mage", "valid hero kept")
 	eq(valid.mode, "team", "valid mode kept")
 
+func test_hello_carries_a_bounded_reconnect_token() -> void:
+	var hello: Dictionary = NetProtocol.sanitize_hello({"token": "a".repeat(200)})
+	eq(str(hello.token).length(), 64, "凭证长度必须钳到 64，避免被当成任意大字典键")
+	eq(str(NetProtocol.sanitize_hello({}).token), "", "没有凭证时留空")
+	check(NetProtocol.is_valid_type("resume"), "resume 必须进白名单，否则重连包会被当成未知类型丢弃")
+
 func test_room_state_whitelists_fields_and_caps_players() -> void:
 	var players: Array = []
 	for i in 14:
@@ -305,7 +311,7 @@ func test_event_packet_sanitizer_keeps_whitelisted_fields_only() -> void:
 	var clean: Dictionary = NetProtocol.sanitize_events({
 		"time": 33.0,
 		"events": [
-			{"type": "skill_cast", "hero_type": "blade", "slot": "w", "x": 1.0, "y": 2.0, "aim_x": 3.0, "aim_y": 4.0, "secret": "nope"},
+			{"type": "skill_cast", "hero_type": "blade", "slot": "w", "x": 1.0, "y": 2.0, "aim_x": 3.0, "aim_y": 4.0, "kind": "lance", "id": 7, "owner_id": 7, "secret": "nope"},
 			"garbage",
 			{"type": "match_end", "winner": "blue"},
 		],
@@ -315,6 +321,9 @@ func test_event_packet_sanitizer_keeps_whitelisted_fields_only() -> void:
 	check(not clean.events[0].has("secret"), "白名单外字段被剥掉")
 	eq(clean.events[0].type, "skill_cast", "类型保留")
 	near(float(clean.events[0].aim_x), 3.0, 0.001, "落点保留")
+	eq(clean.events[0].kind, "lance", "特效种类保留")
+	eq(int(clean.events[0].id), 7, "事件实体 id 保留")
+	eq(int(clean.events[0].owner_id), 7, "事件归属保留")
 	eq(clean.events[1].winner, "blue", "结算事件保留")
 
 	var many: Array = []
@@ -322,6 +331,9 @@ func test_event_packet_sanitizer_keeps_whitelisted_fields_only() -> void:
 		many.append({"type": "hit", "damage": 1.0})
 	var capped: Dictionary = NetProtocol.sanitize_events({"time": 1.0, "events": many})
 	eq(capped.events.size(), NetProtocol.MAX_EVENTS, "事件数按 MAX_EVENTS 截断")
+	eq(int(capped.dropped_events), 80 - NetProtocol.MAX_EVENTS, "截断数量可观测")
+	var snap: Dictionary = NetProtocol.sanitize_snapshot({"bounds": 58.0, "entities": [], "events": many})
+	eq(int(snap.snapshot.dropped_events), 80 - NetProtocol.MAX_EVENTS, "快照内事件截断数量同样可观测")
 
 func test_event_packet_rejects_junk_payload() -> void:
 	eq(NetProtocol.sanitize_events({}).events.size(), 0, "缺 events 字段给空数组")

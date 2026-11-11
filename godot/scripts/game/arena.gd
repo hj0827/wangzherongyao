@@ -27,6 +27,7 @@ const BushFeedback = preload("res://scripts/game/bush_feedback.gd")
 const ChannelFeedback = preload("res://scripts/game/channel_feedback.gd")
 const ChannelFx = preload("res://scripts/game/channel_fx.gd")
 const SkillFx = preload("res://scripts/game/skill_fx.gd")
+const PortalVisual = preload("res://scripts/game/portal_visual.gd")
 const FxTextures = preload("res://scripts/game/fx_textures.gd")
 const AudioCues = preload("res://scripts/game/audio_cues.gd")
 const AudioDirector = preload("res://scripts/game/audio_director.gd")
@@ -107,6 +108,24 @@ const TOWER_RING_IDLE_ALPHA := 0.16
 const TOWER_RING_ACTIVE_ALPHA := 0.36
 const TOWER_RING_WARN_ALPHA := 0.55
 const TOWER_RING_WARN_COLOR := Color(1.0, 0.2, 0.16)
+# --- 防御塔升级（2026-11-11）------------------------------------------------
+# 四件事：开火反馈 / 低血残破 / 摧毁演出 / 分级外观（造型在 TowerVisual.TIER_STYLES）。
+#
+# 开火：塔自己必须"有反应"。此前开火只有一道 0.18s 的光束，塔身完全不参与，
+# 5v5 里玩家分不清这一下是塔打的还是英雄打的。现在核心闪一下、光环涨一圈、塔身轻微后坐。
+const TOWER_FIRE_SECONDS := 0.26
+# 摧毁：被推掉的塔先倾斜下沉，再交出残骸。没有这一拍，塔就是"爆炸 → 啪一下换成一堆石头"。
+# 0.55 秒是按「三方同时看得到、又不打断团战节奏」定的：短于 0.3 读不出倒塌，长于 0.8 会让
+# 玩家以为塔还活着。
+const TOWER_COLLAPSE_SECONDS := 0.55
+# 残破阈值与强度曲线住在 TowerVisual，避免表现层两处各写一份。
+const TOWER_CRACK_SEED := 977
+# --- 传送阵（2026-11-11 造型升级）-------------------------------------------
+# 造型与状态表达在 PortalVisual；这里只留 Arena 需要的那一处配色。
+# 青色而不是法系紫：河道之灵已经是青蓝，传送阵与它同在河道但仍要能分开，
+# 所以这一版把传送阵拉到**更亮、更白**的一档（0.42, 0.86, 1.0），
+# 河道之灵保持偏绿的青（0.46, 0.86, 0.94）。
+const PORTAL_COLOR := Color(0.42, 0.86, 1.0)
 # --- 英雄普攻表现（2026-10-28）---------------------------------------------
 # 症状：按普攻只有一次骨骼动作，目标身上四颗小火星，打起来「看不出谁在出手」。
 # 现在近战英雄挥出一片新月刀光（走池，见 _slash_pool），远程英雄打一条弹道。
@@ -199,6 +218,12 @@ var _camp_sigils: Dictionary = {}
 var _camp_sigil_active: Dictionary = {}
 # 营地地面重生牌：野怪死亡后显示「名称 + 剩余秒数」，活着时隐藏。
 var _camp_labels: Dictionary = {}
+# 传送阵的可动表现：每座一份 record（符文轮材质 / 三根柱的晶体 / 点光源）。
+# 造型收在 PortalVisual，这里只负责每帧喂「引导进度」。
+var _portal_views: Array[Dictionary] = []
+# 本帧最高的阵上引导进度（0 = 没人在读）。只用于调试面板与测试断言：
+# 「有人在阵上读条」这件事必须能被外部观测到，而不是只存在于 shader uniform 里。
+var _portal_charge := 0.0
 # 全图石壁共用的一份材质（野区墙 + 边界墙 + 压顶石）。懒建，因为
 # 「建场景」和「渲染」都可能在无材质需求时被单独调用（测试里就是这样）。
 var _stone_material_jungle: ShaderMaterial = null
@@ -375,6 +400,11 @@ const DECAL_POOL_LIMIT := 12
 const DECAL_SECONDS := 1.6
 var _decal_pool: Array[MeshInstance3D] = []
 var _decal_active: Array[Dictionary] = []
+# 技能「延迟二次爆」的队列：每条 = {time, pos, color, amount, speed, size, life, texture}。
+# 不新建节点、也不用 SceneTreeTimer：只记「什么时候放哪一簇」，由 _process 逐帧推进。
+# 这样它能在无头测试里被直接调用来断言（SceneTreeTimer 在没有 SceneTree 时是拿不到的），
+# 也和地面残留一样在顿帧期间一起停。
+var _fx_queue: Array[Dictionary] = []
 var build_complete := false
 
 func configure(options: Dictionary) -> void:
@@ -1000,10 +1030,12 @@ func _process(delta: float) -> void:
 		# 客机：视觉用缓冲里回放出的那一格，HUD / 准星仍用最新快照。
 		_sync_units(_render_snapshot, delta)
 		_apply_predicted_visual()
-	_sync_structures(current_snapshot, false)
+	_sync_structures(current_snapshot, false, delta)
+	_tick_portals(delta)
 	_update_bush_feedback()
 	_update_channel_feedback(delta)
 	_update_decals(delta)
+	_update_fx_queue(delta)
 	var intent := _has_local_intent()
 	if intent and not _last_intent and _camera_focus.is_active():
 		# 玩家开始操作英雄就立刻收回镜头：否则人已经打起来了，画面还停在地图另一头。
@@ -1022,6 +1054,11 @@ func _process(delta: float) -> void:
 		hud.set_enemy_screens(_enemy_screen_positions())
 		hud.update_snapshot(current_snapshot)
 		hud.set_camera_view(camera_view_rect())
+		# 主机不显示 RTT（自己到自己的延迟没有意义），单机同理。
+		var rtt := -1
+		if session != null and session.has_method("submit_input") and not bool(session.is_server):
+			rtt = int(session.rtt_display_ms)
+		hud.set_rtt(rtt)
 
 ## 敌方英雄的屏幕投影。只有真机需要（锁定条的连线要落到人身上）。
 ##
@@ -1427,6 +1464,13 @@ func on_peer_left(peer_id: int) -> void:
 		sim.set_player_controller(str(peer_id), "bot")
 	if hud:
 		hud.add_feed("玩家 %d 已离线，英雄交由 AI 接管" % peer_id, GameTheme.MUTED)
+
+# 重连成功：同一槽位的英雄立即交还真人操作，AI 不再抢输入。
+func on_peer_returned(peer_id: int) -> void:
+	if sim != null:
+		sim.set_player_controller(str(peer_id), "human")
+	if hud:
+		hud.add_feed("玩家 %d 已重连，操作已交还" % peer_id, GameTheme.GOLD_LIGHT)
 
 func _find_entity_by_owner(owner_id: String) -> Dictionary:
 	for entity in current_snapshot.get("entities", []):
@@ -2737,18 +2781,11 @@ func _build_map_features() -> void:
 		_add_camp_label(pit, Color(0.8, 0.58, 1.0), true)
 
 	for pad in marks.teleports:
-		var pad_color := Color(0.4, 0.82, 0.92)
-		# 盘半径走 MapLayout 的唯一真身：传送判定用的是同一个数，
-		# 画大 / 画小都会变成「看着在阵里、按了没反应」。
-		# 阵坐在平地草面上（0.04）
-		_add_map_disc(
-			pad.pos, MapLayout.PAD_DISC_RADIUS,
-			Color(pad_color.r, pad_color.g, pad_color.b, 0.2), pad_color,
-			0.04
-		)
-		# 图腾柱朝角落里立（离阵心 4.2 米，在阵盘 3.0 之外）：
-		# 站在草地上、不压阵眼，也不立在路面正中挡小兵。
-		_add_map_totem(pad.pos + Vector2(pad.get("totem", Vector2(0.0, -2.8))), 2.6, pad_color)
+		_build_portal(pad)
+		# 不再另立图腾柱：旧版那根灰杆是「这块地有什么东西」的唯一标记，
+		# 现在传送阵自带三根方尖柱 + 浮空晶体，再插一根只会从阵心穿出来挡住符文轮
+		# （截图里就是「阵正中插了根路灯」）。MapLayout 的 totem 偏移保留为数据，
+		# 它仍然表示「设施朝角落那一侧的净空」，只是不再画成柱子。
 
 	# 墙脚草：让石壁和草地之间有一圈植被过渡，而不是一条灰色石头直接插在绿地上。
 	_build_wall_tufts()
@@ -2758,6 +2795,70 @@ func _build_map_features() -> void:
 	_build_jungle_props()
 	# 河岸芦苇：给河道两岸一条植被过渡，水陆交界不再是一条硬边。
 	_build_river_reeds()
+
+# 传送阵的实体造型。旧版是「一块青色薄饼 + 一根灰杆」，和营地圆盘几乎一样,
+# 玩家读不出这是设施。现在交给 PortalVisual 建石台 / 符文轮 / 三根方尖柱 / 浮空晶体。
+#
+# gate_angle 取「从阵心指向地图中心」的方向：三根柱沿它散开 120°，
+# 于是空档正对着从兵线拐进角落的那个方向，人走过来不会被柱子挡住。
+func _build_portal(pad: Dictionary) -> void:
+	var center: Vector2 = pad.get("pos", Vector2.ZERO)
+	var to_center := (Vector2.ZERO - center)
+	var gate := atan2(to_center.y, to_center.x) if to_center.length() > 0.001 else 0.0
+	var record := PortalVisual.build(PORTAL_COLOR, gate)
+	var root: Node3D = record.get("root")
+	if root == null:
+		return
+	root.name = "portal_" + str(pad.get("id", "pad"))
+	root.position = Vector3(center.x, 0.04, center.y)
+	_props_root.add_child(root)
+	record["pad_id"] = str(pad.get("id", ""))
+	record["center"] = center
+	# 记录挂回 root，测试与调试面板都能按 pad id 找到它。
+	root.set_meta("pad_id", str(pad.get("id", "")))
+	_portal_views.append(record)
+
+# 传送阵每帧状态：引导进度读**快照里站在阵上的英雄**（快照白名单里没有 pad id，
+# 但引导期间英雄不能移动，位置就是阵心，主客机拿的是同一份数据）。
+# 没有这一段，符文轮就只是"会转的贴图"——玩家看不出有人正在这里读条。
+func _tick_portals(delta: float) -> void:
+	if _portal_views.is_empty():
+		return
+	var snapshot: Dictionary = current_snapshot if authoritative else _render_snapshot
+	if snapshot.is_empty():
+		snapshot = current_snapshot
+	var entities: Array = snapshot.get("entities", [])
+	var charge := 0.0
+	for record in _portal_views:
+		var center: Vector2 = record.get("center", Vector2.ZERO)
+		# 两座阵离得很远，一次最多算两个候选英雄，不需要先建索引。
+		var local_charge := PortalVisual.charge_from_entities(entities, center)
+		PortalVisual.apply_state(record, local_charge, delta)
+		charge = maxf(charge, local_charge)
+	_portal_charge = charge
+
+# 找到某个世界坐标上的阵（半径判定与 Teleport.pad_at 同源）。
+# 抵达/打断事件只带坐标、不带 pad id（快照白名单里没有这个字段），所以这里也只能按位置找。
+func _portal_at(point: Vector2) -> Dictionary:
+	for record in _portal_views:
+		var center: Vector2 = record.get("center", Vector2.ZERO)
+		if point.distance_to(center) <= MapLayout.PAD_DISC_RADIUS:
+			return record
+	return {}
+
+func _flash_portal_at(point: Vector2) -> void:
+	var record := _portal_at(point)
+	if record.is_empty():
+		return
+	record["flash_elapsed"] = 0.0
+	# 闪光的这一刻把引导进度直接拉满：不然「人已经到对端了，符文还停在 60%」。
+	record["charge"] = 1.0
+
+func _shatter_portal_at(point: Vector2) -> void:
+	var record := _portal_at(point)
+	if record.is_empty():
+		return
+	record["shatter_elapsed"] = 0.0
 
 # 河岸芦苇：沿河道两岸（x = z 中心线）铺高草簇，避开兵线、桥心、营地和传送阵。
 # 用 GrassField 的草叶网格放大成"芦苇"，仍是单批次，不参与碰撞。
@@ -3751,7 +3852,7 @@ func _create_unit_view(entity: Dictionary) -> UnitVisual:
 	view.set_snapshot(entity, 1.0)
 	return view
 
-func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
+func _sync_structures(snapshot: Dictionary, initial: bool, delta := 0.0) -> void:
 	if snapshot.is_empty():
 		return
 	# 本地英雄每帧查一次：塔范围圈的红/蓝只取决于它站在哪儿。
@@ -3782,14 +3883,37 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 		# 死掉的建筑不能整座隐藏：塔位留着残骸，玩家才知道这里曾经有塔。
 		if root:
 			root.visible = true
+		# 倒塌演出：有事件触发时，塔身先倾斜下沉、残骸延后出现；
+		# 没有事件（客机先收到快照）就走旧路径，绝不让塔卡在"倒一半"。
+		var collapsing := _advance_tower_collapse(record, delta)
+		if not alive:
+			if collapsing:
+				# 演出进行中：活体部件继续可见（塔正在倒），残骸还不能出来。
+				var rubble_wait := record.get("rubble") as Node3D
+				if rubble_wait:
+					rubble_wait.visible = false
+				continue
+			for node in record.get("destroy_hide", []):
+				if node:
+					node.visible = false
+			var rubble := record.get("rubble") as Node3D
+			if rubble:
+				rubble.visible = true
+			var cracks_dead := record.get("cracks") as MeshInstance3D
+			if cracks_dead:
+				cracks_dead.visible = false
+			continue
 		for node in record.get("destroy_hide", []):
 			if node:
-				node.visible = alive
-		var rubble := record.get("rubble") as Node3D
-		if rubble:
-			rubble.visible = not alive
-		if not alive:
-			continue
+				node.visible = true
+		var rubble_alive := record.get("rubble") as Node3D
+		if rubble_alive:
+			rubble_alive.visible = false
+		_apply_tower_fire(record, delta)
+		var tower_hp := float(entity.get("hp", 0.0))
+		var tower_max_hp := maxf(1.0, float(entity.get("max_hp", 1.0)))
+		var tower_ratio := clampf(tower_hp / tower_max_hp, 0.0, 1.0)
+		_apply_tower_damage(record, tower_ratio)
 		var spin: Node3D = record.get("spin")
 		if spin:
 			spin.rotation.y = float(Time.get_ticks_msec()) * 0.0006
@@ -3836,8 +3960,128 @@ func _sync_structures(snapshot: Dictionary, initial: bool) -> void:
 				band_mat.albedo_color = Color(ring_state.glow.r, ring_state.glow.g, ring_state.glow.b, float(ring_state.color.a) * 0.45)
 				band_mat.emission = ring_state.glow
 
-# 塔的范围圈只在「真的有可攻击目标」时显示：敌方小兵/英雄进入射程。
-# 口径与 TowerRules.select_target 一致 —— 自家单位和野怪（neutral）都不算，
+# ---------------- 防御塔：开火 / 残破 / 倒塌（2026-11-11）--------------------
+#
+# 三条都遵守同一条纪律：**只改已经存在的材质与变换，绝不新建节点**（硬规则 4）。
+# 塔在 5v5 里最多 18 座 + 2 座主堡，每帧 20 次材质写是上限，所以每个量都先比对再写。
+
+# 塔开火：核心闪亮 → 光环涨一圈 → 塔身后坐，三者在 0.26 秒内一起衰减。
+# 由 _handle_structure_attack() 触发（事件里的 source 就是塔的 id）。
+func _pulse_tower_fire(record: Dictionary) -> void:
+	record["fire_timer"] = float(record.get("fire_duration", TOWER_FIRE_SECONDS))
+
+func _apply_tower_fire(record: Dictionary, delta: float) -> void:
+	var timer := float(record.get("fire_timer", 0.0))
+	if timer <= 0.0:
+		return
+	var duration := maxf(0.01, float(record.get("fire_duration", TOWER_FIRE_SECONDS)))
+	timer = maxf(0.0, timer - delta)
+	record["fire_timer"] = timer
+	# 剩余时间 → 已过比例。写成「剩余」再取反是刻意的：
+	# 直接用剩余时间当进度会算反（火越烧越旺），这个坑在 unit_visual 的死亡动画里已经踩过一次。
+	var envelope := TowerVisual.fire_envelope(1.0 - timer / duration)
+	var core_mat: StandardMaterial3D = record.get("core_mat")
+	if core_mat != null:
+		var base_energy := float(record.get("fire_base_energy", 0.0))
+		core_mat.emission_energy_multiplier = base_energy * (1.0 + 0.85 * envelope)
+		var base_albedo: Color = record.get("fire_base_albedo", core_mat.albedo_color)
+		# 往白里推一点：只提亮度不换色，才能读成"这一发是它打的"而不是"它变成白球了"。
+		core_mat.albedo_color = base_albedo.lerp(Color(1.0, 1.0, 1.0), 0.35 * envelope)
+	var halo_mat: StandardMaterial3D = record.get("halo_mat")
+	if halo_mat != null:
+		var base_alpha := float(record.get("fire_base_halo_alpha", 0.0))
+		halo_mat.albedo_color.a = base_alpha * (1.0 + 1.6 * envelope)
+	var model: Node3D = record.get("model")
+	if model != null:
+		# 后坐：绕 X 轴向后仰。幅度压得很小（约 2.2°），塔是石造物，
+		# 晃得太夸张会读成"塔要倒了"，和真正的倒塌演出撞语义。
+		model.rotation.x = -deg_to_rad(2.2) * envelope
+		if timer <= 0.0:
+			model.rotation.x = 0.0
+			if core_mat != null:
+				core_mat.emission_energy_multiplier = float(record.get("fire_base_energy", 0.0))
+				core_mat.albedo_color = record.get("fire_base_albedo", core_mat.albedo_color)
+			if halo_mat != null:
+				halo_mat.albedo_color.a = float(record.get("fire_base_halo_alpha", 0.0))
+
+# 低血残破：石料压暗 + 裂纹显隐 + 核心变弱。
+# 强度由 TowerVisual.damage_tone() 给，表现层不再自己写一条曲线。
+func _apply_tower_damage(record: Dictionary, ratio: float) -> void:
+	var tone := TowerVisual.damage_tone(ratio)
+	if is_equal_approx(tone, float(record.get("damage_tone", -1.0))):
+		return
+	record["damage_tone"] = tone
+	var cracks: MeshInstance3D = record.get("cracks")
+	if cracks != null:
+		cracks.visible = tone > 0.001
+	var stone: StandardMaterial3D = record.get("stone_render_mat")
+	if stone != null:
+		# 从 0.88 压到 0.52：压得比"阴影"轻一档，塔还是石头的颜色，只是没精神了。
+		stone.albedo_color = Color(1.0, 0.97, 0.93).lerp(Color(0.52, 0.49, 0.47), tone)
+	var core_mat: StandardMaterial3D = record.get("core_mat")
+	if core_mat != null:
+		var base_energy := float(record.get("fire_base_energy", 0.0))
+		core_mat.emission_energy_multiplier = base_energy * (1.0 - 0.45 * tone)
+
+# 摧毁演出：塔被推掉时先倒下去，再交出残骸。
+# 只有收到 tower_destroyed 事件才演；没有事件时（客机先拿到快照）保留旧行为。
+func _start_tower_collapse(record: Dictionary) -> void:
+	if float(record.get("collapse_timer", 0.0)) > 0.0:
+		return
+	record["collapse_timer"] = maxf(0.01, float(record.get("collapse_duration", TOWER_COLLAPSE_SECONDS)))
+
+# 推进倒塌；返回 true 表示"演出还在进行中"。
+func _advance_tower_collapse(record: Dictionary, delta: float) -> bool:
+	var timer := float(record.get("collapse_timer", 0.0))
+	if timer <= 0.0:
+		return false
+	var duration := maxf(0.01, float(record.get("collapse_duration", TOWER_COLLAPSE_SECONDS)))
+	timer = maxf(0.0, timer - delta)
+	record["collapse_timer"] = timer
+	var model: Node3D = record.get("model")
+	if model == null:
+		return timer > 0.0
+	var progress := clampf(1.0 - timer / duration, 0.0, 1.0)
+	# 先加速后砸实：用平方而不是线性，读起来是"失去支撑"而不是"匀速放下"。
+	var eased := progress * progress
+	# 绕 Z 轴倒：塔的 root 已经按朝向转过 y，绕 Z 倒就是"倒向一侧"，不依赖镜头。
+	model.rotation.z = deg_to_rad(16.0) * eased
+	model.position.y = -0.55 * eased
+	if timer <= 0.0:
+		# 演出结束：把塔身交还给旧路径（destroy_hide 会隐藏它）。
+		record["collapse_timer"] = 0.0
+		model.rotation.z = 0.0
+		model.position.y = 0.0
+		return false
+	return true
+
+# 按坐标找塔。
+#
+# tower_destroyed / guard_destroyed 事件**不带 id**（只有 team / tier / x / y），
+# 所以只能反查。匹配半径 1.6m = 塔基座半径 1.34 + 余量：
+# 两座塔最近也有 20m 以上，不会误伤邻居。
+func _start_structure_collapse(event: Dictionary) -> void:
+	var point := Vector2(float(event.get("x", 0.0)), float(event.get("y", 0.0)))
+	var team := str(event.get("team", ""))
+	var best: Dictionary = {}
+	var best_distance := 1.6
+	for record in _structure_views.values():
+		if not (record is Dictionary):
+			continue
+		var root: Node3D = record.get("root")
+		if root == null:
+			continue
+		if team != "" and str(record.get("team", "")) != team:
+			continue
+		var distance := Vector2(root.position.x, root.position.z).distance_to(point)
+		if distance < best_distance:
+			best_distance = distance
+			best = record
+	if best.is_empty():
+		return
+	_start_tower_collapse(best)
+
+# 塔的范围圈只在「真的有可攻击目标」时显示：敌方小兵/英雄进入射程。# 口径与 TowerRules.select_target 一致 —— 自家单位和野怪（neutral）都不算，
 # 否则一圈蓝雾会因为自家兵线或路过一只野怪亮起来。
 static func range_ring_revealed(entity: Dictionary, entities: Array) -> bool:
 	var team := str(entity.get("team", ""))
@@ -3882,14 +4126,69 @@ static func range_ring_state(entity: Dictionary, team_color: Color, viewer: Dict
 	}
 
 # 普攻表现配方。抽成静态纯函数，headless 才能断言
-# 「近战刀光 / 远程弹丸 / 炮车大弹丸 / 塔的光束」确实长得不一样。
-# mode：melee = 瞬时刀光，projectile = 飞行弹丸，lance = 塔的持续光束。
+# 「近战刀光 / 远程弹丸 / 炮车大弹丸 / 野怪爪光 / 首领砸地 / 塔的光束」确实长得不一样。
+#
+# 两个键的分工（2026-11-11 升级后）：
+#   `shape` 是**渲染层唯一的分派依据**：arc（挥砍/爪光）/ slam（砸地）/ orb（弹丸）/
+#           splash（水花）/ lance（光束）。新增物种只加一条 shape，不动渲染函数。
+#   `mode`  只保留给老调用点与既有测试（melee / projectile / lance），由同一个表派生，
+#           不另写一份分支 —— 两份都维护迟早会漂移成「配方说爪光、画的是小球」。
+#
+# 其余键：`arc_deg` 弧度、`arc_count` 一片还是双爪、`reach` 弧长（按目标距离算，
+# 免得近身也挥出两米长的光）、`dust` 扬尘贴图、`decal` 落点残留、`texture` 命中粒子、
+# `impact` 命中火星数、`shake` 震屏、`muzzle` 枪口闪光。
+static func _unit_attack_plan(shape: String, radius: float, from_height: float, to_height: float, duration: float, extra: Dictionary = {}) -> Dictionary:
+	var plan := {
+		"mode": "projectile" if shape == "orb" else ("lance" if shape == "lance" else "melee"),
+		"shape": shape,
+		"radius": radius,
+		"from_height": from_height,
+		"to_height": to_height,
+		"duration": duration,
+		"arc_deg": 0.0,
+		"arc_count": 1,
+		"arc_height": from_height,
+		# 弧长 = 目标距离 × reach_ratio + reach_pad，再钳到 reach_max：
+		# 写死一个半径的话，贴身时挥出一片超长的光，兵线密集时会糊成一团白。
+		"reach_ratio": 1.0,
+		"reach_pad": 0.35,
+		"reach_max": 3.0,
+		# 由 attack_fx_plan() 按事件坐标填；这里给一个「够得着自己身前」的下限兜底，
+		# 事件缺坐标时也不至于挥出一片零长度的弧（零长度 = 什么都看不见）。
+		"reach": 0.6,
+		"impact": 0,
+		"shake": 0.0,
+		"dust": "",
+		"decal": "",
+		"texture": "spark",
+		"muzzle": shape == "orb",
+	}
+	for key in extra:
+		plan[key] = extra[key]
+	return plan
+
 static func attack_fx_plan(event: Dictionary) -> Dictionary:
-	if str(event.get("type", "")) == "structure_attack":
+	var plan := _attack_fx_plan_shape(event)
+	# 弧长按**真实目标距离**算：这是唯一一个依赖事件坐标的量，
+	# 放在纯函数里才能被 headless 断言（渲染层只负责读 reach）。
+	var gap := Vector2(
+		float(event.get("target_x", 0.0)) - float(event.get("x", 0.0)),
+		float(event.get("target_y", 0.0)) - float(event.get("y", 0.0))
+	).length()
+	plan["reach"] = clampf(
+		gap * float(plan.get("reach_ratio", 1.0)) + float(plan.get("reach_pad", 0.35)),
+		0.45, float(plan.get("reach_max", 3.0))
+	)
+	return plan
+
+static func _attack_fx_plan_shape(event: Dictionary) -> Dictionary:
+	var event_type := str(event.get("type", ""))
+	if event_type == "structure_attack":
 		var source_type := str(event.get("source_type", "tower"))
 		var scale_y := MapView.tower_scale(str(event.get("tier", "outer")))
 		return {
 			"mode": "lance",
+			"shape": "lance",
 			"radius": 0.26 if source_type == "base" else 0.2,
 			# 主堡水晶在 3.55m，塔的水晶在 8.2m；枪口必须贴着模型顶部，
 			# 否则光束会从半空中凭空出现。
@@ -3897,14 +4196,76 @@ static func attack_fx_plan(event: Dictionary) -> Dictionary:
 			"to_height": 1.1,
 			"duration": 0.18,
 		}
+	if event_type == "monster_attack":
+		return _monster_attack_plan(event)
 	match str(event.get("minion_type", "melee")):
 		"ranged":
-			return {"mode": "projectile", "radius": 0.11, "from_height": 0.85, "to_height": 0.85, "duration": 0.22}
+			# 远程兵：弹丸 + 枪口小闪。只有一颗飞过去的小球时，玩家要靠血掉才反推有人出手。
+			return _unit_attack_plan("orb", 0.11, 0.85, 0.85, 0.22, {"impact": 2, "texture": "glow"})
 		"cannon":
-			return {"mode": "projectile", "radius": 0.18, "from_height": 0.95, "to_height": 0.9, "duration": 0.26}
+			# 炮车：更大的弹丸 + 落点冲击痕迹 + 一点点震。它是整条兵线里最重的一下。
+			return _unit_attack_plan("orb", 0.18, 0.95, 0.9, 0.26, {
+				"impact": 6, "shake": 0.05, "decal": "shock", "texture": "shock",
+			})
 		"super":
-			return {"mode": "melee", "radius": 0.14, "from_height": 0.95, "to_height": 0.85, "duration": 0.1}
-	return {"mode": "melee", "radius": 0.09, "from_height": 0.75, "to_height": 0.8, "duration": 0.07}
+			# 超级兵：更宽的横扫。和近战兵的区别必须在**弧度**上，只放大球体会读成「胖一点的兵」。
+			return _unit_attack_plan("arc", 0.14, 0.95, 0.85, 0.14, {
+				"arc_deg": 104.0, "impact": 4, "dust": "smoke", "texture": "spark",
+			})
+	# 近战兵：一片刀光 + 脚下扬尘。旧版是一颗飞过去的小球（近战兵打近战兵也是），
+	# 兵线对拼时满屏小球，读不出「谁在砍谁」。
+	# 时长 0.12：0.07 秒在 30fps 下只有两帧，刀光还没张开就消失了（画廊实拍确认）。
+	return _unit_attack_plan("arc", 0.09, 0.75, 0.8, 0.12, {
+		"arc_deg": 84.0, "impact": 2, "dust": "smoke", "texture": "spark",
+	})
+
+# 野怪出手配方。**按物种分**，因为玩家在野区读的是剪影和动作：
+# 狼是双爪、野猪是獠牙冲撞（扬土）、石像是砸地、河道之灵是一圈水花。
+# 首领（暴君/主宰）单独一档：更长的震屏 + 地裂残留，和普通野点差一个量级。
+static func _monster_attack_plan(event: Dictionary) -> Dictionary:
+	if bool(event.get("objective", false)):
+		return _unit_attack_plan("slam", 0.34, 1.05, 0.9, 0.22, {
+			"color": GOLD,
+			"impact": 14, "shake": 0.18, "dust": "smoke", "decal": "shock",
+			"texture": "shock", "reach_pad": 0.9, "reach_max": 5.4,
+		})
+	var buff := str(event.get("buff_type", ""))
+	if buff == "blue" or buff == "red":
+		# BUFF 石像：整块砸下来，比小野点重一档；配色区分红蓝，形状不再细分（同一种怪）。
+		return _unit_attack_plan("slam", 0.24, 0.95, 0.85, 0.2, {
+			"color": Color(0.45, 0.76, 1.0) if buff == "blue" else Color(1.0, 0.46, 0.3),
+			"impact": 8, "shake": 0.06, "dust": "smoke", "decal": "rune", "texture": "shock",
+		})
+	match str(event.get("monster_type", "wolf")):
+		"boar":
+			# 三猪：低头上挑，单爪宽弧 + 扬土。它没有狼的"两只爪子"，所以弧数必须是 1。
+			return _unit_attack_plan("arc", 0.16, 0.7, 0.7, 0.15, {
+				"color": Color(0.96, 0.78, 0.5),
+				"arc_deg": 108.0, "impact": 5, "dust": "smoke", "texture": "spark",
+			})
+		"lizard":
+			# 蜥蜴：低伏突咬，短而窄的一口，几乎不扬尘（贴地冲，不起土）。
+			return _unit_attack_plan("arc", 0.15, 0.62, 0.62, 0.13, {
+				"color": Color(0.66, 0.9, 0.58),
+				"arc_deg": 76.0, "impact": 4, "texture": "slash",
+			})
+		"bird":
+			# 红鸟：俯冲两下连啄，弧数 2、节奏更短。
+			return _unit_attack_plan("arc", 0.14, 0.82, 0.82, 0.12, {
+				"color": Color(1.0, 0.74, 0.46),
+				"arc_deg": 120.0, "arc_count": 2, "impact": 3, "texture": "spark",
+			})
+		"spirit":
+			# 河道之灵：不是爪光，是一圈水花 —— 它是水系生物，画成爪痕会被读成野狼。
+			return _unit_attack_plan("splash", 0.2, 0.75, 0.55, 0.22, {
+				"color": Color(0.52, 0.9, 1.0),
+				"impact": 4, "decal": "glow", "texture": "glow",
+			})
+	# 狼（兜底）：双爪交错。两片弧比一片更粗的弧更像「一次扑咬」。
+	return _unit_attack_plan("arc", 0.16, 0.72, 0.72, 0.14, {
+		"color": Color(0.86, 0.9, 0.98),
+		"arc_deg": 92.0, "arc_count": 2, "impact": 3, "texture": "spark",
+	})
 
 # 英雄普攻表现配方（纯数据、无节点）。抽成静态纯函数，headless 才能断言
 # 「近战英雄挥刀光 / 远程英雄打弹道」「暴击只是同一刀更狠，不是另一个形态」。
@@ -3985,6 +4346,8 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	var halo_node: MeshInstance3D = null
 	var glow_node: MeshInstance3D = null
 	var no_shadow_parts: Array = []
+	# 分层外观：塔冠石肋数（来自 TowerVisual.tier_style），测试与调试面板读它。
+	var crown_ribs := 0
 	# 英雄走近时要让路的部件，见 scripts/game/occlusion_fade.gd。
 	# 只收「立体、挡人」的那几件；贴地圆盘 dais 故意不收。
 	var crystal_fade_parts: Array = []
@@ -4177,12 +4540,15 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	else:
 		# 参考图里的塔：米黄石雕裙摆 + 收分塔柱 + 笼状塔冠 + 发光核心 + 塔脚光池。
 		# 石构件由 TowerVisual 一次拼好（一个网格），光效拆成独立节点方便每帧调色。
-		var tower := TowerVisual.build(team_color)
+		# tier 必须传进去：外/内/高地/双子四级的塔冠肋数、宝珠、石箍都不同，
+		# 只靠 visual_scale（1.00/1.07/1.16/0.92）在 21m 机位下根本读不出层级。
+		var tower := TowerVisual.build(team_color, tier)
 		model = tower.node
 		model.scale = Vector3.ONE * visual_scale
 		core_node = tower.core
 		halo_node = tower.halo
 		glow_node = tower.glow
+		crown_ribs = int((tower.get("style", {}) as Dictionary).get("ribs", 0))
 		glow_node.scale = Vector3.ONE * visual_scale
 		var petals: Node3D = tower.petals
 		petals.scale = Vector3.ONE * visual_scale
@@ -4231,6 +4597,45 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	for part in no_shadow_parts:
 		(part as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(model)
+	# 残破表现要抓「渲染时真正生效的那份石料材质」。
+	# 注意：上面 ModelUtils.tint() 会为每个面 duplicate 一份材质并塞进 surface_override，
+	# 所以 TowerVisual 返回的 stone_material 已经不是实际渲染的那份 —— 必须从
+	# get_active_material() 重新取，否则改 albedo 改的是没人用的副本（静默失效）。
+	# 塔的石料是**整座塔共用一个网格、一个面**，所以一份就够。
+	var core_mat: StandardMaterial3D = null
+	if core_node != null:
+		core_mat = core_node.material_override as StandardMaterial3D
+	var halo_mat: StandardMaterial3D = null
+	if halo_node != null:
+		halo_mat = halo_node.material_override as StandardMaterial3D
+	var stone_render_mat: StandardMaterial3D = null
+	var cracks: MeshInstance3D = null
+	var stone_mat_for_damage: StandardMaterial3D = null
+	if entity_type == "tower" or entity_type == "guard":
+		var stone_node := model.get_node_or_null("Stone") as MeshInstance3D
+		if stone_node == null:
+			stone_node = model.find_child("Stone", true, false) as MeshInstance3D
+		if stone_node != null and stone_node.mesh != null and stone_node.mesh.get_surface_count() > 0:
+			var active := stone_node.get_active_material(0)
+			if active is StandardMaterial3D:
+				stone_render_mat = active as StandardMaterial3D
+				stone_mat_for_damage = stone_render_mat
+				# 残血变暗必须改在「真正渲染的那份材质」上。tint 之后它是 surface_override
+				# 里的一份副本，独占这一个网格面，所以改它不会污染别的塔。
+		if stone_render_mat != null:
+			cracks = TowerVisual.build_cracks(int(entity.get("id", 0)) * 977 + 13)
+			cracks.scale = Vector3.ONE * visual_scale
+			cracks.visible = false
+			root.add_child(cracks)
+	# 开火反馈只改已经存在的材质/变换，绝不新建节点（硬规则 4）。
+	var fire_base_energy := 0.0
+	var fire_base_albedo := Color(0, 0, 0, 0)
+	var fire_base_halo_alpha := 0.0
+	if core_mat != null:
+		fire_base_energy = float(core_mat.emission_energy_multiplier)
+		fire_base_albedo = core_mat.albedo_color
+	if halo_mat != null:
+		fire_base_halo_alpha = halo_mat.albedo_color.a
 	var ring := MeshInstance3D.new()
 	var torus := TorusMesh.new()
 	torus.inner_radius = ring_radius
@@ -4345,7 +4750,22 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		"destroy_hide": destroy_hide,
 		"scale": visual_scale,
 		"tier": tier,
+		"team": str(entity.get("team", "")),
 		"team_color": team_color,
+		"crown_ribs": crown_ribs,
+		"cracks": cracks,
+		"stone_render_mat": stone_mat_for_damage,
+		"core_mat": core_mat,
+		"halo_mat": halo_mat,
+		"fire_base_energy": fire_base_energy,
+		"fire_base_albedo": fire_base_albedo,
+		"fire_base_halo_alpha": fire_base_halo_alpha,
+		"fire_timer": 0.0,
+		"fire_duration": TOWER_FIRE_SECONDS,
+		"damage_tone": 0.0,
+		"collapse_timer": 0.0,
+		"collapse_duration": TOWER_COLLAPSE_SECONDS,
+		"collapse_delay": -1.0,
 	}
 
 # 建筑残骸：塔毁后留一圈碎石 + 断柱 + 阵营色晶屑；主堡毁后留更大的碎晶台。
@@ -4502,10 +4922,12 @@ func _process_events(events: Array) -> void:
 				var pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(pos, RED if str(event.get("team", "red")) == "red" else BLUE, 32)
 				_trigger_hit_stop(0.06, 0.22)
+				_start_structure_collapse(event)
 			"guard_destroyed":
 				var guard_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(guard_pos, RED if str(event.get("team", "red")) == "red" else BLUE, 30)
 				_camera_shake = maxf(_camera_shake, 0.14)
+				_start_structure_collapse(event)
 			"crystal_shield_broken":
 				var crystal_pos := Vector3(float(event.get("x", 0.0)), 2.0, float(event.get("y", 0.0)))
 				_spawn_ring(crystal_pos, Color(0.55, 0.84, 1.0), 1.0, 8.0, 1.0)
@@ -4562,6 +4984,8 @@ func _process_events(events: Array) -> void:
 				hud.add_feed("第 %d 波兵线出发" % wave, GameTheme.MUTED)
 			"minion_attack":
 				_handle_minion_attack(event)
+			"monster_attack":
+				_handle_monster_attack(event)
 			"structure_attack":
 				_handle_structure_attack(event)
 			"respawn":
@@ -4603,6 +5027,9 @@ func _handle_channel_departure(entity_id: int, kind: String, from_pos: Vector3, 
 	_spawn_ring(to_pos, color, 0.6, 4.6, 0.62, 0.9)
 	_spawn_ring(to_pos, Color(1.0, 1.0, 1.0).lerp(color, 0.35), 0.35, 2.4, 0.34, 0.95)
 	_spawn_particles(to_pos + Vector3(0, 1.0, 0), color, 26, 5.5)
+	# 抵达的这一端必须自己「炸」一下：符文轮扫满、晶体闪光、点光从 0 起跳。
+	# 没有这一步，人已经落到对端，对端的阵还是一副待机样子 —— 远处的玩家会以为没传成功。
+	_flash_portal_at(Vector2(to_pos.x, to_pos.z))
 	var view: UnitVisual = _views.get(entity_id)
 	if view != null:
 		view.snap_to(Vector3(to_pos.x, 0.0, to_pos.z))
@@ -4623,6 +5050,9 @@ func _handle_channel_break(entity_id: int, kind: String, pos: Vector3) -> void:
 	var dimmed := color.lerp(RED, 0.35)
 	_spawn_ring(pos, dimmed, 0.6, 3.4, 0.34, 0.85)
 	_spawn_particles(pos + Vector3(0, 0.8, 0), dimmed, 14, 3.2, 0.1, 0.45)
+	# 被打断时只有传送阵的符文轮该「裂」；回城没有阵可选，会自然返回空。
+	if kind == "teleport":
+		_shatter_portal_at(Vector2(pos.x, pos.z))
 	if entity_id == _local_entity_id:
 		_play_channel_cue(AudioCues.recall_break() if kind == "recall" else AudioCues.teleport_break())
 
@@ -4662,29 +5092,110 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 		_spawn_ring(
 			Vector3(ring_base.x, 0.1, ring_base.z), color,
 			float(ring.get("from", 0.4)), float(ring.get("to", 2.4)),
-			float(ring.get("dur", 0.3)), float(ring.get("alpha", 0.6))
+			float(ring.get("dur", 0.3)), float(ring.get("alpha", 0.6)),
+			bool(ring.get("tilt", false))
 		)
 		decal_radius = maxf(decal_radius, float(ring.get("to", 2.4)) * 0.55)
 		if str(ring.get("at", "aim")) == "aim":
 			decal_at_aim = true
 	if decal_at_aim or float(recipe.get("projectile", 0.0)) > 0.0 or int(recipe.get("beam", 0)) > 0:
-		_spawn_decal(aim_point, color, clampf(decal_radius, 1.2, 4.5))
+		# 残留的贴图与大小也吃配方：灼痕 / 冰阵 / 星尘 / 烟迹是四种不同的"地面签名"。
+		_spawn_decal(
+			aim_point, color, clampf(decal_radius, 1.2, 4.5), DECAL_SECONDS,
+			str(recipe.get("decal", "")), float(recipe.get("decal_scale", 1.0))
+		)
 	for burst in recipe.get("particles", []):
 		var burst_base: Vector3 = from if str(burst.get("at", "aim")) == "self" else aim
-		_spawn_particles(
-			Vector3(burst_base.x, float(burst.get("height", 0.6)), burst_base.z), color,
-			int(burst.get("count", 12)), float(burst.get("speed", 3.0)),
-			float(burst.get("size", 0.12)), float(burst.get("life", 0.45))
-		)
+		var burst_pos := Vector3(burst_base.x, float(burst.get("height", 0.6)), burst_base.z)
+		var texture := str(burst.get("texture", ""))
+		var delay := float(burst.get("delay", 0.0))
+		# 延迟二次爆：把它排进队列，0.12~0.3s 后再炸一下，技能的"节奏"就出来了。
+		# delay = 0 的簇必须直接放，不能白占一帧队列。
+		if delay > 0.0:
+			_queue_fx_burst(
+				burst_pos, color, int(burst.get("count", 12)), float(burst.get("speed", 3.0)),
+				float(burst.get("size", 0.12)), float(burst.get("life", 0.45)), texture, delay
+			)
+		else:
+			_spawn_particles(
+				burst_pos, color,
+				int(burst.get("count", 12)), float(burst.get("speed", 3.0)),
+				float(burst.get("size", 0.12)), float(burst.get("life", 0.45)),
+				texture
+			)
 	var projectile := float(recipe.get("projectile", 0.0))
-	if projectile > 0.0:
-		_spawn_projectile(from, Vector3(aim.x, 0.8, aim.z), color, projectile)
+	if projectile > 0.0 and not _slot_fires_a_real_projectile(slot, spell):
+		# 走池化的 _spawn_tracer：和英雄普攻弹道同一份实现（自带拖尾、池空抢占），
+		# 技能链路里不再 new 一个球再 queue_free（硬规则 4）。
+		_spawn_tracer(from, Vector3(aim.x, 0.8, aim.z), color, 0.16, projectile)
 	if int(recipe.get("beam", 0)) > 0:
-		_spawn_beam(from, Vector3(aim.x, 0.4, aim.z), color, 0.16)
+		_spawn_skill_beam(from, Vector3(aim.x, 0.4, aim.z), color, bool(recipe.get("beam_taper", false)))
+	var arc: Dictionary = recipe.get("arc", {})
+	if not arc.is_empty():
+		# 落点补一片新月：斩击族（Q / 冲锋 / 大招横扫）的形状记忆点。
+		# 朝向由「起点 → 落点」给，贴脸时退化（方向为零）朝 -Y，和英雄普攻同一套规则。
+		var arc_dir := aim_point - from_point
+		arc_dir = arc_dir.normalized() if arc_dir.length() >= 0.05 else Vector2(0.0, -1.0)
+		_spawn_slash(
+			Vector3(aim.x, float(arc.get("height", SkillFx.ARC_HEIGHT)), aim.z),
+			arc_dir, color,
+			float(arc.get("reach", 2.4)), float(arc.get("deg", 118.0)),
+			float(arc.get("duration", 0.2))
+		)
 	_camera_shake = maxf(_camera_shake, float(recipe.get("shake", 0.0)))
 	var hit_stop := float(recipe.get("hit_stop", 0.0))
 	if hit_stop > 0.0:
 		_trigger_hit_stop(hit_stop, 0.3)
+
+# W/R 的技能由 SkillSystem.cast_skill() 在 sim 里生成**真实飞行的弹道**并发
+# projectile_spawned，由 _handle_projectile_spawned 画那一颗（飞行时间 = 距离/速度，
+# 和掉血同一时刻）。配方若再画一颗，画面里就是两颗粒子并排飞 —— 升级后两颗都带
+# 拖尾，重影一眼可见。
+# Q/E 走 match_sim._cast_q/_cast_e，是瞬发、不发弹道事件，所以它们仍然靠配方出表现。
+# 判据用 slot 而不是 owner_id：sim 生成弹道与否本来就由 slot 决定；
+# slot 是离散枚举、稳定可比，owner_id 只表示归属，不承担这个判断。
+func _slot_fires_a_real_projectile(slot: String, spell: String) -> bool:
+	return spell == "" and (slot == "w" or slot == "r")
+
+# 技能光束 = 池化的塔光束（_spawn_lance）。`taper` 时铺三段由细到粗的圆柱，
+# 读成一条「张开的光带」而不是一根等宽棍子（星璃 W 虚空织流的签名）。
+func _spawn_skill_beam(from: Vector3, to: Vector3, color: Color, taper: bool) -> void:
+	if not taper:
+		_spawn_lance(from, to, color, 0.16, 0.16)
+		return
+	# [起点比例, 终点比例, 半径]：三段首尾重叠一点，避免中间露出缝。
+	for spec in [[0.0, 0.38, 0.07], [0.32, 0.72, 0.15], [0.64, 1.0, 0.26]]:
+		_spawn_lance(from.lerp(to, float(spec[0])), from.lerp(to, float(spec[1])), color, float(spec[2]), 0.18)
+
+# 延迟二次爆入队。只存"要放什么"，不持有节点 —— 队列里没有任何引用可泄漏。
+func _queue_fx_burst(pos: Vector3, color: Color, amount: int, speed: float, size: float, lifetime: float, texture: String, delay: float) -> void:
+	_fx_queue.append({
+		"time": delay,
+		"pos": pos,
+		"color": color,
+		"amount": amount,
+		"speed": speed,
+		"size": size,
+		"life": lifetime,
+		"texture": texture,
+	})
+
+func _update_fx_queue(delta: float) -> void:
+	var index := _fx_queue.size() - 1
+	while index >= 0:
+		var entry: Dictionary = _fx_queue[index]
+		var left := float(entry.get("time", 0.0)) - delta
+		if left <= 0.0:
+			_fx_queue.remove_at(index)
+			_spawn_particles(
+				entry.get("pos", Vector3.ZERO), entry.get("color", Color.WHITE),
+				int(entry.get("amount", 12)), float(entry.get("speed", 3.0)),
+				float(entry.get("size", 0.12)), float(entry.get("life", 0.45)),
+				str(entry.get("texture", ""))
+			)
+		else:
+			entry["time"] = left
+		index -= 1
 
 # 英雄普攻：出手动作 + 刀光 / 弹道 + 命中火星。
 #
@@ -4744,29 +5255,118 @@ func _handle_hero_attack(event: Dictionary) -> void:
 	if shake > 0.0:
 		_camera_shake = maxf(_camera_shake, shake)
 
-# 小兵普攻：先播出手动作，再画刀光/弹丸。事件自带坐标，镜头外也照样有表现。
-func _handle_minion_attack(event: Dictionary) -> void:
-	var view: UnitVisual = _views.get(int(event.get("source", -1)))
+# 小兵 / 野怪普攻的唯一渲染入口。
+#
+# 为什么合成一个函数（2026-11-11）：升级前小兵只有「小球 + 火星」一种画法、野怪
+# **根本没有攻击事件**，于是打野时怪一动不动；给野怪加一条独立分支就会出现两份
+# 几乎一样的代码，下一次升级必然只改一边。现在两者都只产出 `attack_fx_plan()` 的
+# 同一份配方，由 `shape` 分派：arc（挥砍/爪光）/ slam（砸地）/ orb（弹丸）/
+# splash（水花）/ lance（光束）。
+#
+# 三条纪律：
+# ① 所有节点都从池里借（_slash_pool / _tracer_pool / _ring_pool / _particles_pool /
+#    _decal_pool），战斗期不 new、不 queue_free（硬规则 4）；
+# ② 出手者视图的**身体反应**排在 `_effects_root` 早退之前：进场分帧构建期间也该有反应；
+# ③ 事件自带坐标，镜头外/刚进视野的出手也要有表现（不看 _views 里有没有）。
+func _play_unit_attack_fx(event: Dictionary, plan: Dictionary, color: Color, view: UnitVisual) -> void:
 	if view != null:
 		view.play_attack()
 	if _effects_root == null:
 		return
-	var plan := attack_fx_plan(event)
-	var color := BLUE if str(event.get("team", "blue")) == "blue" else RED
-	var from := Vector3(float(event.get("x", 0.0)), float(plan.get("from_height", 0.8)), float(event.get("y", 0.0)))
-	var to := Vector3(float(event.get("target_x", 0.0)), float(plan.get("to_height", 0.8)), float(event.get("target_y", 0.0)))
+	var from_point := Vector2(float(event.get("x", 0.0)), float(event.get("y", 0.0)))
+	var to_point := Vector2(float(event.get("target_x", from_point.x)), float(event.get("target_y", from_point.y)))
+	var from := Vector3(from_point.x, float(plan.get("from_height", 0.8)), from_point.y)
+	var to := Vector3(to_point.x, float(plan.get("to_height", 0.8)), to_point.y)
+	var shape := str(plan.get("shape", "orb"))
 	var radius := float(plan.get("radius", 0.1))
-	var duration := float(plan.get("duration", 0.1))
-	if str(plan.get("mode", "melee")) == "projectile":
-		_spawn_tracer(from, to, color, radius, duration)
-	else:
-		# 刀光用队伍色偏白，和受击的四颗火星区分开。
-		_spawn_tracer(from, to, color.lerp(Color(1.0, 0.96, 0.86), 0.5), radius, duration)
-		_spawn_particles(to + Vector3(0, 0.15, 0), color.lerp(Color(1.0, 0.95, 0.82), 0.55), 3, 1.8, 0.06, 0.22)
+	var duration := maxf(0.03, float(plan.get("duration", 0.1)))
+	var texture := str(plan.get("texture", "spark"))
+	# 目标方向：贴脸出手时退化成朝镜头前方（-Y），否则会画一片朝零向量张开的弧。
+	var direction := to_point - from_point
+	direction = direction.normalized() if direction.length() >= 0.05 else Vector2(0.0, -1.0)
+	var gap := from_point.distance_to(to_point)
+	var reach := clampf(
+		gap * float(plan.get("reach_ratio", 1.0)) + float(plan.get("reach_pad", 0.35)),
+		0.45, float(plan.get("reach_max", 3.0))
+	)
+	match shape:
+		"arc":
+			# 挥砍 / 爪光：一片（双爪时两片错开）新月贴在出手者胸口高度。
+			# 朝向两端各张一半：双爪叠在同一条线上会读成「一片更粗的弧」。
+			var pieces := maxi(1, int(plan.get("arc_count", 1)))
+			var arc_height := float(plan.get("arc_height", plan.get("from_height", 0.8)))
+			for index in pieces:
+				var spread := 0.0 if pieces <= 1 else (float(index) / float(pieces - 1) - 0.5)
+				var piece_dir := direction.rotated(spread * 0.55)
+				_spawn_slash(
+					Vector3(from_point.x, arc_height, from_point.y),
+					piece_dir, color, reach,
+					float(plan.get("arc_deg", 90.0)), duration
+				)
+		"slam":
+			# 砸地：一片更短更宽的弧 + 贴地冲击环。首领的重心在「落地」这一下。
+			_spawn_slash(
+				Vector3(from_point.x, float(plan.get("arc_height", 0.6)), from_point.y),
+				direction, color, reach,
+				float(plan.get("arc_deg", 120.0)), duration
+			)
+			_spawn_ring(Vector3(to_point.x, 0.1, to_point.y), color, 0.35, maxf(1.4, reach * 1.3), 0.3, 0.6)
+		"splash":
+			# 水花：一圈快速外扩的环 + 上浮光点，没有刀光（它不是用爪子打人）。
+			_spawn_ring(Vector3(to_point.x, 0.1, to_point.y), color, 0.3, maxf(1.0, reach), 0.26, 0.65)
+			_spawn_ring(Vector3(from_point.x, 0.1, from_point.y), color, 0.4, 1.0, 0.2, 0.45)
+		"lance":
+			_spawn_lance(from, to, color, radius, duration)
+		_:
+			# 弹丸（远程兵 / 炮车）。
+			_spawn_tracer(from, to, color, radius, duration)
+	# 枪口闪光：只有一颗小球飞过去时，玩家读不出「是谁在这一刻出的手」。
+	if bool(plan.get("muzzle", false)):
+		_spawn_ring(from, color, 0.14, 0.5, 0.14, 0.65)
+		_spawn_particles(from, color, 3, 1.6, 0.05, 0.15, texture)
+	# 脚下扬尘：近战对拼时火星只出现在目标身上，出手者脚下是「空的」。
+	var dust := str(plan.get("dust", ""))
+	if dust != "":
+		var dust_spot := Vector3(from_point.x, 0.12, from_point.y)
+		_spawn_particles(dust_spot, color.lerp(Color(0.86, 0.8, 0.68), 0.55), 4, 1.2, 0.16, 0.42, dust)
+	# 命中火星：目标身上的那一下。数量和颜色由配方给（炮车/首领明显更重）。
+	var impact := int(plan.get("impact", 0))
+	if impact > 0:
+		_spawn_particles(to + Vector3(0, 0.1, 0), color.lerp(Color(1.0, 0.95, 0.82), 0.45), impact, 2.2, 0.07, 0.26, texture)
+	# 落点残留：炮车/首领砸过的地方要留一小会儿痕迹，否则「打完了什么都没发生」。
+	var decal := str(plan.get("decal", ""))
+	if decal != "":
+		_spawn_decal(to_point, color, maxf(0.5, reach * 0.45), 0.9, decal, 0.9)
+	var shake := float(plan.get("shake", 0.0))
+	if shake > 0.0:
+		_camera_shake = maxf(_camera_shake, shake)
+
+# 小兵普攻：先播出手动作，再画刀光/弹丸。事件自带坐标，镜头外也照样有表现。
+func _handle_minion_attack(event: Dictionary) -> void:
+	var view: UnitVisual = _views.get(int(event.get("source", -1)))
+	_play_unit_attack_fx(event, attack_fx_plan(event), BLUE if str(event.get("team", "blue")) == "blue" else RED, view)
+
+# 野怪普攻：狼的扑咬 / 猪的冲撞 / 石像的砸地 / 河道之灵的水花。
+# 2026-11-11 之前野怪不发攻击事件，只能从 hit 的 source 反推一次前倾；
+# 现在它有自己的事件与配方，玩家在野区能读出「这一下是它打出来的」。
+func _handle_monster_attack(event: Dictionary) -> void:
+	var view: UnitVisual = _views.get(int(event.get("source", -1)))
+	var plan := attack_fx_plan(event)
+	var team := str(event.get("team", "neutral"))
+	# 中立野怪没有阵营色：用配方自带的物种色（狼冷白 / 猪暖褐 / 首领金），
+	# 否则整片野区都是同一片蓝光（neutral 会落到 BLUE 兜底）。
+	var color: Color = plan.get("color", BLUE if team == "blue" else RED)
+	_play_unit_attack_fx(event, plan, color, view)
 
 # 防御塔开火：枪口闪光 + 一道淡出的光束 + 命中点火星。
 # 旧实现只有一颗飞过的小球，玩家反馈「塔打了没感觉」。
 func _handle_structure_attack(event: Dictionary) -> void:
+	# 塔自己也要有反应：只打一道光束，5v5 里分不清这一下是塔打的还是英雄打的。
+	# 这一步必须排在「特效根节点还没建好」的早退之前 —— 塔的反馈只碰它自己的材质，
+	# 不需要 _effects_root，进场分帧构建期间也该有反应（和 _handle_hero_attack 同一条理由）。
+	var record: Dictionary = _structure_views.get(int(event.get("source", -1)), {})
+	if not record.is_empty():
+		_pulse_tower_fire(record)
 	if _effects_root == null:
 		return
 	var plan := attack_fx_plan(event)
@@ -5040,7 +5640,9 @@ func _make_fx_material(blend := BaseMaterial3D.BLEND_MODE_ADD) -> StandardMateri
 	return material
 
 # 技能落点的贴地残留。池空时抢最老的一枚；战斗期不 new 节点/材质。
-func _spawn_decal(pos: Vector2, color: Color, radius: float, duration := DECAL_SECONDS) -> void:
+# `texture` / `scale_mult` 由配方给（灼痕 slash、冰阵 rune、星尘 glow、烟迹 smoke…）：
+# 贴图名不认识时回落到默认的 rune，不静默留空。
+func _spawn_decal(pos: Vector2, color: Color, radius: float, duration := DECAL_SECONDS, texture := "", scale_mult := 1.0) -> void:
 	if _effects_root == null:
 		return
 	if _decal_pool.is_empty() and _decal_active.is_empty():
@@ -5053,11 +5655,19 @@ func _spawn_decal(pos: Vector2, color: Color, radius: float, duration := DECAL_S
 		node = _decal_pool.pop_back()
 	if node == null:
 		return
+	var spread := maxf(0.1, scale_mult)
 	node.visible = true
 	node.position = Vector3(pos.x, 0.12, pos.y)
-	node.scale = Vector3(radius * 2.0, radius * 2.0, 1.0)
+	node.scale = Vector3(radius * 2.0 * spread, radius * 2.0 * spread, 1.0)
 	var material := node.material_override as StandardMaterial3D
 	if material:
+		var art: Texture2D = FxTextures.rune()
+		if texture != "":
+			var wanted := FxTextures.file_texture(texture)
+			if wanted != null:
+				art = wanted
+		# 材质是逐节点的（见 _init_vfx_pools），换贴图不会污染别的残留。
+		material.albedo_texture = art
 		material.albedo_color = Color(color.r, color.g, color.b, 0.55)
 		material.emission = color
 		material.emission_energy_multiplier = 0.8
@@ -5125,7 +5735,7 @@ func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 	)
 	label.set_meta("tween", tween)
 
-func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float, alpha := 0.65) -> void:
+func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float, alpha := 0.65, tilt := false) -> void:
 	if _effects_root == null:
 		return
 	var slot: Dictionary = take_particle_slot(_ring_pool, _ring_active)
@@ -5147,6 +5757,10 @@ func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float,
 	material.emission = color
 	ring.position = Vector3(pos.x, 0.1, pos.z)
 	ring.scale = Vector3.ONE * from_scale
+	# 竖直环：同一枚 TorusMesh 立起来，就是「光门 / 禁锢柱」而不是贴地冲击环。
+	# 必须**每次显式赋值**（两个分支都写）：环节点是从池里复用的，
+	# 上一枚竖环的朝向会残留到下一个英雄的贴地技能上。
+	ring.rotation = Vector3(PI * 0.5, 0.0, 0.0) if tilt else Vector3.ZERO
 	ring.visible = true
 	_ring_active.append(ring)
 	var tween := create_tween()
@@ -5174,7 +5788,7 @@ static func take_particle_slot(pool: Array, active: Array) -> Dictionary:
 		return {"node": active.pop_front(), "stolen": true}
 	return {}
 
-func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, size := 0.12, lifetime := 0.55) -> void:
+func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, size := 0.12, lifetime := 0.55, texture := "") -> void:
 	if _effects_root == null:
 		return
 	particle_bursts += 1
@@ -5198,18 +5812,40 @@ func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, si
 		mat.color = color
 		mat.initial_velocity_min = speed * 0.45
 		mat.initial_velocity_max = speed
+	# 每个粒子节点自带一份 QuadMesh + 材质（见 _init_vfx_pools），所以换贴图与改尺寸
+	# 都是逐节点的：既不污染别的簇，也不用在战斗路径上 new 材质/网格。
+	# 贴图**每次显式赋值**（缺名字回落 spark）：节点是从池里借的，
+	# 上一簇的 shock 会残留到这一簇普通命中火星上。
+	var quad := p.draw_pass_1 as QuadMesh
+	if quad != null:
+		var quad_material := quad.material as StandardMaterial3D
+		if quad_material != null:
+			var art: Texture2D = FxTextures.spark()
+			if texture != "":
+				var wanted := FxTextures.file_texture(texture)
+				if wanted != null:
+					art = wanted
+			quad_material.albedo_texture = art
+		# size 以前是个**静默失效的参数**：配方里写了、函数也收下了，但从来没用过，
+		# 所有粒子都是一样大的方片。接到 quad 上之后「一蓬烟」和「一把火星」才拉得开体量。
+		var side := clampf(size, 0.02, 0.5)
+		quad.size = Vector2(side, side)
 	p.restart()
 	p.emitting = true
 	_hit_particles_active.append(p)
-	get_tree().create_timer(lifetime + 0.1).timeout.connect(func():
-		if not is_instance_valid(p):
-			return
-		if int(p.get_meta("generation", 0)) != generation:
-			return
-		p.emitting = false
-		_hit_particles_active.erase(p)
-		_hit_particles_pool.append(p)
-	)
+	# is_inside_tree() 而不是 get_tree() == null：节点不在树里时 get_tree() 会打一条
+	# ERROR（"Parameter data.tree is null"），而这条错误会污染无头测试的 ERROR 扫描。
+	# 真实对局里 arena 永远在树里，行为不变。
+	if is_inside_tree():
+		get_tree().create_timer(lifetime + 0.1).timeout.connect(func():
+			if not is_instance_valid(p):
+				return
+			if int(p.get_meta("generation", 0)) != generation:
+				return
+			p.emitting = false
+			_hit_particles_active.erase(p)
+			_hit_particles_pool.append(p)
+		)
 
 ## 项 3：投射物发射的表现。
 ## 关键点是"画面上弹丸的飞行时间必须等于 sim 的飞行时间"：
@@ -5226,7 +5862,9 @@ func _handle_projectile_spawned(event: Dictionary) -> void:
 	var flat_aim := Vector2(aim.x, aim.z)
 	var travel := flat_from.distance_to(flat_aim)
 	var duration := clampf(travel / 26.0, 0.06, 1.2)
-	_spawn_projectile(from, aim, color, duration)
+	# 走池化的 _spawn_tracer：这一发是**真实飞行的弹道**，拖尾光点跟着弹丸走，
+	# 落点由 projectile_hit 另收。以前这里 new 一个球、命中时 queue_free —— 违反硬规则 4。
+	_spawn_tracer(from, aim, color, 0.16, duration)
 
 func _handle_projectile_hit(event: Dictionary) -> void:
 	# 命中反馈：小范围火花 + 轻微顿帧。单体弹与范围弹用同一套，命中本身就是"打到了"。
@@ -5241,55 +5879,6 @@ func _projectile_color(kind: String, team: String) -> Color:
 	if kind == "arrow" or kind == "aoe_shot" or kind == "arrow_barrage":
 		return Color(1.0, 0.86, 0.46)
 	return RED if team == "red" else BLUE
-
-func _spawn_projectile(from: Vector3, to: Vector3, color: Color, duration: float) -> void:
-	var orb := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.16
-	sphere.height = 0.32
-	orb.mesh = sphere
-	var material := StandardMaterial3D.new()
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.albedo_color = color
-	material.emission_enabled = true
-	material.emission = color
-	material.emission_energy_multiplier = 2.4
-	orb.material_override = material
-	orb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	orb.position = from
-	_effects_root.add_child(orb)
-	orb.scale = Vector3.ONE * 2.2
-	var tween := create_tween()
-	tween.tween_property(orb, "position", to, duration)
-	tween.parallel().tween_property(orb, "scale", Vector3.ONE, duration)
-	tween.tween_callback(func():
-		_spawn_particles(to, color, 20, 4.5)
-		_spawn_ring(Vector3(to.x, 0.1, to.z), color, 0.35, 1.8, 0.3)
-		orb.queue_free()
-	)
-
-func _spawn_beam(from: Vector3, to: Vector3, color: Color, duration: float) -> void:
-	var orb := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.12
-	sphere.height = 0.24
-	orb.mesh = sphere
-	var material := StandardMaterial3D.new()
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.albedo_color = color
-	material.emission_enabled = true
-	material.emission = color
-	material.emission_energy_multiplier = 2.0
-	orb.material_override = material
-	orb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	orb.position = from
-	_effects_root.add_child(orb)
-	var tween := create_tween()
-	tween.tween_property(orb, "position", to, duration)
-	tween.tween_callback(func():
-		_spawn_particles(to, color, 6, 2.5, 0.1, 0.35)
-		orb.queue_free()
-	)
 
 # 英雄普攻刀光：从池里借一片新月，按英雄朝向张开，边扫边淡出。
 #

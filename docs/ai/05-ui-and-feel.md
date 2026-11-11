@@ -134,24 +134,128 @@ godot --path godot --script res://tools/probe_hud_rects.gd
 | --- | --- | --- |
 | 伤害飘字 | `arena._spawn_damage_number()` | 只有数字；`amount >= 150` 金色，否则近白；上飘 0.9、0.65s 淡出 |
 | 命中粒子 | `_handle_hit_event()` | 英雄 10 颗，小兵/建筑 4 颗 |
-| 普攻特效 | `_handle_minion_attack()` / `_handle_structure_attack()` | 近战刀光、远程/炮车弹丸、塔的枪口闪光 + 淡出光束；走 `_tracer_pool` / `_lance_pool`，配方由纯函数 `attack_fx_plan()` 决定 |
+| 普攻特效 | `_handle_minion_attack()` / `_handle_monster_attack()` / `_handle_structure_attack()` | 三者共用纯函数 `attack_fx_plan()` 的配方，由 `shape` 分派：`arc`（近战兵/超级兵/野怪爪光）、`slam`（BUFF 石像/首领砸地）、`orb`（远程兵/炮车）、`splash`（河道之灵）、`lance`（塔）。走 `_slash_pool` / `_tracer_pool` / `_ring_pool` / `_lance_pool` / `_spawn_decal`，**战斗期零分配** |
+| **野怪普攻** | `_handle_monster_attack()` | 2026-11-11 新增。**在此之前野怪不出手事件**，表现层只能从 `hit` 的 `source` 反推一次前倾，打野时怪一动不动。现在 sim 每次出手发 `monster_attack`（带 `monster_type / camp_id / buff_type / objective`，已进 `_sanitize_event` 白名单），配方按物种分：狼双爪、猪扬土、蜥蜴突咬、红鸟双击、石像砸地、河道之灵水花、首领地裂。详见 §4.2 |
 | 英雄普攻 | `_handle_hero_attack()` | 配方是纯函数 `hero_attack_fx_plan()`：攻击距离 < `HERO_RANGED_REACH`(4.0) 的近战英雄挥一片新月刀光（`_slash_pool`，12 片），远程英雄打一条弹道 + 枪口小闪；暴击只放大不改形态（更亮、火星更多、带一点震屏） |
 | 震屏 | `_camera_shake` + `_hit_stop` | 受击 `0.12`、坦克技能 `0.18`；顿帧触发时附加击退感 shake |
 | 顿帧 | `scripts/view/hit_stop_manager.gd` | 暴击/击杀/破塔/破盾/终局分别触发；只冻结表现层，模拟与网络照常 |
 | 范围环 | `_spawn_ring()` / `_flash_skill_range()` | 技能命中/施放时闪一次；触摸拖拽时由 `SkillIndicator` 实时绘制 |
 | 技能指示器 | `scripts/ui/skill_indicator.gd` | 触摸按下技能键后显示圆形/直线/扇形指示，松手施放 |
 | 取消施法区 | `scripts/ui/cancel_cast_zone.gd` | 触摸拖拽到屏幕上方取消区，松手中断施法 |
-| 弹道/光束 | `_spawn_projectile()` / `_spawn_beam()` | 法师/射手技能、塔攻击共用 |
+| 弹道/光束 | `_spawn_tracer()` / `_spawn_lance()` | 法师/射手技能、塔攻击、英雄普攻共用同一批池节点。**2026-11-11 起技能链路不再 `new` 弹丸/光束**：旧的 `_spawn_projectile()` / `_spawn_beam()` 是战斗期 `MeshInstance3D.new()` + `queue_free()`（违反硬规则 4），已删除 |
+| 技能签名 | `skill_fx.gd` 的 `recipe(kind)` + `arena._spawn_skill_fx()` | 17 个 `kind` 各有独立的形状/节奏轴：粒子贴图（spark/smoke/glow/rune/slash/shock）、粒子尺寸、延迟二次爆（`_fx_queue`）、竖直环（`ring.tilt`）、落点刀光（`arc`）、地面残留贴图/大小（`decal`）、渐宽光束（`beam_taper`）。`signature` 是给人读的名字，`signature_axes()` 是给测试读的机指纹 |
 | 播报 | `hud.announce()` | 中央横幅，0.18s 淡入 → 停留 → 0.4s 淡出 |
 | 多杀/一血/团灭 | `sim/combat_announcer.gd` → `arena._handle_death_event()` | 双杀/三杀/四杀/五杀/终结/团灭/一血，两端看到同一份结果 |
 | 战报 | `hud.add_feed()` | 右上滚动 6 条，4.5s 后淡出 |
 | 死亡遮罩 | `_build_death_overlay()` | 全屏红 48% + 复活倒计时 + 击杀者名 |
+| **防御塔分级外观** | `tower_visual.gd` 的 `TIER_STYLES` + `tier_style(tier)` | 外/内/高地/双子塔的**塔冠肋数**（6/7/8/5）、**肋顶宝珠**（0/3/6/2）、**石箍圈数**（3/4/5/2）、高地塔独有的**塔冠金箍**。`TowerVisual.build(team_color, tier)` 必须收到 tier —— 只靠 `visual_scale`（1.00/1.07/1.16/0.92）在 21m 机位下读不出层级 |
+| **塔开火反馈** | `_handle_structure_attack()` → `_pulse_tower_fire()` → `_apply_tower_fire()` | 核心闪亮（`emission × up to 1.85`）、光环涨一圈、塔身约 2.2° 后坐；`TOWER_FIRE_SECONDS = 0.26` 内一起衰减并**精确复位**。只改已有材质与变换，不新建节点 |
+| **塔低血残破** | `_apply_tower_damage()` + `TowerVisual.damage_tone()` | 血量低于 `DAMAGE_THRESHOLD = 0.55` 起：石料压暗、裂纹显隐、核心变弱。回满血会复原（复活/调试不会留下永久黑塔） |
+| **塔摧毁演出** | `_start_structure_collapse()` → `_advance_tower_collapse()` | 收到 `tower_destroyed` / `guard_destroyed` 后塔先倾斜 16° + 下沉 0.55m（`TOWER_COLLAPSE_SECONDS = 0.55`），演完才交出残骸；**没有事件时走旧路径**（客机先收到快照也不会卡在"倒一半"） |
 
-**运行时仍然没有的东西**（写新反馈时别去找）：受击闪白、击退、护盾吸收飘字、低血量屏幕边缘红晕。
+**运行时仍然没有的东西**（写新反馈时别去找）：击退、护盾吸收飘字、治疗飘字、低血量屏幕边缘红晕、加速风线、免控可视。
+（受击闪白已于 2026-11-10 落地：`unit_visual.gd` 的 `HitFlash` 节点 + `play_hit()`；特效的**显示机制**——分层/可见性/同屏预算/配方契约——见 [`../特效升级-对标王者荣耀.md`](../特效升级-对标王者荣耀.md）。）
+
+### 4.2 野怪 / 小兵普攻（2026-11-11 升级）
+
+改之前的三处「看不见」：
+
+1. **野怪根本没有攻击事件**。`_update_monsters()` 只结算伤害，表现层只能从 `hit` 的 `source`
+   反推「有东西打了我」→ 打野时野怪一动不动、没有爪光、没有音效，玩家读不出「它在还手」。
+2. **近战兵画的是飞过去的小球**。近战兵打近战兵也是，兵线对拼时满屏小球，读不出「谁在砍谁」。
+3. **`smoke` 贴图在生产代码里 0 引用**（差距文档 §3 D5）——野怪扬尘只能用火星凑。
+
+现在 **sim 与渲染层各改一处**：
+
+| 层 | 改动 |
+| --- | --- |
+| `sim/match_sim.gd::_update_monsters()` | 出手时发 `monster_attack`，字段与 `minion_attack` 同构 + `monster_type / camp_id / buff_type / objective / objective_id` |
+| `net/net_protocol.gd::_sanitize_event()` | 上述 4 个新键进白名单（漏一个 = 客机看到「血在掉、怪没动」） |
+| `arena.attack_fx_plan()` | 按 `shape` 出配方；`reach` 由**真实目标距离**算（写死半径会让近身挥出两米长的光） |
+| `arena._play_unit_attack_fx()` | 小兵与野怪的**唯一**渲染入口；`shape` 分派，全部走池 |
+| `unit_visual.play_attack()` | 狼播骨骼 `Attack`，程序化形态靠前冲；`_attack_lunge_strength` 按体型放大（只升不降，见下） |
+| `audio_plan` / `audio_cues` | `monster_swipe`（挥爪，短噪声）/ `monster_slam`（首领砸地，低频+碎石） |
+
+**五种野怪的出手必须能分辨**（`test_monster_attack_fx` 逐条钉住）：
+
+| 物种 | shape | 记忆点 |
+| --- | --- | --- |
+| 狼（兜底） | `arc` ×2 | **双爪**交错：两片弧比一片更粗的弧更像一次扑咬 |
+| 三猪 | `arc` ×1 | 单爪宽弧（108°）+ 扬土 |
+| 蜥蜴 | `arc` ×1 | 窄（76°）、贴地 0.62m、几乎不起土 |
+| 红鸟 | `arc` ×2 | 最宽（120°）、节奏最短 |
+| BUFF 石像 | `slam` | 整块砸下 + 冲击环 + 法阵残留，红/蓝各自配色 |
+| 河道之灵 | `splash` | 一圈水花，**不是爪光**（水系生物画成爪痕会被读成野狼） |
+| 暴君 / 主宰 | `slam` | 最长震屏（0.18）+ 地裂残留（`shock`）+ 14 颗命中火星 |
+
+**三个必须知道的坑**：
+
+1. **前冲力度只升不降**。同一次出手会先后到达两条事件：`monster_attack`（野怪 2.2 倍）
+   与 `hit`（默认 1.0 倍）。`play_attack_reaction()` 里的 `maxf` 不能删 —— 后到的
+   `hit` 把力度压回基准的话，扑咬会退化成「原地抖一下」，而且不报错。
+   `test_a_followup_hit_does_not_shrink_the_monster_lunge` 守着这一条。
+2. **无名贴图会静默变白方片**。配方里出现的每个 `dust` / `decal` / `texture` 名字都必须
+   真实存在，`test_every_texture_named_by_the_new_plans_exists` 逐条核实。
+3. **弧长依赖事件坐标**。`attack_fx_plan()` 用 `target_x/y - x/y` 算 `reach`；
+   事件缺坐标时回落到 0.6m 起步值，不会挥出一片零长度的弧（零长度 = 什么都看不见）。
+
+验证：
+
+```cmd
+godot --headless --path godot --script res://tests/run_tests.gd
+:: 纯逻辑 + 接线 + 白名单 + 音频（12 条）
+godot --headless --path godot --script res://.tmp/run_subset.gd -- test_monster_attack_fx
+
+:: 视觉对照（依赖 frame_post_draw，必须走隐藏桌面，见 AGENTS.md 环境硬约束）
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\unit_attack_shot.gd --fixed-fps 30
+:: 产物：godot/shots/unit_attack_{key}.png + unit_attack_sheet.png + unit_attack_control.png
+```
+
+`unit_attack_shot.gd` 的三个机位约束（每一条都是实拍改出来的，别凭直觉改回去）：
+**必须关掉 `arena.set_process(false)`**（否则 `_update_camera()` 每帧覆盖机位）、
+**必须 `--fixed-fps 30`**（刀光只有 0.12~0.22s，慢显卡上一帧就淡完了）、
+**每格都要清场并把节点还回池**（不还池会让「池空抢占」退化成抢同一个节点）。
 
 音频**有**了（2026-10-23 补齐），见 §9：战斗/菜单 BGM + 38 条合成音效。没有音频资源文件，全部现场合成。
 
 **接线状态**：顿帧、多杀播报、技能指示器、取消施法区都已接入生产代码（见 `01-repo-reality.md` §4）。新增反馈模块时照旧要先 `grep` 确认生产引用，不能只写测试。
+
+### 4.1 技能特效的四个坑（2026-11-11）
+
+改 `skill_fx.gd` 的配方或 `arena._spawn_skill_fx()` 之前先看这四条，每条都踩过：
+
+1. **`size` 曾经是空参数**。配方里写了 `size: 0.12`、`_spawn_particles()` 也收下了，但函数体从来没读过它 —— 所有粒子都是一样大的方片，`烟` 和 `火星` 在画面上没有任何体量差别。这种"参数传了但没人用"的失效不报错、测试也不会红，只能靠断 `quad.size` 抓（`test_skill_signature` 第 2 条变异就是这么来的）。
+2. **竖直环必须每帧显式复位**。`_spawn_ring()` 的节点是从池里复用的，写完 `if tilt: rotation.x = PI*0.5` 就完事的话，上一枚竖环的朝向会残留到下一个英雄的贴地技能上。两个分支都要写。
+3. **W/R 不能画两次弹道**。`SkillSystem.cast_skill()` 会为远程技能（burst / arrow / aoe_shot / line / meteor_storm / arrow_barrage）在 sim 里 `spawn_projectile`，发 `projectile_spawned`；配方里再画一颗就是两颗粒子并排飞。`_slot_fires_a_real_projectile()` 用 **slot** 判断（slot 在 `_sanitize_event` 白名单里、客机拿得到；`owner_id` 不在，客机上恒为 0）。Q/E 走 `_cast_q/_cast_e`，是瞬发不发弹道事件，**必须**继续靠配方出表现。
+4. **延迟二次爆不进 `SceneTreeTimer`**。用 `_fx_queue`（`_update_fx_queue(delta)` 逐帧推进）：计时器的回调在无头测试里拿不到 SceneTree，等于这条配方不可测；队列还顺便在顿帧期间和残留一起停。
+
+验证：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\skill_fx_shot.gd
+:: 产物：godot/shots/skill_fx_<kind>.png（17 张）+ skill_fx_sheet.png（5×4 总览）+ skill_fx_control.png（对照组）
+```
+
+**必须先看 `skill_fx_control.png`**：那是"不放任何技能"的同一机位。没有它，攻击范围环 / 防御塔范围环会被当成技能特效，或者反过来把自己的特效当成场景。另外画廊每轮**必须把上一轮的节点 `visible = false` 再清数组** —— `_decal_active` 存的是 `Dictionary`（键 `node`），直接当节点用不会报错，只会一张都没藏住，表现为"每张图上叠着七八圈同心圆"。
+
+### 4.2 防御塔的四个坑（2026-11-11）
+
+改 `tower_visual.gd` 或塔在 `arena` 里的那段之前先看这四条：
+
+1. **`tier` 必须真的传到 `TowerVisual.build()`**。以前建塔只传队伍色，层级完全靠 `visual_scale` 缩放。加了造型表之后，忘传 tier 不会报错，只会让四座塔长得一模一样——症状就是"明明改了塔冠，进游戏没区别"。
+2. **残血变暗要改「渲染时真正生效的那份材质」**。`ModelUtils.tint()` 会为每个面 `duplicate()` 一份材质塞进 `surface_override`，所以 `TowerVisual.build()` 返回的 `stone_material` 已经不是实际渲染的那份。必须从 `MeshInstance3D.get_active_material(0)` 重新取，否则改的是没人用的副本（静默失效）。记录里存的是 `stone_render_mat`。
+3. **`tower_destroyed` / `guard_destroyed` 事件不带 `id`**（只有 `team / tier / x / y`），所以倒塌演出只能按坐标反查，匹配半径 1.6m（塔基 1.34 + 余量；两塔最近 20m 以上，不会误伤）。record 里必须存 `team`，否则按阵营筛不出来。
+4. **塔的瞬时反馈不能依赖 `_effects_root`**。`_handle_structure_attack()` 原本第一行就 `if _effects_root == null: return`，把开火反馈排在它后面会让进场分帧构建期间完全没有反应。塔的反应只碰它自己的材质，所以必须排在早退之前（和 `_handle_hero_attack()` 的顿帧是同一条理由）。
+
+验证：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\tower_gallery.gd
+:: 产物：godot/shots/tower_tiers_field.png（四级同框）、tower_crown_{outer,inner,high}.png、
+::       tower_health_{full,low}.png
+```
+
+画廊的环境与主光直接吃 `ArenaLook`（和 `monster_gallery.gd` 同口径），所以图上看到的亮度就是游戏里的亮度。**相机必须用 `look_at_from_position()`**：构建阶段相机还没进树时 `look_at()` 会静默失败，拍出来是天空 + 塔顶，很容易被误读成"塔没建出来"。
 
 ---
 
@@ -164,8 +268,8 @@ godot --path godot --script res://tools/probe_hud_rects.gd
 截图验证：
 
 ```cmd
-godot --path godot --script res://tools/ui_shot.gd
-godot --path godot --script res://tools/mobile_shot.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\ui_shot.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\mobile_shot.gd
 ```
 
 产物在 `godot/shots/`（不入库）。
@@ -263,7 +367,7 @@ Kenney 兽人 —— 俯视下野区是一串一模一样的狼。现在每个�
 **改形象的操作顺序**（否则你会盯着一张缩成一坨的图瞎调）：
 
 ```cmd
-godot --path godot --script res://tools/monster_gallery.gd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\monster_gallery.gd
 :: 产物：godot/shots/monster_sheet.png（8 宫格特写）、monster_field.png（51° 俯角实战取景）
 ```
 
@@ -473,6 +577,70 @@ godot --headless --path godot --script res://tools/probe_audio_arena.gd   # aren
 - **纯路面贯通**：边路角落为完整平地，三层路面连续贯通，两层路缘石不再因广场而剔除，直接沿路面完整铺过拐角。
 - **传送阵**：`MapLayout.TELEPORT_PADS` 的阵心 `(∓52, ∓52)` 保持在最角落，高度恢复为平地草面高度（`base_y = 0.04`）。
 - **中路主桥保留**：`_build_river()` 仅保留中路中心的主桥（`_build_bridge("mid", Vector2.ZERO, BRIDGE_SPAN_MID)`）。
+
+### 11.1 传送阵造型与状态表现（2026-11-11 升级）
+
+**改前的实际状态**：两座阵是 `arena._add_map_disc()` 画的一块青色薄饼 + `_add_map_totem()` 立的一根灰杆。
+俯视下它和野区营地的圆盘**几乎一模一样**，玩家读不出「这个角落是传送阵」；
+更读不出「现在有人正在这里读条」—— 引导进度只体现在英雄脚下的 `ChannelFx` 法阵上，
+阵本身全程是一张静止贴图。灰杆还正好从阵心穿出来，把中间切开一条竖线。
+
+现在造型与状态收在**一个新文件**里，Arena 只给世界坐标与朝向：
+
+| 文件 | 职责 | 规模 |
+| --- | --- | --- |
+| `scripts/game/portal_visual.gd` | 石台 / 符文轮 / 三根方尖柱 / 浮空晶体 / 点光源，以及「进度 → 外观」的纯函数 | 470 行 |
+| `shaders/teleport_rune.gdshader` | 符文轮：三层差速齿环 + 六芒星内阵 + 读数指针 + 呼吸/裂开 | 140 行 |
+| `tools/portal_shot.gd` | 验收截图（待机 / 起手 / 过半 / 将满 / 抵达 / 打断 / 总览） | 150 行 |
+| `tests/test_portal_visual.gd` | 16 条契约（几何 / 状态映射 / 接线守卫 / 着色器） | 280 行 |
+
+**接线只有三处**（全在表现层，sim / 协议一行没动）：
+
+1. `Arena._build_map_features()` → `_build_portal(pad)`：建两座阵，根节点名 `portal_<pad_id>`；
+2. `Arena._process()` → `_tick_portals(delta)`：每帧喂引导进度；
+3. `_handle_channel_departure()` / `_handle_channel_break()` → `_flash_portal_at()` / `_shatter_portal_at()`：
+   抵达点亮对端的阵、打断让符文裂开。
+
+**引导进度怎么读**：快照白名单里**没有** `teleport_pad` 字段，所以不能按 pad id 匹配。
+但引导期间英雄不能移动（移动就打断），**位置就是阵心** —— 于是按位置判定，
+主客机拿的是同一份数据，不需要动协议。见 `PortalVisual.charge_from_entities()`。
+
+**五条设计口径**（都是看实拍图 + 量像素改出来的，别凭手感推翻）：
+
+1. **石台半径必须 = 传送判定半径**（`PortalVisual.DAIS_RADIUS == MapLayout.PAD_DISC_RADIUS`）。
+   两处各写一个 3.0 的下场是「看着站在台上、按下去没反应」。
+2. **柱子必须立在阵盘之外**（`PILLAR_RADIUS 3.42 > DAIS_RADIUS 3.0`）。立在阵内会挡住读条的人，
+   51° 俯角下柱影正好压在阵心上。
+3. **台面必须真的暗，但不能是黑洞**。第一版台面 `albedo 0.255` 经 FILMIC + 曝光 1.05 后
+   实测落到 175/255，加法混合的阵纹叠上去直接推成 255 全白 —— 外环、齿、六芒星、读数弧
+   全糊成一块白饼，什么都读不出。压到 `0.055` 又过头：实测 41/255，而阵外草地 178 ——
+   那不是石板，是草地上一个洞，第一眼读成「坑」。**0.105 落在 91**，两头都成立。
+   写这类数值前先用探针量一遍，别靠肉眼。
+4. **符文必须收敛到「清楚可见」就到顶**，不能继续堆亮度。`band_gain`（0.60）是亮度口径的
+   唯一闸门。引导进度的变化放在**形状**（线变粗、扫过的弧）与**读数指针**上 ——
+   纯靠亮度从 start 到 late 只差 0~15 个 luminance 单位，实战里根本数不出来。
+5. **点光源待机必须熄灭**。两盏常亮的 `OmniLight3D` 在移动端是最先吃掉帧预算的东西之一；
+   引导/闪光时才点亮（`light_energy(0,0) == 0` 有测试钉住）。
+
+**着色器必须用完就跑一次真实渲染再交**：`const float TAU = ...` 会重定义 Godot 内置常量，
+后果是**编译失败 → 材质回落纯白**，整块石台变成一张白纸。这个失效不报错、
+headless 测试也全绿（日志里只有一行 `SHADER ERROR`），只有在 1600×900 的整图里
+才看得出来 —— 而且很容易漏。`test_portal_visual` 现在按名字逐条拦住内置常量重定义。
+
+**验证**（截图必须开渲染上下文，走隐藏桌面，见 `AGENTS.md` 环境硬约束）：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\portal_shot.gd
+:: 产物：godot/shots/portal_idle.png / portal_idle_far.png / portal_charge_{start,mid,late}.png
+::       / portal_arrive.png / portal_break.png / portal_sheet.png（不入库）
+```
+
+`portal_idle_far.png` 是 21 米默认对局机位：**先看这张**。近景好看不代表实战里认得出，
+而这张才是玩家 90% 时间看到的距离。`portal_sheet.png` 看两座阵的相对位置与和河道之灵的分色。
+
+**性能**：两座阵各约 22 个 `MeshInstance3D`（3 层石台 + 12 块缘石 + 3 根柱的各 5 段 + 晶体 + 符文 + 光池），
+材质与网格全部走 `PortalVisual` 的静态缓存，同屏两座共享同一批资源。
+点光源 `shadow_enabled = false`，不参与 shadow pass。
 
 ---
 

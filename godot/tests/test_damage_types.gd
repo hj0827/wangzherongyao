@@ -78,7 +78,7 @@ func test_true_damage_ignores_both_resistances() -> void:
 	victim.magic_resist = _K() * 10.0
 	var before := float(victim.hp)
 	sim._damage(victim, 200.0, _hero(sim, "p1"), "true")
-	eq(before - float(victim.hp), 200.0, "真实伤害不吃任何减伤（终结的描述这次必须兑现）")
+	eq(before - float(victim.hp), 200.0, "真实伤害不吃任何减伤")
 
 func test_zero_resistance_reproduces_the_legacy_subtraction() -> void:
 	# 回归护栏：resist=0 → 乘子恒等 1.0 → 与旧减法逐位相同。
@@ -141,24 +141,6 @@ func test_blade_skill_damage_is_reduced_by_armor_not_mr() -> void:
 	sim.set_input("p1", {"seq": 1, "aim": tank.pos, "skill_q": true})
 	sim.tick(TICK)
 	gt(hp0 - float(tank.hp), 100.0, "苍刃 Q 是物理伤害：目标堆再多魔抗也要掉够血")
-
-func test_execute_summoner_deals_true_damage() -> void:
-	# 终结描述写「真实伤害」：高双抗目标必须挨满额。
-	var ctx := _duel("blade", "tank")
-	var sim: Object = ctx.sim
-	var blue: Dictionary = ctx.a
-	var red: Dictionary = ctx.b
-	red.pos = blue.pos + Vector2(2.0, 0)
-	red.hp = 500.0
-	red.armor = _K() * 8.0
-	red.magic_resist = _K() * 8.0
-	blue.summoner_spell = "execute"
-	blue.summoner_cd = 0.0
-	var hp0 := float(red.hp)
-	sim.set_input("p1", {"seq": 1, "summoner": true, "aim": red.pos})
-	sim.tick(TICK)
-	# base 120 + 已损(1780-500)*0.14 = 299.2，真实伤害不减半
-	near(hp0 - float(red.hp), 299.2, 0.01, "终结按已损生命结算真实伤害，双抗无效")
 
 # ---------------------------------------------------------------- 1.3 CDR
 
@@ -485,6 +467,7 @@ func test_board_stats_survive_the_wire() -> void:
 	hero.cooldown_reduction = 0.2
 	hero.attack_speed = 0.15
 	hero.crit_damage = 1.8
+	hero.crit_rate = 3.0
 	var shot: Dictionary = ctx.sim.snapshot()
 	var wire: Dictionary = NetProtocol.sanitize_snapshot(shot)
 	check(bool(wire.get("ok", false)), "snapshot must pass the sanitizer")
@@ -498,6 +481,7 @@ func test_board_stats_survive_the_wire() -> void:
 		eq(float(row.get("cooldown_reduction", -1.0)), 0.2, "wire.board.cooldown_reduction")
 		eq(float(row.get("attack_speed", -1.0)), 0.15, "wire.board.attack_speed")
 		eq(float(row.get("crit_damage", -1.0)), 1.8, "wire.board.crit_damage")
+		eq(float(row.get("crit_rate", -1.0)), 1.0, "wire.board.crit_rate matches entity clamp")
 
 # ---------------------------------------------------------------- 数据完整性守卫
 

@@ -176,6 +176,11 @@ const HIT_FLASH_SECONDS := 0.10
 const HIT_SQUASH_SECONDS := 0.16
 const ATTACK_LUNGE_SECONDS := 0.18
 const ATTACK_LUNGE_DISTANCE := 0.16
+# 野怪出手的前冲倍数。小兵是 0.16 米，野怪体型大一圈（普通 1.45m / BUFF 石像 2m /
+# 首领 3.8~4.2m），照抄 0.16 在 21 米机位下等于没动。倍数由 Arena 按体型给，
+# 这里只定义「基准 + 上限」，避免首领前冲把自己甩出脚下环。
+const MONSTER_LUNGE_SCALE := 2.2
+const MONSTER_LUNGE_MAX := 0.62
 
 const ANIM_ATTACK := {
 	"blade": "Sword_Regular_A",
@@ -250,6 +255,9 @@ var _model_rest_position := Vector3.ZERO
 var _hit_flash_timer := 0.0
 var _hit_squash_timer := 0.0
 var _attack_lunge_timer := 0.0
+# 这一次前冲的力度倍数（1.0 = 小兵基准）。野怪体型比小兵大一圈，同样的 0.16 米
+# 在 21 米机位下读不出「它扑了一下」。由 Arena 按体型给，默认 1.0 不改既有行为。
+var _attack_lunge_strength := 1.0
 var _spawn_scale_timer := 0.0
 var _force_shared_hero := false
 var flash_mesh: MeshInstance3D = null
@@ -1030,7 +1038,7 @@ func _update_hit_reaction(delta: float) -> void:
 	var lunge := 0.0
 	if _attack_lunge_timer > 0.0:
 		var t := 1.0 - _attack_lunge_timer / ATTACK_LUNGE_SECONDS
-		lunge = sin(t * PI) * ATTACK_LUNGE_DISTANCE
+		lunge = sin(t * PI) * ATTACK_LUNGE_DISTANCE * _attack_lunge_strength
 	var spawn_scale := 1.0
 	if _spawn_scale_timer > 0.0:
 		var t := 1.0 - _spawn_scale_timer / SPAWN_SCALE_SECONDS
@@ -1569,6 +1577,13 @@ func play_attack() -> void:
 		play_action(str(ANIM_ATTACK.get(hero_type, "Sword_Regular_A")))
 	elif kind == "minion":
 		play_action(minion_attack_anim(minion_type))
+	elif kind == "monster":
+		# 野怪：狼带着骨骼的 Attack 动作（glb 里确实有，见 _build_wolf_monster），
+		# 程序化拼的那些形态没有骨骼，play_action 会静默跳过 —— 它们的出手感靠
+		# 前冲补上。两者都叠加一次前冲：骨骼动作只有上身，脚下仍然站着不动。
+		if _monster_spec.is_empty():
+			play_action("Attack")
+		play_attack_reaction(monster_lunge_strength())
 
 # 小兵攻击动作：远程兵举杖施法，近战兵/超级兵挥武器。
 # 这些名字都直接存在于 Skeleton_Warrior / Skeleton_Rogue 里，不依赖 fallback。
@@ -1612,11 +1627,31 @@ func play_hit() -> void:
 		elif kind == "minion":
 			play_action("Hit_A")
 
+# 野怪出手的前冲力度。体型越大扑得越狠：普通野怪 2.2 倍、首领顶到上限。
+# 上限 0.62 米是为了不让首领「一头扑出脚下环」（环半径 2.4~2.6），
+# 出去之后玩家会以为它位移了。
+func monster_lunge_strength() -> float:
+	if is_objective:
+		return MONSTER_LUNGE_MAX / ATTACK_LUNGE_DISTANCE
+	var scale := 1.0
+	if not _monster_spec.is_empty():
+		scale = clampf(float(_monster_spec.get("height", 1.45)) / WOLF_HEIGHT, 1.0, 2.4)
+	return MONSTER_LUNGE_SCALE * scale
+
 # 野怪/小兵出手：没有骨骼攻击动作的形态靠身体前倾读"这一下打出去了"。
 # 英雄仍走 attack 事件里的 play_attack()，不会重复触发。
-func play_attack_reaction() -> void:
+# strength 是前冲力度倍数：野怪体型大一圈，用 1.0 的基准在小地图机位下等于没动。
+#
+# 只升不降：同一次出手会先到 monster_attack（野怪 2.2 倍），再到 hit（默认 1.0 倍），
+# 后到的那次把力度压回基准的话，扑咬就变成「原地抖一下」——而且不报错，
+# 只能靠 `_attack_lunge_strength` 的断言抓到（见 test_monster_attack_fx）。
+func play_attack_reaction(strength := 1.0) -> void:
 	if dead:
 		return
+	var wanted := clampf(strength, 0.5, 4.0)
+	if _attack_lunge_timer > 0.0:
+		wanted = maxf(wanted, _attack_lunge_strength)
+	_attack_lunge_strength = wanted
 	_attack_lunge_timer = ATTACK_LUNGE_SECONDS
 
 func process_visual(delta: float) -> void:
