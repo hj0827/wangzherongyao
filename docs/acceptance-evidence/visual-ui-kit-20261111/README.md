@@ -106,3 +106,46 @@ grep -rn "button_frame|quality_frame|kill_banner|streak_emblem|mvp_background|mv
 | G6 性能 | ❌ 未达标（既有 32fps，非本批引入） | — | — | 2026-11-11 |
 | G7 合规 | 🟨 本批 ✅ / 既有第三方与 AI 资产待补 | `docs/art-credits.md` | 待签 | 2026-11-11 |
 | G8 真机 | ⬜ 无设备 | `adb` 缺失 | — | 2026-11-11 |
+
+---
+
+## 9. 追加：面板统一（同批次后续，2026-11-11）
+
+把金边 9-slice 从"商店/结算"推到常驻界面。**没有新增资产**，复用已有的 `panel_gold.png`。
+
+### 9.1 做法（为什么不是简单替换）
+
+- 新增 `GameTheme.panel_frame(content_x := 14, content_y := 10, tint := WHITE)`：
+  内容边距**默认值与 `GameTheme.style()` 完全一致**，所以把已有 `StyleBoxFlat` 换成它时
+  面板最小尺寸不变 —— 否则"换皮"会悄悄顶破已经标定过的布局（本仓库踩过尺寸回归的坑）。
+- 选中/未选中不新出资产：`StyleBoxTexture.modulate_color` 把同一张金边调暗即可。
+
+### 9.2 接入点
+
+| 界面 | 位置 | 说明 |
+| --- | --- | --- |
+| 计分板主面板 | `scoreboard.gd` `_build()` | 1240×470，内容边距保持 14/10 |
+| 暂停面板 | `game_hud.gd::_build_pause_overlay()` | 内容边距保持 14/10 |
+| 选人页 5 张英雄卡 | `main.gd::_refresh_hero_selection()` | 内容边距保持 6/6；选中 `WHITE`、未选中 `Color(0.60,0.58,0.62)` |
+| 台词横幅 | `main.gd::_show_hero_select()` | 内容边距保持 28/8 |
+
+未接入（有意）：大厅房间面板（边框承担蓝/红队伍色语义，需另出两套边）、
+小地图与 HUD 小面板（9-slice 最小尺寸 48px 会把它们顶大）。
+
+### 9.3 证据
+
+- **G1**：`TESTS: 1033  PASSED: 1033  FAILED: 0`（+5 条）；`ERROR:` 扫描仍只有既有噪声。
+- **G2 变异 3/3 变红**：
+
+  | # | 变异点 | 实测 |
+  | --- | --- | --- |
+  | M1 | `panel_frame()` 内容边距各 +4 | ✅ 红 7 条（含"卡片内容边距必须保持 6"） |
+  | M2 | 计分板改回 `style()`（不接线） | ✅ 红 1 条（"计分板面板必须是 9-slice 金边"） |
+  | M3 | 未选中卡片 tint 改成与选中同亮 | ✅ 红 1 条（"选中的卡片要比未选中更亮"） |
+
+- **G3**：`grep panel_frame` 命中生产文件 `game_theme.gd` / `scoreboard.gd` / `game_hud.gd` / `main.gd`。
+- **G4**：`godot --path godot --script res://.tmp/panel_shot.gd` → 三张图目视通过：
+  - `kit_hero_select.png`：5 张卡全部金边，选中的翎羽明显更亮，台词横幅金边
+  - `kit_pause.png`：暂停面板金边 + 角饰，按钮不被边饰挤压
+  - `kit_scoreboard.png`：外框金边，蓝/红两列仍保留队伍色边框（层级分明）
+- 测试用例：`godot/tests/test_panel_frames.gd`（5 条，建真实节点而非只读源码字符串）。

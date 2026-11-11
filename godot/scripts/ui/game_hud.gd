@@ -1181,7 +1181,11 @@ func _build_pause_overlay() -> void:
 	panel.offset_right = 230.0
 	panel.offset_top = -overlay_height * 0.5
 	panel.offset_bottom = overlay_height * 0.5
-	panel.add_theme_stylebox_override("panel", GameTheme.style(GameTheme.PANEL, Color(0.6, 0.48, 0.26, 0.9), 2, 12))
+	var pause_frame := GameTheme.panel_frame()
+	if pause_frame.texture != null:
+		panel.add_theme_stylebox_override("panel", pause_frame)
+	else:
+		panel.add_theme_stylebox_override("panel", GameTheme.style(GameTheme.PANEL, Color(0.6, 0.48, 0.26, 0.9), 2, 12))
 	_pause_overlay.add_child(panel)
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER

@@ -333,6 +333,18 @@ static func _slice_box(texture: Texture2D, slice: float) -> StyleBoxTexture:
 static func button_frame() -> StyleBoxTexture:
 	return _slice_box(_asset(BUTTON_FRAME_PATH), FRAME_SLICE)
 
+# 金边面板（9-slice）。内容边距默认与 style() 的默认值完全一致（左右 14 / 上下 10）——
+# 把已有面板从 StyleBoxFlat 换成它时，**最小尺寸不变**，布局断言不会被"装饰"顶破。
+# tint 走 modulate_color：同一张金边可以调暗表示未选中，不必再多出一张资产。
+static func panel_frame(content_x := 14.0, content_y := 10.0, tint := Color.WHITE) -> StyleBoxTexture:
+	var box := _slice_box(_asset(PANEL_FRAME_PATH), FRAME_SLICE)
+	box.content_margin_left = content_x
+	box.content_margin_right = content_x
+	box.content_margin_top = content_y
+	box.content_margin_bottom = content_y
+	box.modulate_color = tint
+	return box
+
 # 品质框：basic / rare / epic / legendary，未知品质回落到 basic。
 static func quality_frame(quality: String) -> StyleBoxTexture:
 	var tier := quality if QUALITY_TIERS.has(quality) else "basic"

@@ -367,12 +367,16 @@ func _show_hero_select() -> void:
 
 	# 英雄台词展示横幅（殿堂级金色边框 + 发光台词）
 	_quote_banner = PanelContainer.new()
-	var banner_style := GameTheme.style(Color(0.04, 0.07, 0.1, 0.92), GameTheme.GOLD, 1, 10)
-	banner_style.content_margin_left = 28
-	banner_style.content_margin_right = 28
-	banner_style.content_margin_top = 8
-	banner_style.content_margin_bottom = 8
-	_quote_banner.add_theme_stylebox_override("panel", banner_style)
+	var banner_frame := GameTheme.panel_frame(28.0, 8.0)
+	if banner_frame.texture != null:
+		_quote_banner.add_theme_stylebox_override("panel", banner_frame)
+	else:
+		var banner_style := GameTheme.style(Color(0.04, 0.07, 0.1, 0.92), GameTheme.GOLD, 1, 10)
+		banner_style.content_margin_left = 28
+		banner_style.content_margin_right = 28
+		banner_style.content_margin_top = 8
+		banner_style.content_margin_bottom = 8
+		_quote_banner.add_theme_stylebox_override("panel", banner_style)
 	_quote_banner.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	column.add_child(_quote_banner)
 	_quote_label = _make_label("", 16, GameTheme.GOLD_LIGHT)
@@ -525,17 +529,23 @@ func _refresh_hero_selection() -> void:
 	for hero_type in _hero_cards:
 		var selected: bool = str(hero_type) == local_hero
 		var card: PanelContainer = _hero_cards[hero_type]
-		var style := GameTheme.style(
-			Color(0.06, 0.09, 0.11, 0.96) if selected else Color(0.025, 0.045, 0.06, 0.9),
-			GameTheme.GOLD if selected else Color(0.32, 0.3, 0.23, 0.55),
-			2 if selected else 1,
-			12
-		)
-		style.content_margin_left = 6
-		style.content_margin_right = 6
-		style.content_margin_top = 6
-		style.content_margin_bottom = 6
-		card.add_theme_stylebox_override("panel", style)
+		# 内容边距 6/6 与旧 StyleBoxFlat 一致，卡片尺寸不因换皮而变；
+		# 选中/未选中用 modulate 区分（同一张金边，未选中调暗），不再多一张资产。
+		var card_frame := GameTheme.panel_frame(6.0, 6.0, Color.WHITE if selected else Color(0.60, 0.58, 0.62))
+		if card_frame.texture != null:
+			card.add_theme_stylebox_override("panel", card_frame)
+		else:
+			var style := GameTheme.style(
+				Color(0.06, 0.09, 0.11, 0.96) if selected else Color(0.025, 0.045, 0.06, 0.9),
+				GameTheme.GOLD if selected else Color(0.32, 0.3, 0.23, 0.55),
+				2 if selected else 1,
+				12
+			)
+			style.content_margin_left = 6
+			style.content_margin_right = 6
+			style.content_margin_top = 6
+			style.content_margin_bottom = 6
+			card.add_theme_stylebox_override("panel", style)
 		_hero_marks[hero_type].visible = selected
 
 		# 控制对应英雄视频播放（选中时才加载视频流）

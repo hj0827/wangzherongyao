@@ -94,7 +94,11 @@ func _build() -> void:
 	_panel.offset_bottom = height * 0.5
 	# STOP：点击落在面板上就停住，不会冒泡到遮罩被当成「点空白」。
 	_panel.mouse_filter = Control.MOUSE_FILTER_STOP
-	_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.97), Color(0.7, 0.55, 0.28, 0.9), 2, 12))
+	var frame := GameTheme.panel_frame()
+	if frame.texture != null:
+		_panel.add_theme_stylebox_override("panel", frame)
+	else:
+		_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.97), Color(0.7, 0.55, 0.28, 0.9), 2, 12))
 	_root.add_child(_panel)
 
 	var column := VBoxContainer.new()
