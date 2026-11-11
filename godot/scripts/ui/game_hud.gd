@@ -134,6 +134,16 @@ var _feed_box: VBoxContainer
 var _announce_panel: PanelContainer
 var _announce_label: Label
 var _announce_tween: Tween
+# 击杀横幅（UI-04）：640×160，与 kill_banner.png 的 4:1 同比例，不被拉伸。
+var _kill_banner: Control
+var _kill_banner_bg: TextureRect
+var _kill_banner_killer: TextureRect
+var _kill_banner_victim: TextureRect
+var _kill_banner_killer_frame: PanelContainer
+var _kill_banner_victim_frame: PanelContainer
+var _kill_banner_text: Label
+var _kill_banner_emblem: TextureRect
+var _kill_banner_tween: Tween
 var _death_overlay: Control
 var _death_countdown: Label
 var _death_killer_label: Label
@@ -141,6 +151,8 @@ var _result_overlay: Control
 var _result_title: Label
 var _result_badge: Label
 var _result_avatar: TextureRect
+var _result_bg: TextureRect
+var _result_medal: TextureRect
 var _result_sub: Label
 var _result_stats: Label
 var _pause_overlay: Control
@@ -170,6 +182,7 @@ func _ready() -> void:
 	_build_minimap()
 	_build_feed()
 	_build_announcement()
+	_build_kill_banner()
 	_build_bottom_panel()
 	_build_attack_cluster()
 	_build_hints()
@@ -472,6 +485,145 @@ func _build_announcement() -> void:
 	_announce_label.add_theme_constant_override("outline_size", 8)
 	_announce_panel.add_child(_announce_label)
 	_announce_panel.visible = false
+
+# 击杀横幅：底图 + 双方头像 + 中央文字 +（连杀时）上方纹章。
+# 位置固定在画面上部中央（横幅不进 hud_layout 分区表：它是瞬时反馈，不是常驻控件）。
+func _build_kill_banner() -> void:
+	_kill_banner = Control.new()
+	_kill_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_kill_banner.anchor_left = 0.5
+	_kill_banner.anchor_right = 0.5
+	_kill_banner.offset_left = -320.0
+	_kill_banner.offset_right = 320.0
+	_kill_banner.offset_top = 200.0
+	_kill_banner.offset_bottom = 360.0
+	_kill_banner.visible = false
+	add_child(_kill_banner)
+
+	_kill_banner_bg = TextureRect.new()
+	_kill_banner_bg.texture = GameTheme.kill_banner()
+	_kill_banner_bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_kill_banner_bg.stretch_mode = TextureRect.STRETCH_SCALE
+	_kill_banner_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_kill_banner_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_kill_banner.add_child(_kill_banner_bg)
+
+	_kill_banner_killer_frame = _make_banner_avatar_slot()
+	_kill_banner_killer_frame.anchor_top = 0.0
+	_kill_banner_killer_frame.anchor_bottom = 0.0
+	_kill_banner_killer_frame.offset_left = 14.0
+	_kill_banner_killer_frame.offset_right = 94.0
+	_kill_banner_killer_frame.offset_top = 40.0
+	_kill_banner_killer_frame.offset_bottom = 120.0
+	_kill_banner.add_child(_kill_banner_killer_frame)
+	_kill_banner_killer = _kill_banner_killer_frame.get_meta("avatar")
+
+	_kill_banner_victim_frame = _make_banner_avatar_slot()
+	_kill_banner_victim_frame.anchor_left = 1.0
+	_kill_banner_victim_frame.anchor_right = 1.0
+	_kill_banner_victim_frame.anchor_top = 0.0
+	_kill_banner_victim_frame.anchor_bottom = 0.0
+	_kill_banner_victim_frame.offset_left = -94.0
+	_kill_banner_victim_frame.offset_right = -14.0
+	_kill_banner_victim_frame.offset_top = 40.0
+	_kill_banner_victim_frame.offset_bottom = 120.0
+	_kill_banner.add_child(_kill_banner_victim_frame)
+	_kill_banner_victim = _kill_banner_victim_frame.get_meta("avatar")
+
+	_kill_banner_text = _make_label("", 30, GameTheme.GOLD_LIGHT)
+	_kill_banner_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_kill_banner_text.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_kill_banner_text.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_kill_banner_text.offset_left = 96.0
+	_kill_banner_text.offset_right = -96.0
+	_kill_banner_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_kill_banner_text.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	_kill_banner_text.add_theme_constant_override("outline_size", 6)
+	_kill_banner.add_child(_kill_banner_text)
+
+	_kill_banner_emblem = TextureRect.new()
+	_kill_banner_emblem.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_kill_banner_emblem.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_kill_banner_emblem.anchor_left = 0.5
+	_kill_banner_emblem.anchor_right = 0.5
+	_kill_banner_emblem.anchor_top = 0.0
+	_kill_banner_emblem.anchor_bottom = 0.0
+	_kill_banner_emblem.offset_left = -56.0
+	_kill_banner_emblem.offset_right = 56.0
+	_kill_banner_emblem.offset_top = -92.0
+	_kill_banner_emblem.offset_bottom = 20.0
+	_kill_banner_emblem.visible = false
+	_kill_banner_emblem.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_kill_banner.add_child(_kill_banner_emblem)
+
+func _make_banner_avatar() -> TextureRect:
+	var avatar := TextureRect.new()
+	avatar.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	avatar.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	avatar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return avatar
+
+# 头像位 = 金边方框 + 内嵌头像。框和头像必须一起显隐：
+# 被塔/小兵击杀时左边没有击杀者，留下一个空金环会像"图丢了"。
+func _make_banner_avatar_slot() -> PanelContainer:
+	var frame := PanelContainer.new()
+	frame.custom_minimum_size = Vector2(80.0, 80.0)
+	var style := GameTheme.style(Color(0.02, 0.03, 0.045, 0.95), Color(0.92, 0.78, 0.45, 0.9), 2, 6, 0, 0.0)
+	style.content_margin_left = 4
+	style.content_margin_right = 4
+	style.content_margin_top = 4
+	style.content_margin_bottom = 4
+	frame.add_theme_stylebox_override("panel", style)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var avatar := _make_banner_avatar()
+	frame.add_child(avatar)
+	frame.set_meta("avatar", avatar)
+	return frame
+
+# streak：1=第一滴血 … 5=五杀，0=不显示纹章。
+# killer_is_hero=false 时（被塔/小兵击杀）只显示受害者头像。
+func show_kill_banner(
+	killer_name: String,
+	killer_hero_type: String,
+	victim_name: String,
+	victim_hero_type: String,
+	streak := 0,
+	killer_is_hero := true
+) -> void:
+	if _kill_banner == null:
+		return
+	_kill_banner.visible = true
+	if _kill_banner_bg != null and _kill_banner_bg.texture == null:
+		_kill_banner_bg.texture = GameTheme.kill_banner()
+	if _kill_banner_killer != null:
+		_kill_banner_killer.texture = GameTheme.hero_avatar(killer_hero_type, 72) if (killer_is_hero and killer_hero_type != "") else null
+		_kill_banner_killer.visible = _kill_banner_killer.texture != null
+		if _kill_banner_killer_frame != null:
+			_kill_banner_killer_frame.visible = _kill_banner_killer.texture != null
+	if _kill_banner_victim != null:
+		_kill_banner_victim.texture = GameTheme.hero_avatar(victim_hero_type, 72) if victim_hero_type != "" else null
+		_kill_banner_victim.visible = _kill_banner_victim.texture != null
+		if _kill_banner_victim_frame != null:
+			_kill_banner_victim_frame.visible = _kill_banner_victim.texture != null
+	if _kill_banner_text != null:
+		_kill_banner_text.text = "%s  击败  %s" % [killer_name, victim_name] if killer_is_hero else "%s  被 %s 击败" % [victim_name, killer_name]
+	if _kill_banner_emblem != null:
+		var emblem := GameTheme.streak_emblem(streak)
+		_kill_banner_emblem.texture = emblem
+		_kill_banner_emblem.visible = emblem != null
+	if _kill_banner_tween != null and _kill_banner_tween.is_valid():
+		_kill_banner_tween.kill()
+	_kill_banner.modulate = Color(1, 1, 1, 0)
+	_kill_banner.scale = Vector2(0.92, 0.92)
+	_kill_banner.pivot_offset = _kill_banner.size * 0.5
+	_kill_banner_tween = create_tween()
+	_kill_banner_tween.set_parallel(true)
+	_kill_banner_tween.tween_property(_kill_banner, "modulate:a", 1.0, 0.12)
+	_kill_banner_tween.tween_property(_kill_banner, "scale", Vector2.ONE, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_kill_banner_tween.set_parallel(false)
+	_kill_banner_tween.tween_interval(1.7)
+	_kill_banner_tween.tween_property(_kill_banner, "modulate:a", 0.0, 0.3)
+	_kill_banner_tween.tween_callback(func(): _kill_banner.visible = false)
 
 func _build_bottom_panel() -> void:
 	_hero_panel = PanelContainer.new()
@@ -1072,6 +1224,13 @@ func _build_result_overlay() -> void:
 	else:
 		panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.025, 0.045, 0.06, 0.97), Color(0.7, 0.55, 0.28, 0.95), 2, 14))
 	_result_overlay.add_child(panel)
+	# 结算页背景：压在内容之下，随面板内容区缩放（768×512 与 660×440 同为 1.5:1）。
+	_result_bg = TextureRect.new()
+	_result_bg.texture = GameTheme.mvp_background()
+	_result_bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_result_bg.stretch_mode = TextureRect.STRETCH_SCALE
+	_result_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(_result_bg)
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.add_theme_constant_override("separation", 16)
@@ -1080,6 +1239,13 @@ func _build_result_overlay() -> void:
 	head_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	head_row.add_theme_constant_override("separation", 16)
 	box.add_child(head_row)
+	# 勋章：MVP / 参战两枚，show_result 里按 KDA 切换。
+	_result_medal = TextureRect.new()
+	_result_medal.custom_minimum_size = Vector2(72.0, 72.0)
+	_result_medal.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_result_medal.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_result_medal.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head_row.add_child(_result_medal)
 	var avatar_frame := PanelContainer.new()
 	avatar_frame.custom_minimum_size = Vector2(96.0, 96.0)
 	avatar_frame.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.03, 0.045, 1.0), Color(0.72, 0.56, 0.30, 0.85), 2, 8, 0, 0.0))
@@ -1107,6 +1273,9 @@ func _build_result_overlay() -> void:
 	var leave := Button.new()
 	leave.text = "返回主菜单"
 	leave.custom_minimum_size = TouchLayout.RESULT_BUTTON_SIZE if touch_mode else Vector2(220, 52)
+	var leave_frame := GameTheme.button_frame()
+	if leave_frame.texture != null:
+		leave.add_theme_stylebox_override("normal", leave_frame)
 	leave.pressed.connect(func(): leave_requested.emit())
 	box.add_child(leave)
 
@@ -1500,6 +1669,10 @@ func show_result(winner: String, local: Dictionary) -> void:
 	var kills := int(local.get("kills", 0))
 	var deaths := int(local.get("deaths", 0))
 	var is_mvp := kills >= 3 and kills > deaths
+	if _result_bg:
+		_result_bg.texture = GameTheme.mvp_background()
+	if _result_medal:
+		_result_medal.texture = GameTheme.mvp_medal(is_mvp)
 	if _result_badge:
 		_result_badge.text = "MVP" if is_mvp else "参战"
 		_result_badge.add_theme_color_override("font_color", GameTheme.GOLD_LIGHT if is_mvp else GameTheme.MUTED)

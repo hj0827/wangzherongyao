@@ -87,6 +87,9 @@ func _build() -> void:
 	_quick_button = Button.new()
 	_quick_button.text = "快捷购买推荐装备"
 	_quick_button.custom_minimum_size = Vector2(0.0, 44.0)
+	var quick_frame := GameTheme.button_frame()
+	if quick_frame.texture != null:
+		_quick_button.add_theme_stylebox_override("normal", quick_frame)
 	_quick_button.focus_mode = Control.FOCUS_NONE
 	_quick_button.pressed.connect(_on_quick_buy)
 	box.add_child(_quick_button)
@@ -180,7 +183,12 @@ func _build() -> void:
 func _make_item_cell(item_id: String) -> Control:
 	var item: Dictionary = ItemShop.get_item(item_id)
 	var cell := PanelContainer.new()
-	cell.add_theme_stylebox_override("panel", GameTheme.style(Color(0.035, 0.06, 0.08, 0.96), _quality_color(item_id), 1, 8))
+	# 品质框走 9-slice 位图（basic/rare/epic/legendary），缺图时退回原来的纯色圆角框。
+	var quality_frame := GameTheme.quality_frame(ItemShop.quality_of(item_id))
+	if quality_frame.texture != null:
+		cell.add_theme_stylebox_override("panel", quality_frame)
+	else:
+		cell.add_theme_stylebox_override("panel", GameTheme.style(Color(0.035, 0.06, 0.08, 0.96), _quality_color(item_id), 1, 8))
 	cell.mouse_entered.connect(_show_detail.bind(item_id))
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
@@ -198,6 +206,9 @@ func _make_item_cell(item_id: String) -> Control:
 	var buy := Button.new()
 	buy.text = "%d g" % int(item.get("cost", 0))
 	buy.custom_minimum_size = Vector2(78.0, 42.0 if touch_mode else 38.0)
+	var buy_frame := GameTheme.button_frame()
+	if buy_frame.texture != null:
+		buy.add_theme_stylebox_override("normal", buy_frame)
 	buy.focus_mode = Control.FOCUS_NONE
 	buy.pressed.connect(func(): buy_requested.emit(item_id))
 	row.add_child(buy)

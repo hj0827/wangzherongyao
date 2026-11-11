@@ -281,3 +281,75 @@ static func item_icon(item_id: String, size: int) -> Texture2D:
 
 static func has_item_icon(item_id: String) -> bool:
 	return ResourceLoader.exists(item_icon_path(item_id))
+
+# ---------------------------------------------------------------- UI 骨架资产（第二批）
+#
+# 边框 / 击杀横幅 / 连杀纹章 / 结算页背景与勋章，全部由
+# res://tools/make_ui_assets.gd 程序化生成（确定性、零版权风险）。
+# 手绘替换时只覆盖同名 PNG，这里的路径与调用方都不用改。
+
+const BUTTON_FRAME_PATH := "res://assets/ui/frames/button_gold.png"
+const QUALITY_FRAME_DIR := "res://assets/ui/frames/slot_quality_"
+const KILL_BANNER_PATH := "res://assets/ui/banners/kill_banner.png"
+const STREAK_EMBLEM_DIR := "res://assets/ui/banners/streak_"
+const MVP_BG_PATH := "res://assets/ui/mvp/mvp_bg.png"
+const MVP_MEDAL_DIR := "res://assets/ui/mvp/medal_"
+const QUALITY_TIERS := ["basic", "rare", "epic", "legendary"]
+const STREAK_NAMES := {1: "first", 2: "double", 3: "triple", 4: "quadra", 5: "penta"}
+
+# 9-slice 边宽：边框底图 96×96 取 24，品质框底图 72×72 取 18。
+const FRAME_SLICE := 24.0
+const QUALITY_SLICE := 18.0
+
+static var _asset_cache: Dictionary = {}
+
+# 统一的资产读取 + 缓存。缺图也缓存 null，避免每帧重复走 ResourceLoader.exists。
+static func _asset(path: String) -> Texture2D:
+	if _asset_cache.has(path):
+		return _asset_cache[path]
+	var texture: Texture2D = null
+	if ResourceLoader.exists(path):
+		var loaded := load(path)
+		if loaded is Texture2D:
+			texture = loaded as Texture2D
+	_asset_cache[path] = texture
+	return texture
+
+static func _slice_box(texture: Texture2D, slice: float) -> StyleBoxTexture:
+	var box := StyleBoxTexture.new()
+	box.texture = texture
+	box.texture_margin_left = slice
+	box.texture_margin_right = slice
+	box.texture_margin_top = slice
+	box.texture_margin_bottom = slice
+	# 内容边距收到边框内侧一点，文字不压金线。
+	box.content_margin_left = slice * 0.5
+	box.content_margin_right = slice * 0.5
+	box.content_margin_top = slice * 0.4
+	box.content_margin_bottom = slice * 0.4
+	return box
+
+# 按钮金边（悬停/按下仍由 Theme 的 StyleBoxFlat 负责，这里给"可点击的实体感"）。
+static func button_frame() -> StyleBoxTexture:
+	return _slice_box(_asset(BUTTON_FRAME_PATH), FRAME_SLICE)
+
+# 品质框：basic / rare / epic / legendary，未知品质回落到 basic。
+static func quality_frame(quality: String) -> StyleBoxTexture:
+	var tier := quality if QUALITY_TIERS.has(quality) else "basic"
+	return _slice_box(_asset(QUALITY_FRAME_DIR + tier + ".png"), QUALITY_SLICE)
+
+# 击杀横幅底图（1024×256，4:1，与 HUD 的 640×160 横幅位同比例）。
+static func kill_banner() -> Texture2D:
+	return _asset(KILL_BANNER_PATH)
+
+# 连杀纹章：1=第一滴血 … 5=五杀；越界返回 null（调用方据此收起纹章）。
+static func streak_emblem(streak: int) -> Texture2D:
+	if not STREAK_NAMES.has(streak):
+		return null
+	return _asset(STREAK_EMBLEM_DIR + str(STREAK_NAMES[streak]) + ".png")
+
+static func mvp_background() -> Texture2D:
+	return _asset(MVP_BG_PATH)
+
+static func mvp_medal(is_mvp: bool) -> Texture2D:
+	return _asset(MVP_MEDAL_DIR + ("mvp" if is_mvp else "participation") + ".png")

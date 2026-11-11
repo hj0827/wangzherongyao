@@ -156,6 +156,14 @@ const STREAK_TITLES := {
 	"godlike": "横扫千军",
 	"legendary": "天下无双",
 }
+# 击杀播报码 → 连杀等级：1=第一滴血 … 5=五杀。0 表示不弹连杀纹章。
+const KILL_STREAK_LEVEL := {
+	"first_blood": 1,
+	"double_kill": 2,
+	"triple_kill": 3,
+	"quadra_kill": 4,
+	"penta_kill": 5,
+}
 
 var config: Dictionary = {}
 var mode := "duel"
@@ -4843,6 +4851,15 @@ func _handle_death_event(event: Dictionary) -> void:
 			victim,
 			str(event.get("victim_hero_type", "")),
 			feed_color,
+			killer_type == "hero"
+		)
+		# 击杀横幅（UI-04）：同一条事件驱动，联机两端看到同一份（码来自 sim，不在客户端判定）。
+		hud.show_kill_banner(
+			killer_name,
+			str(event.get("killer_hero_type", "")),
+			victim,
+			str(event.get("victim_hero_type", "")),
+			int(KILL_STREAK_LEVEL.get(announce_code, 0)),
 			killer_type == "hero"
 		)
 	elif entity_type == "minion":
