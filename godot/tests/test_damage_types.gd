@@ -46,6 +46,12 @@ func _duel(attacker_type: String, victim_type: String) -> Dictionary:
 	b.last_damage_time = 0.0
 	return {"sim": sim, "a": a, "b": b}
 
+# 项 3.3：技能有前摇（0.15–0.25 秒），伤害在起手后若干 tick 才结算。
+# 这些用例关心的是"减伤后的数值"，所以统一越过前摇窗口再读血量。
+func _tick_past_windup(sim: Object) -> void:
+	for i in 15:
+		sim.tick(TICK)
+
 # 不在实体列表里的临时受害者：只用于直调 _damage。
 func _victim(team := "red", hp := 1000.0) -> Dictionary:
 	return {"id": 999, "type": "hero", "team": team, "alive": true,
@@ -119,7 +125,7 @@ func test_mage_skill_damage_is_reduced_by_magic_resist() -> void:
 	tank.magic_resist = _K()
 	var hp0 := float(tank.hp)
 	sim.set_input("p1", {"seq": 1, "aim": tank.pos, "skill_q": true})
-	sim.tick(TICK)
+	_tick_past_windup(sim)
 	var mitigated := hp0 - float(tank.hp)
 	check(mitigated > 0.0, "q still hits with resist")
 
@@ -128,7 +134,7 @@ func test_mage_skill_damage_is_reduced_by_magic_resist() -> void:
 	var tank2: Dictionary = ctx2.b
 	var hp1 := float(tank2.hp)
 	sim2.set_input("p1", {"seq": 1, "aim": tank2.pos, "skill_q": true})
-	sim2.tick(TICK)
+	_tick_past_windup(sim2)
 	var raw := hp1 - float(tank2.hp)
 	near(mitigated, raw * 0.5, 0.01, "魔抗=K 使法师 Q 恰好减半")
 
@@ -139,7 +145,7 @@ func test_blade_skill_damage_is_reduced_by_armor_not_mr() -> void:
 	tank.magic_resist = _K() * 4.0   # 堆魔抗对物理毫无意义
 	var hp0 := float(tank.hp)
 	sim.set_input("p1", {"seq": 1, "aim": tank.pos, "skill_q": true})
-	sim.tick(TICK)
+	_tick_past_windup(sim)
 	gt(hp0 - float(tank.hp), 100.0, "苍刃 Q 是物理伤害：目标堆再多魔抗也要掉够血")
 
 # ---------------------------------------------------------------- 1.3 CDR

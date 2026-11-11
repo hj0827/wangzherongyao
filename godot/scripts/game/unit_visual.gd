@@ -278,6 +278,9 @@ var slow_ring: MeshInstance3D = null
 # 两者都复用 _make_status_ring，避免又引入一套几何/材质。
 var haste_ring: MeshInstance3D = null
 var immune_aura: MeshInstance3D = null
+# 技能前摇环（项 3.3）：起手期间亮起的橙色环，让对手"看到起手再交控"。
+# 与硬控环同一套几何，颜色单独一档，避免和眩晕金环混淆。
+var cast_ring: MeshInstance3D = null
 # 硬控状态环（项 4，链路 5）：眩晕/击飞/沉默/定身各有各的环，
 # 玩家必须一眼看出"对方是被打晕了"还是"被封了技能"——这两种的应对完全不同。
 # 复用 _make_status_ring，不再另造一套几何。
@@ -954,6 +957,13 @@ func _build_status_fx(height: float, radius: float) -> void:
 	immune_aura.visible = false
 	add_child(immune_aura)
 
+	# 技能前摇环（项 3.3）：比免控环更靠内，避免和硬控环抢同一圈。
+	cast_ring = _make_status_ring(maxf(radius * 1.0, 0.48), 0.042, Color(1.0, 0.72, 0.28, 0.7))
+	cast_ring.name = "CastRing"
+	cast_ring.position.y = 0.11
+	cast_ring.visible = false
+	add_child(cast_ring)
+
 	# 硬控环：每种控一个环，颜色与控制含义对应。
 	# 高度分层：眩晕最内、沉默最外，避免多个控同时存在时完全重叠成一团。
 	for entry in CC_RING_SPECS:
@@ -1013,6 +1023,8 @@ func _update_status_fx(data: Dictionary) -> void:
 			haste_ring.visible = false
 		if immune_aura:
 			immune_aura.visible = false
+		if cast_ring:
+			cast_ring.visible = false
 		for entry in CC_RING_SPECS:
 			var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
 			if cc_ring != null:
@@ -1049,6 +1061,9 @@ func _update_status_fx(data: Dictionary) -> void:
 		haste_ring.visible = float(data.get("haste_timer", 0.0)) > 0.0 and bool(data.get("moving", false))
 	if immune_aura:
 		immune_aura.visible = float(data.get("cc_immune_timer", 0.0)) > 0.0
+	if cast_ring:
+		# 起手环只认 cast_left：cast_slot 非空但前摇已走完的那一帧不该再亮。
+		cast_ring.visible = float(data.get("cast_left", 0.0)) > 0.0
 	# 硬控环（项 4）：按各控的剩余时间点亮。
 	# 用计时而不是只用 cc_status：cc_status 只给"最重的那一个"，
 	# 同时中两种控时另一个也会亮，玩家才能看到完整状态。

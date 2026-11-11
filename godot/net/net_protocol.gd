@@ -451,6 +451,12 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["skill_w_cd"] = clampf(_number(source.get("skill_w_cd", 0.0)), 0.0, 600.0)
 		entity["skill_e_cd"] = clampf(_number(source.get("skill_e_cd", 0.0)), 0.0, 600.0)
 		entity["skill_r_cd"] = clampf(_number(source.get("skill_r_cd", 0.0)), 0.0, 600.0)
+		# 前摇 / 后摇（项 3.3，链路 4）：漏了 = 客机看不到"对方正在起手"，
+		# 前摇对抗（看到起手再交控）只在主机端成立。slot 只收合法槽位。
+		var cast_slot := str(source.get("cast_slot", ""))
+		entity["cast_slot"] = cast_slot if HeroDefs.SKILL_SLOTS.has(cast_slot) else ""
+		entity["cast_left"] = clampf(_number(source.get("cast_left", 0.0)), 0.0, 3.0)
+		entity["cast_recover"] = clampf(_number(source.get("cast_recover", 0.0)), 0.0, 3.0)
 		# 项 2：技能等级与点数过白名单。漏任何一个 = 客机永远显示未学习，且不报错。
 		# 钳制上限引用 HeroDefs 的单一真身（本文件已 preload 它），不另写字面量，
 		# 避免重蹈 crit_rate 那种"两条路径各写一个上限"的口径漂移。
@@ -627,6 +633,9 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		# 野怪普攻（monster_attack）：客机靠 monster_type / buff_type / camp_id 还原
 		# 「爪光 / 扬尘 / BUFF 配色 / 首领砸地」。漏一个就是「主机看得见爪痕、客机只有血在掉」。
 		"monster_type", "camp_id", "buff_type", "objective",
+		# 前摇打断（项 3.3）：reason 区分"被控断"与"主动取消"，
+		# 缺它客机只能播一个无语义的收招动画。
+		"reason",
 	]:
 		if not source.has(key):
 			continue

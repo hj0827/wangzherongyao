@@ -127,9 +127,12 @@ func test_q_skill_spends_mana_deals_damage_and_starts_cooldown() -> void:
 	var mana: float = blue.mp
 	sim.set_input("p1", _input({"aim": red.pos, "skill_q": true}))
 	sim.tick(1.0 / MatchSim.TICK_RATE)
-	lt(red.hp, red_hp, "q damages enemy hero")
+	# 项 3.3：Q 有 0.18 秒前摇，起手帧只扣蓝/CD，伤害要等前摇结束。
+	eq(str(blue.get("cast_slot", "")), "q", "q enters windup before damage")
 	lt(blue.mp, mana, "q spends mana")
 	gt(blue.skill_q_cd, 0.0, "q cooldown starts")
+	_tick_for(sim, 0.5)
+	lt(red.hp, red_hp, "q damages enemy hero")
 	var hp_after: float = red.hp
 	sim.set_input("p1", _input({"aim": red.pos, "skill_q": true}))
 	sim.tick(1.0 / MatchSim.TICK_RATE)
