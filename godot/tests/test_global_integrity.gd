@@ -68,6 +68,36 @@ func test_global_assets_and_resources_exist() -> void:
 		var res: Resource = load(path)
 		check(res != null, "Environment asset must load: " + path)
 
+# ---------- 维度 1b：UI 大图纹理压缩（验收 12.1） ----------
+# 只压「大图」：5 立绘 + key_art + 17 张装备图标（8 原有 + 9 装备深度新增）。
+# 技能/状态/边框图标是 16–96px 的硬边图形，VRAM 压缩只会换来块状边缘，
+# 所以这里同时钉死它们仍为无损——否则以后有人"全量开启"会把小图也压花。
+func test_ui_large_textures_use_vram_compression() -> void:
+	var large_paths: Array = []
+	for hero_id in ["archer", "assassin", "blade", "mage", "tank"]:
+		large_paths.append("res://assets/ui/portraits/%s.png.import" % hero_id)
+	large_paths.append("res://assets/ui/key_art.png.import")
+	for item_id in ["boots", "cloth_armor", "echo_wand", "infinity_edge",
+			"iron_sword", "ominous_shield", "resistance_boots", "spell_tome",
+			"meteor", "blood_sickle", "dagger", "sapphire", "star_breaker",
+			"bloodweeper", "shadow_blade", "void_staff", "glacial_buckler"]:
+		large_paths.append("res://assets/ui/items/%s.png.import" % item_id)
+
+	for path in large_paths:
+		var text := FileAccess.get_file_as_string(str(path))
+		check(text != "", "import file must be readable: " + str(path))
+		check(text.contains("compress/mode=2"), "large UI texture must use VRAM compression: " + str(path))
+		check(text.contains("\"vram_texture\": true"), "imported texture must report vram_texture=true: " + str(path))
+
+	var small_paths := [
+		"res://assets/ui/skills/slash.png.import",
+		"res://assets/ui/status/stun.png.import",
+		"res://assets/ui/frames/button_gold.png.import",
+	]
+	for path in small_paths:
+		var text := FileAccess.get_file_as_string(str(path))
+		check(text.contains("compress/mode=0"), "small UI icon must stay lossless: " + str(path))
+
 # ---------- 维度 2：UI 状态机与导航流完整性 ----------
 func test_global_main_menu_flow_and_navigation() -> void:
 	var main: Node = MainApp.new()

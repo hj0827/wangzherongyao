@@ -123,7 +123,7 @@ func _build() -> void:
 	for item_id in ItemShop.CATALOGUE:
 		grid.add_child(_make_item_cell(str(item_id)))
 
-	# 右侧详情：只放文字，不放 TextureRect —— 商店的图标数量契约按 8 件装备算，
+	# 右侧详情：只放文字，不放 TextureRect —— 商店的图标数量契约按目录条目数算，
 	# 详情再塞一张图会让 test_item_icons 的 "one icon per catalogue entry" 失真。
 	var detail := PanelContainer.new()
 	detail.custom_minimum_size = Vector2(236.0, 0.0)
@@ -269,7 +269,14 @@ func _show_detail(item_id: String) -> void:
 		_detail_stats.text = _describe(item)
 	if _detail_hint:
 		var cost := int(item.get("cost", 0))
-		_detail_hint.text = "价格 %d g · 出售返还 %d g" % [cost, int(float(cost) * 0.6)]
+		var text := "价格 %d g · 出售返还 %d g" % [cost, int(float(cost) * 0.6)]
+		var recipe := ItemShop.recipe_of(item_id)
+		if not recipe.is_empty():
+			var names: Array[String] = []
+			for cid in recipe:
+				names.append(str(ItemShop.get_item(str(cid)).get("name", str(cid))))
+			text += "\n合成：%s + %d g" % [" + ".join(names), ItemShop.combine_cost_of(item_id)]
+		_detail_hint.text = text
 
 # 缩略图。图缺了就用「品类色块 + 名字首字」占位，绝不出现一个空白的格子。
 # 统一套一个槽位框：图标本身是暗底，直接贴在暗面板上会看不出边界。
@@ -328,6 +335,17 @@ func _describe(item: Dictionary) -> String:
 		parts.append("+%.1f 移速" % float(item.speed))
 	if float(item.get("crit", 0.0)) > 0.0:
 		parts.append("+%d%% 暴击" % int(float(item.crit) * 100.0))
+	if float(item.get("crit_damage", 0.0)) > 0.0:
+		parts.append("+%d%% 暴伤" % int(float(item.crit_damage) * 100.0))
+	if float(item.get("attack_speed", 0.0)) > 0.0:
+		parts.append("+%d%% 攻速" % int(float(item.attack_speed) * 100.0))
+	# 装备深度：穿透与吸血也要能被玩家看见，否则只是后台数字。
+	if float(item.get("armor_pen", 0.0)) > 0.0:
+		parts.append("+%d 物理穿透" % int(item.armor_pen))
+	if float(item.get("magic_pen", 0.0)) > 0.0:
+		parts.append("+%d 法术穿透" % int(item.magic_pen))
+	if float(item.get("lifesteal", 0.0)) > 0.0:
+		parts.append("+%d%% 吸血" % int(float(item.lifesteal) * 100.0))
 	# 项 1：防御装第一次能说清"它减伤"，而不只是"它堆血"。
 	if float(item.get("armor", 0.0)) > 0.0:
 		parts.append("+%d 护甲" % int(item.armor))
@@ -359,11 +377,21 @@ func _refresh() -> void:
 	if _gold_label != null:
 		_gold_label.text = "金币 %d" % gold
 	var full := inventory.size() >= 6
+	var hero_state := {"gold": gold, "inventory": inventory}
 	for item_id in _item_buttons:
 		var item: Dictionary = ItemShop.get_item(str(item_id))
 		var button: Button = _item_buttons[item_id]
-		button.disabled = full or gold < int(item.get("cost", 0))
-		button.tooltip_text = "金币不足" if gold < int(item.get("cost", 0)) else ""
+		# 组件齐备时按钮变成"合成升级"：只显示并扣除合成费，且不受 6 格上限限制。
+		var combine := ItemShop.has_all_components(hero_state, str(item_id))
+		var price := ItemShop.combine_cost_of(str(item_id)) if combine else int(item.get("cost", 0))
+		button.text = ("合成 %d g" % price) if combine else ("%d g" % price)
+		button.disabled = not ItemShop.can_buy(hero_state, str(item_id))
+		if not button.disabled:
+			button.tooltip_text = "消耗组件合成" if combine else ""
+		elif combine:
+			button.tooltip_text = "金币不足合成费"
+		else:
+			button.tooltip_text = "背包已满" if full else "金币不足"
 	for i in _slot_buttons.size():
 		var button := _slot_buttons[i]
 		var icon: TextureRect = _slot_icons[i]

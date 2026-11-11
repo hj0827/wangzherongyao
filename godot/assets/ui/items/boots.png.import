@@ -2,20 +2,22 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://blvahvvler30"
-path="res://.godot/imported/boots.png-03cd35dc83670e8db209f2d54165cf0e.ctex"
+uid="uid://ci0cajpxxl6wm"
+path.s3tc="res://.godot/imported/boots.png-03cd35dc83670e8db209f2d54165cf0e.s3tc.ctex"
+path.etc2="res://.godot/imported/boots.png-03cd35dc83670e8db209f2d54165cf0e.etc2.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
 }
 
 [deps]
 
 source_file="res://assets/ui/items/boots.png"
-dest_files=["res://.godot/imported/boots.png-03cd35dc83670e8db209f2d54165cf0e.ctex"]
+dest_files=["res://.godot/imported/boots.png-03cd35dc83670e8db209f2d54165cf0e.s3tc.ctex", "res://.godot/imported/boots.png-03cd35dc83670e8db209f2d54165cf0e.etc2.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0

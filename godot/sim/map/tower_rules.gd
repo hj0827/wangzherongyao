@@ -48,9 +48,11 @@ static func has_lost_any_high_tower(team: String, entities: Array) -> bool:
 static func is_base_vulnerable(base: Dictionary, entities: Array) -> bool:
 	return has_lost_any_high_tower(str(base.get("team", "")), entities)
 
-static func damage_scale(structure: Dictionary, time: float) -> float:
-	if str(structure.get("type", "")) == "tower" and time < EARLY_PROTECTION_TIME:
-		return EARLY_PROTECTION_SCALE
+static func damage_scale(structure: Dictionary, time: float,
+		protection_time := EARLY_PROTECTION_TIME,
+		protection_scale := EARLY_PROTECTION_SCALE) -> float:
+	if str(structure.get("type", "")) == "tower" and time < protection_time:
+		return protection_scale
 	return 1.0
 
 static func select_target(structure: Dictionary, entities: Array, time: float) -> Dictionary:

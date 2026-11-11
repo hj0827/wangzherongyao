@@ -26,7 +26,7 @@ func test_every_catalogue_item_has_a_source_png_and_an_import() -> void:
 			missing_import.append(str(item_id))
 	check(missing_png.is_empty(), "items without an icon png: %s" % ", ".join(missing_png))
 	check(missing_import.is_empty(), "items without a .import file: %s" % ", ".join(missing_import))
-	eq(ItemShop.CATALOGUE.size(), 8, "catalogue size (icons are authored one per item)")
+	eq(ItemShop.CATALOGUE.size(), 17, "catalogue size (icons are authored one per item)")
 
 func test_each_icon_loads_as_a_square_texture() -> void:
 	var loaded := 0

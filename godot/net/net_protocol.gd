@@ -23,6 +23,8 @@ const MAX_CDR := 1.0
 const MAX_ATTACK_SPEED := 5.0
 const MAX_CRIT_DAMAGE := 10.0
 const MAX_REGEN := 100000.0
+# 装备深度：吸血比例钳到 100%，穿透复用抗性上限。
+const MAX_LIFESTEAL := 1.0
 # 压缩帧：1 字节编解码标记 + 4 字节原始长度 + ZSTD 数据。
 # 不压缩的包保持 var_to_bytes 原样，首字节是 Variant 类型号（Dictionary = 27），
 # 与压缩标记 1 天然不冲突，所以两种格式在线上共存、不会误判。
@@ -373,6 +375,9 @@ static func _sanitize_board(raw: Variant) -> Dictionary:
 					"cooldown_reduction": clampf(_number(row.get("cooldown_reduction", 0.0)), 0.0, MAX_CDR),
 					"attack_speed": clampf(_number(row.get("attack_speed", 0.0)), 0.0, MAX_ATTACK_SPEED),
 					"crit_damage": clampf(_number(row.get("crit_damage", 1.5)), 0.0, MAX_CRIT_DAMAGE),
+					"armor_pen": clampf(_number(row.get("armor_pen", 0.0)), 0.0, MAX_RESISTANCE),
+					"magic_pen": clampf(_number(row.get("magic_pen", 0.0)), 0.0, MAX_RESISTANCE),
+					"lifesteal": clampf(_number(row.get("lifesteal", 0.0)), 0.0, MAX_LIFESTEAL),
 					"alive": _flag(row.get("alive", true)),
 					"respawn_timer": clampf(_number(row.get("respawn_timer", 0.0)), 0.0, 600.0),
 					"inventory": inventory,
@@ -464,6 +469,10 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["cooldown_reduction"] = clampf(_number(source.get("cooldown_reduction", 0.0)), 0.0, MAX_CDR)
 		entity["attack_speed"] = clampf(_number(source.get("attack_speed", 0.0)), 0.0, MAX_ATTACK_SPEED)
 		entity["crit_damage"] = clampf(_number(source.get("crit_damage", 1.5)), 0.0, MAX_CRIT_DAMAGE)
+		# 装备深度（链路 4）：穿透/吸血漏了 = 客机详情永远显示 0，且不报错。
+		entity["armor_pen"] = clampf(_number(source.get("armor_pen", 0.0)), 0.0, MAX_RESISTANCE)
+		entity["magic_pen"] = clampf(_number(source.get("magic_pen", 0.0)), 0.0, MAX_RESISTANCE)
+		entity["lifesteal"] = clampf(_number(source.get("lifesteal", 0.0)), 0.0, MAX_LIFESTEAL)
 		entity["hp_regen"] = clampf(_number(source.get("hp_regen", 0.0)), 0.0, MAX_REGEN)
 		entity["mana_regen"] = clampf(_number(source.get("mana_regen", 0.0)), 0.0, MAX_REGEN)
 		entity["speed"] = clampf(_number(source.get("speed", 0.0)), 0.0, 64.0)

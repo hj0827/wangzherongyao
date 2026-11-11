@@ -2,20 +2,22 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ckhe13ax74ajh"
-path="res://.godot/imported/blade.png-0d3c864ebb4e4517fa4bcf8f69af389a.ctex"
+uid="uid://b3fej775j8hhk"
+path.s3tc="res://.godot/imported/blade.png-0d3c864ebb4e4517fa4bcf8f69af389a.s3tc.ctex"
+path.etc2="res://.godot/imported/blade.png-0d3c864ebb4e4517fa4bcf8f69af389a.etc2.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
 }
 
 [deps]
 
 source_file="res://assets/ui/portraits/blade.png"
-dest_files=["res://.godot/imported/blade.png-0d3c864ebb4e4517fa4bcf8f69af389a.ctex"]
+dest_files=["res://.godot/imported/blade.png-0d3c864ebb4e4517fa4bcf8f69af389a.s3tc.ctex", "res://.godot/imported/blade.png-0d3c864ebb4e4517fa4bcf8f69af389a.etc2.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0

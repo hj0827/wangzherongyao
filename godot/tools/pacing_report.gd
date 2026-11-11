@@ -31,12 +31,15 @@ var _samples := 8
 var _limit := MATCH_LIMIT
 var _only_mode := ""
 var _max_comps := COMPOSITIONS.size()
+# 节奏标定旋钮（C4/C6）：--balance=tower_hp_scale:1.2;early_protection_time:240
+# 直接透传给 MatchSim 的单局 config，不用改代码就能试参数。
+var _balance: Dictionary = {}
 
 
 func _init() -> void:
 	_parse_args()
-	print("== pacing report: samples=%d compositions=%d limit=%.0fs mode=%s ==" % [
-		_samples, _max_comps, _limit, _only_mode if _only_mode != "" else "both"])
+	print("== pacing report: samples=%d compositions=%d limit=%.0fs mode=%s balance=%s ==" % [
+		_samples, _max_comps, _limit, _only_mode if _only_mode != "" else "both", _balance])
 	_field_report()
 	if _only_mode == "" or _only_mode == "duel":
 		_mode_report("duel")
@@ -57,6 +60,11 @@ func _parse_args() -> void:
 			_only_mode = str(text.split("=")[1])
 		elif text.begins_with("--comps="):
 			_max_comps = clampi(int(text.split("=")[1]), 1, COMPOSITIONS.size())
+		elif text.begins_with("--balance="):
+			for pair in str(text.substr(10)).split(";", false):
+				var kv := str(pair).split(":")
+				if kv.size() == 2:
+					_balance[str(kv[0])] = float(kv[1])
 
 
 func _field_report() -> void:
@@ -125,28 +133,32 @@ func _mode_report(mode: String) -> void:
 func _config_for(mode: String, comp_index: int, sample: int) -> Dictionary:
 	var comp: Array = COMPOSITIONS[comp_index % COMPOSITIONS.size()]
 	var seed_value := 0x2F6E2B1 + sample * 7919 + comp_index * 104729
+	var cfg: Dictionary
 	if mode == "duel":
-		# 1v1 用循环的两职业对打，避免"永远是苍刃打苍刃"这种单一镜像。
-		var a: String = comp[sample % comp.size()]
-		var b: String = comp[(sample + 1) % comp.size()]
-		return {
+		# 1v1 必须用 bot_fill：`humans` 是"不发输入的玩家槽位"，
+		# 旧写法把两名英雄摆在出生点发呆，整局由小兵推塔决定 ——
+		# 测出来的胜率与 bot 强度、与公平性都无关。同英雄镜像才只比较红蓝两侧。
+		var hero: String = comp[sample % comp.size()]
+		cfg = {
 			"mode": "duel",
-			"humans": [
-				{"id": "blue1", "team": "blue", "hero_type": a},
-				{"id": "red1", "team": "red", "hero_type": b},
-			],
-			"bot_fill": false,
+			"humans": [],
+			"bot_fill": true,
 			"bot_ai": true,
+			"bot_comp": [hero],
 			"seed": seed_value,
 		}
-	return {
-		"mode": "team",
-		"humans": [],
-		"bot_fill": true,
-		"bot_ai": true,
-		"seed": seed_value,
-		"bot_comp": comp,
-	}
+	else:
+		cfg = {
+			"mode": "team",
+			"humans": [],
+			"bot_fill": true,
+			"bot_ai": true,
+			"seed": seed_value,
+			"bot_comp": comp,
+		}
+	if not _balance.is_empty():
+		cfg["balance"] = _balance.duplicate()
+	return cfg
 
 
 func _run_one(match_config: Dictionary) -> Dictionary:

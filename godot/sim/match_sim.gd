@@ -176,6 +176,29 @@ const ASSIST_WINDOW := 10.0
 const TOWER_HP := {"outer": 2800.0, "inner": 3200.0, "high": 3600.0}
 const TOWER_DAMAGE := {"outer": 150.0, "inner": 170.0, "high": 190.0}
 
+# --- 节奏标定旋钮（C4/C6，验收 6.3）---
+# 默认值 = 2026-11-10 实测基线（5v5 镜像局首塔中位 2m27s、红蓝 9:3），
+# 所以不传 balance 的对局与历史逐位相同。
+# 只允许**单局 config["balance"]** 覆盖，不用全局静态变量：后者会被某个用例
+# 改完后泄漏到后续对局，让测试结果依赖执行顺序。
+# 三个真正影响首塔时刻的旋钮是「塔血 / 保护期 / 兵线成长」，
+# 验收 6.3 已注明调 TOWER_HP 或 EARLY_PROTECTION_SCALE 会与项 2 的大招门槛耦合。
+const BALANCE_DEFAULTS := {
+	"tower_hp_scale": 1.0,
+	"tower_damage_scale": 1.0,
+	"minion_hp_scale": 1.0,
+	"minion_damage_scale": 1.0,
+	"wave_interval_scale": 1.0,
+	"early_protection_time": 180.0,
+	"early_protection_damage_scale": 0.5,
+}
+
+func balance_value(key: String) -> float:
+	var overrides: Variant = config.get("balance", {})
+	if overrides is Dictionary and (overrides as Dictionary).has(key):
+		return float((overrides as Dictionary)[key])
+	return float(BALANCE_DEFAULTS.get(key, 1.0))
+
 # 野外脱战回血（每秒 % 最大生命）与基础回蓝
 const FIELD_HP_REGEN := 0.025
 const FIELD_MP_REGEN := 6.0
@@ -474,6 +497,11 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"base_attack_speed": float(hero_def.get("attack_speed", 0.0)),
 		"crit_damage": 1.5,
 		"base_crit_damage": 1.5,
+		# 装备深度（穿透 / 吸血）：由 ItemShop.recalculate_stats 聚合写回。
+		# 出生为 0，结算侧直接读字段，默认值下伤害与历史逐位相同。
+		"armor_pen": 0.0,
+		"magic_pen": 0.0,
+		"lifesteal": 0.0,
 		"hp_regen": float(hero_def.get("hp_regen", 0.0)),
 		"mana_regen": float(hero_def.get("mana_regen", 0.0)),
 		"base_hp_regen": float(hero_def.get("hp_regen", 0.0)),
@@ -572,7 +600,7 @@ func _setup_structures() -> void:
 		_add_guard(str(slot.team), slot.pos, str(slot.side))
 
 func _add_tower(team: String, pos: Vector2, lane: String, tier: String) -> void:
-	var hp: float = float(TOWER_HP.get(tier, 2800.0))
+	var hp: float = float(TOWER_HP.get(tier, 2800.0)) * balance_value("tower_hp_scale")
 	state.entities.append({
 		"id": _next_id(),
 		"type": "tower",
@@ -585,7 +613,7 @@ func _add_tower(team: String, pos: Vector2, lane: String, tier: String) -> void:
 		"max_hp": hp,
 		"alive": true,
 		"range": STRUCTURE_RANGE,
-		"attack_damage": float(TOWER_DAMAGE.get(tier, 150.0)),
+		"attack_damage": float(TOWER_DAMAGE.get(tier, 150.0)) * balance_value("tower_damage_scale"),
 		"attack_interval": 1.1,
 		"attack_cd": 0.0,
 	})
@@ -651,7 +679,7 @@ func _update_wave(dt: float) -> void:
 	state.wave_timer = float(state.wave_timer) - dt
 	if float(state.wave_timer) > 0.0:
 		return
-	state.wave_timer = WAVE_INTERVAL
+	state.wave_timer = WAVE_INTERVAL * balance_value("wave_interval_scale")
 	state.wave = int(state.wave) + 1
 	var lanes: Array = ["mid"] if mode == "duel" else MapData.LANE_ORDER
 	for lane in lanes:
@@ -685,6 +713,8 @@ func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_t
 	var side := Vector2(-toward.y, toward.x)
 	var pos := base + toward * 2.6 + side * (float(index) - 1.0) * 1.0
 	var stats: Dictionary = WaveRules.stats(minion_type, int(state.wave))
+	var minion_hp := float(stats.hp) * balance_value("minion_hp_scale")
+	var minion_damage := float(stats.attack_damage) * balance_value("minion_damage_scale")
 	var minion := {
 		"id": _next_id(),
 		"type": "minion",
@@ -693,11 +723,11 @@ func _spawn_minion(team: String, lane: String, path: Array, index: int, minion_t
 		"minion_type": minion_type,
 		"pos": pos,
 		"radius": float(stats.radius),
-		"hp": float(stats.hp),
-		"max_hp": float(stats.max_hp),
+		"hp": minion_hp,
+		"max_hp": minion_hp,
 		"alive": true,
 		"speed": float(stats.move_speed),
-		"attack_damage": float(stats.attack_damage),
+		"attack_damage": minion_damage,
 		"attack_range": float(stats.attack_range),
 		"attack_interval": float(stats.attack_interval),
 		"attack_cd": 0.0,
@@ -1608,7 +1638,10 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 		return
 	var incoming := amount
 	if target.type == "tower":
-		incoming *= TowerRules.damage_scale(target, state.time)
+		incoming *= TowerRules.damage_scale(
+			target, state.time,
+			balance_value("early_protection_time"),
+			balance_value("early_protection_damage_scale"))
 	# 小兵 / 野怪（不含主宰暴君这类大目标）对英雄的伤害单独收一档。
 	# 只影响"英雄挨打"这一侧，小兵打小兵、打塔的实际数值保持不变。
 	if target.type == "hero" and not source.is_empty():
@@ -1626,13 +1659,18 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 	# 真实伤害（终结）不读任何抗性。resist=0 时乘子恒等 1.0 = 旧减法。
 	if target.type == "hero":
 		var resist := 0.0
+		var pen := 0.0
 		match damage_type:
 			"physical":
 				resist = maxf(0.0, float(target.get("armor", 0.0)))
+				pen = float(source.get("armor_pen", 0.0)) if not source.is_empty() else 0.0
 			"magic":
 				resist = maxf(0.0, float(target.get("magic_resist", 0.0)))
+				pen = float(source.get("magic_pen", 0.0)) if not source.is_empty() else 0.0
 			_:
 				resist = 0.0
+		# 穿透是固定值减法，钳到 0：穿透高于抗性时不产生"负抗性增伤"。
+		resist = maxf(0.0, resist - pen)
 		if resist > 0.0:
 			incoming *= MATCH_MITIGATION_K / (MATCH_MITIGATION_K + resist)
 	# 交手即暴露：草丛里的英雄一出手/一挨打就短暂显形，否则回放里会出现
@@ -1689,6 +1727,18 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 	if remaining <= 0.0:
 		return
 	target.hp = float(target.hp) - remaining
+	# —— 吸血（装备深度）——
+	# 只对「英雄用物理伤害打敌方非建筑单位」生效：打塔/基地不回血
+	# （否则推线续航变成无限），真实/法术伤害不触发。
+	# 回血量按**实际扣掉的血**算（护盾吃掉的部分不回血），上限封顶最大生命。
+	var lifesteal := float(source.get("lifesteal", 0.0)) if not source.is_empty() else 0.0
+	if lifesteal > 0.0 and damage_type == "physical" \
+			and str(source.get("type", "")) == "hero" \
+			and str(source.get("team", "")) != str(target.get("team", "")) \
+			and str(target.get("type", "")) in ["hero", "minion", "monster"] \
+			and bool(source.get("alive", true)):
+		var heal := remaining * lifesteal
+		source["hp"] = minf(float(source.get("hp", 0.0)) + heal, float(source.get("max_hp", 0.0)))
 	# 项 3.5：**小兵打小兵不广播 hit**。
 	# 实测事件构成：hit 占 7301 次（总量 65% 的大头之一），而双方小兵每波互殴
 	# 会产生大量只为"飘个伤害数字"的事件。玩家不会去数小兵互相打了多少，
@@ -2223,6 +2273,9 @@ func _snapshot_board() -> Dictionary:
 			"cooldown_reduction": float(entity.get("cooldown_reduction", 0.0)),
 			"attack_speed": float(entity.get("attack_speed", 0.0)),
 			"crit_damage": float(entity.get("crit_damage", 1.5)),
+			"armor_pen": float(entity.get("armor_pen", 0.0)),
+			"magic_pen": float(entity.get("magic_pen", 0.0)),
+			"lifesteal": float(entity.get("lifesteal", 0.0)),
 			"alive": alive,
 			"respawn_timer": 0.0 if alive else float(entity.get("respawn_timer", 0.0)),
 			"inventory": inventory.duplicate(),
@@ -2338,6 +2391,10 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["cooldown_reduction"] = float(entity.get("cooldown_reduction", 0.0))
 		data["attack_speed"] = float(entity.get("attack_speed", 0.0))
 		data["crit_damage"] = float(entity.get("crit_damage", 1.5))
+		# 装备深度（链路 3）：穿透/吸血进快照，客机 HUD/详情才读得到。
+		data["armor_pen"] = float(entity.get("armor_pen", 0.0))
+		data["magic_pen"] = float(entity.get("magic_pen", 0.0))
+		data["lifesteal"] = float(entity.get("lifesteal", 0.0))
 		data["hp_regen"] = float(entity.get("hp_regen", 0.0))
 		data["mana_regen"] = float(entity.get("mana_regen", 0.0))
 		data["speed"] = float(entity.speed)
