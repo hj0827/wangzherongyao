@@ -26,7 +26,15 @@ func test_objective_spawn_spawns_a_ring_at_both_pits() -> void:
 	arena._hit_particles_active.clear()
 	tree.root.add_child(arena)
 	arena._process_events([{"type": "objective_spawn"}])
-	check(arena._ring_active.size() >= MapLayout.OBJECTIVE_PITS.size(), "两个首领坑各起一圈冲击环")
+	check(arena._ring_active.size() >= MapLayout.OBJECTIVE_PITS.size() * 2, "两个首领坑各起冲击环 + 2 秒预警环")
+	gt(arena._zoom_kick, 0.0, "首领刷新要有镜头轻推")
+	# 预警环从更大半径起跳（3.0），与 1.0 起跳的冲击环区分：
+	# tween 还没推进时，scale 就是 from_scale。
+	var warning_rings := 0
+	for ring in arena._ring_active:
+		if (ring as Node3D).scale.x > 2.5:
+			warning_rings += 1
+	check(warning_rings >= MapLayout.OBJECTIVE_PITS.size(), "每个首领坑都要有慢速预警环")
 	arena.free()
 
 func test_objective_kill_leaves_a_gold_decal() -> void:

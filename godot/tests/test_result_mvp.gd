@@ -35,3 +35,43 @@ func test_loss_still_shows_avatar() -> void:
 	check(hud._result_avatar.texture != null, "失败结算也要有英雄头像")
 	check(hud._result_title.text.contains("战"), "失败标题要正确")
 	hud.free()
+
+# ---------------------------------------------------------------- UI-06 结算数据条 / 点赞
+
+func test_result_bars_normalize_against_team_peak() -> void:
+	var hud := _hud()
+	hud.snapshot = {
+		"scores": {"blue": {"towers": 2}},
+		"time": 600.0,
+		"entities": [
+			{"type": "hero", "team": "blue", "kills": 4, "assists": 1,
+				"damage_dealt": 20000.0, "damage_taken": 8000.0},
+			{"type": "hero", "team": "blue", "kills": 1, "assists": 2,
+				"damage_dealt": 10000.0, "damage_taken": 16000.0},
+			# 敌方数值不参与归一化：否则 50000 会把本队所有人的条压扁。
+			{"type": "hero", "team": "red", "kills": 9, "assists": 0,
+				"damage_dealt": 50000.0, "damage_taken": 30000.0},
+		],
+	}
+	hud.show_result("blue", {
+		"kills": 1, "assists": 2, "deaths": 2,
+		"damage_dealt": 10000.0, "damage_taken": 16000.0,
+	})
+	near(float(hud._result_bars["dealt"].bar.value), 0.5, 0.01, "输出条按本队峰值 20000 归一化")
+	near(float(hud._result_bars["taken"].bar.value), 1.0, 0.01, "承伤条取本队最高")
+	near(float(hud._result_bars["join"].bar.value), 0.6, 0.01, "参团 = (1+2)/本队总击杀 5")
+	eq(str(hud._result_bars["dealt"].value.text), "10.0k", "输出读数使用 k 缩写")
+	eq(str(hud._result_bars["join"].value.text), "60%", "参团读数显示百分比")
+	hud.free()
+
+func test_result_like_is_one_shot_ui_only() -> void:
+	var hud := _hud()
+	hud.show_result("blue", {"kills": 3, "deaths": 1})
+	eq(str(hud._like_button.text), "点赞", "结算页提供点赞入口")
+	hud._on_result_like()
+	eq(str(hud._like_button.text), "已点赞 (1)", "点赞后给出本地反馈")
+	check(hud._like_button.disabled, "同一局只能点一次")
+	hud.show_result("blue", {"kills": 3, "deaths": 1})
+	check(not hud._like_button.disabled, "重新结算时恢复可点")
+	eq(str(hud._like_button.text), "点赞", "重新结算时计数归零")
+	hud.free()

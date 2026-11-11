@@ -197,7 +197,12 @@ func submit_input(input: Dictionary) -> void:
 	var clean := NetProtocol.sanitize_input(input)
 	var bytes := NetProtocol.encode("input", clean)
 	# 购买/出售是离散且不可重放的操作，丢失一次就永远不生效，必须走可靠通道。
-	var reliable := str(clean.get("buy_item", "")) != "" or int(clean.get("sell_slot", -1)) >= 0
+	# 快捷信号同理：丢一次队友就永远收不到这次标点，而且重发没有副作用（sim 侧有冷却去重）。
+	var reliable := (
+		str(clean.get("buy_item", "")) != ""
+		or int(clean.get("sell_slot", -1)) >= 0
+		or str(clean.get("ping_kind", "")) != ""
+	)
 	_send_bytes(1, bytes, reliable)
 
 # 按队伍分别构建并下发状态快照（视野过滤）。同一队伍的多个客户端共用一份编码结果。

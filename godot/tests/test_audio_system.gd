@@ -121,6 +121,7 @@ func test_map_and_economy_events_have_cues() -> void:
 	eq(_names(_cues(plan, {"type": "guard_destroyed", "x": 4.0, "y": 0.0}, _ctx())), ["guard_down"], "高地塔倒")
 	eq(_names(_cues(plan, {"type": "crystal_shield_broken", "x": 4.0, "y": 0.0}, _ctx())), ["shield_break"], "水晶护盾破")
 	eq(_names(_cues(plan, {"type": "objective_killed", "x": 4.0, "y": 0.0, "name": "暴君"}, _ctx())), ["objective_down"], "暴君/主宰被击杀")
+	eq(_names(_cues(plan, {"type": "objective_spawn"}, _ctx())), ["objective_roar"], "首领刷新有全局咆哮")
 	eq(_names(_cues(plan, {"type": "buff_taken", "x": 4.0, "y": 0.0, "buff": "blue"}, _ctx())), ["buff_taken"], "拿野区 buff")
 	eq(_names(_cues(plan, {"type": "river_spirit_killed", "x": 4.0, "y": 0.0}, _ctx())), ["spirit_down"], "河道之灵")
 	eq(_names(_cues(plan, {"type": "wave", "wave": 3}, _ctx())), ["wave_horn"], "第 3 波有号角")

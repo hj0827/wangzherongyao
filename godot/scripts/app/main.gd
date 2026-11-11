@@ -1087,12 +1087,14 @@ func _team_panel(
 	team: String
 ) -> PanelContainer:
 	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.045, 0.06, 0.9), Color(color.r, color.g, color.b, 0.5), 1, 12))
+	# UI-07：队伍面板用队伍色重染的金框，边框本身就承担蓝/红语义。
+	panel.add_theme_stylebox_override("panel", GameTheme.team_panel(team))
 	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 18)
-	margin.add_theme_constant_override("margin_right", 18)
-	margin.add_theme_constant_override("margin_top", 16)
-	margin.add_theme_constant_override("margin_bottom", 16)
+	# 金框 24px 的雕花边会压进内容，留 26 让标题从边框内侧开始。
+	margin.add_theme_constant_override("margin_left", 26)
+	margin.add_theme_constant_override("margin_right", 26)
+	margin.add_theme_constant_override("margin_top", 22)
+	margin.add_theme_constant_override("margin_bottom", 22)
 	panel.add_child(margin)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 8)

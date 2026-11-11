@@ -19,6 +19,8 @@ const GLOBAL_EVENT_TYPES := [
 	"wave", "objective_spawn", "monster_respawn", "match_end", "ace",
 	"tower_destroyed", "guard_destroyed", "crystal_shield_broken", "base_exposed",
 ]
+# 只发给事件所属队伍、永不对敌方可见的事件类型（按位置可见性也不放行）。
+const TEAM_ONLY_EVENT_TYPES := ["ping_mark"]
 
 static func radius_of(entity: Dictionary) -> float:
 	match str(entity.get("type", "")):
@@ -98,6 +100,13 @@ static func filter_events(events: Array, viewer_team: String, entities: Array, r
 		if not (item is Dictionary):
 			continue
 		var event: Dictionary = item
+		var event_type := str(event.get("type", ""))
+		# 快捷信号只给本队：即使标点位置正好落在敌方视野里也不能外泄，
+		# 否则「队友在打龙」这种信息会被对面白拿（验收 11.1 明确敌方不可见）。
+		if TEAM_ONLY_EVENT_TYPES.has(event_type):
+			if _event_team(event, entities) == viewer_team:
+				kept.append(event.duplicate(true))
+			continue
 		if GLOBAL_EVENT_TYPES.has(str(event.get("type", ""))):
 			kept.append(event.duplicate(true))
 			continue

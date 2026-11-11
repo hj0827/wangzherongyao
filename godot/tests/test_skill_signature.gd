@@ -274,6 +274,32 @@ func test_hitscan_q_and_e_still_draw_their_own_projectile() -> void:
 	eq(arena._tracer_active.size(), 1, "Q 是瞬发，必须靠配方画出那一颗法球")
 	arena.free()
 
+# MON-04 敌方 AOE 危险圈：事件队伍必须透传到渲染请求，
+# 且只有敌方技能多铺一圈红色危险范围（队友技能不铺）。
+func test_skill_requests_carry_team_and_enemy_aoe_gets_one_more_ring() -> void:
+	var requests := SkillFx.requests([{
+		"type": "skill", "team": "red", "hero": 5, "slot": "r", "hero_type": "mage",
+		"kind": "meteor_storm", "x": 0.0, "y": 0.0, "aim_x": 6.0, "aim_y": 6.0,
+	}])
+	eq(str(requests[0].get("team", "")), "red", "事件队伍必须透传到渲染请求")
+
+	var enemy := _arena()
+	enemy._process_events([{
+		"type": "skill", "team": "red", "hero": 5, "slot": "r", "hero_type": "mage",
+		"kind": "meteor_storm", "x": 0.0, "y": 0.0, "aim_x": 6.0, "aim_y": 6.0,
+	}])
+	var enemy_rings: int = enemy._ring_active.size()
+	enemy.free()
+
+	var ally := _arena()
+	ally._process_events([{
+		"type": "skill", "team": "blue", "hero": 5, "slot": "r", "hero_type": "mage",
+		"kind": "meteor_storm", "x": 0.0, "y": 0.0, "aim_x": 6.0, "aim_y": 6.0,
+	}])
+	var ally_rings: int = ally._ring_active.size()
+	ally.free()
+	eq(enemy_rings, ally_rings + 1, "敌方 AOE 多铺一圈危险圈；队友 AOE 不铺")
+
 func test_unpooled_skill_projectile_helpers_are_gone() -> void:
 	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
 	# 接线守卫（硬规则 9）：函数写好了不算，必须真的在技能链路上被调用。

@@ -42,15 +42,16 @@ func test_default_tower_and_wave_values_are_the_documented_baseline() -> void:
 	eq(float(TowerRules.EARLY_PROTECTION_TIME), 180.0, "塔保护期基线")
 	near(TowerRules.damage_scale({"type": "tower"}, 30.0), 0.5, 0.001, "保护期内对塔伤害 50%")
 	near(TowerRules.damage_scale({"type": "tower"}, 200.0), 1.0, 0.001, "保护期结束后恢复 100%")
-	near(float(MatchSim.BALANCE_DEFAULTS["tower_hp_scale"]), 1.0, 0.001, "默认不缩放塔血")
+	near(float(MatchSim.BALANCE_DEFAULTS["tower_hp_scale"]), 1.3, 0.001, "默认塔血 ×1.3（C4/C6 标定版）")
 	near(float(MatchSim.BALANCE_DEFAULTS["minion_hp_scale"]), 1.0, 0.001, "默认不缩放小兵血量")
 
-func test_default_match_keeps_legacy_numbers() -> void:
-	# 不传 balance 的对局必须与历史逐位相同：否则所有既有数值断言都会被动漂移。
+func test_default_match_uses_calibrated_tower_hp() -> void:
+	# 不传 balance 的对局必须与标定版一致：外塔 2800 × 1.3 = 3640。
+	# 小兵数值不缩放（首波仍是 458 血 / 36.4 攻），避免把兵线节奏一起带偏。
 	var sim := _duel()
 	var tower := _tower(sim, "blue", "outer")
 	check(not tower.is_empty(), "外塔必须存在")
-	near(float(tower.hp), 2800.0, 0.01, "默认外塔血量不变")
+	near(float(tower.hp), 2800.0 * 1.3, 0.01, "默认外塔血量 = 3640")
 	sim.tick(MatchSim.FIRST_WAVE_DELAY + 0.1)
 	var minion := _first_minion(sim)
 	check(not minion.is_empty(), "首波兵必须已刷出")
@@ -89,3 +90,33 @@ func test_balance_overrides_reach_towers_minions_and_protection() -> void:
 		sim.balance_value("early_protection_time"),
 		sim.balance_value("early_protection_damage_scale")), 0.25, 0.001,
 		"覆盖后的保护期参数必须被 _damage 实际使用")
+
+# ---------------------------------------------------------------- C7：5v5 节奏回归
+
+func test_five_v_five_bot_match_stays_inside_the_pacing_band() -> void:
+	# 验收 6.2：加入装备后局时曾从 8:04 回弹到 15:00，此后没有持续断言。
+	# 用固定种子跑完一整局 bot 5v5，把「局时」与「首塔」钉成回归带：
+	# 上限抓回弹（15:00 那种），下限抓被压得过紧。
+	# 单局替代不了抽样工具的分布结论，但足以在数值改动后第一时间报警。
+	var sim := MatchSim.new({
+		"mode": "team", "humans": [], "bot_fill": true, "bot_ai": true,
+		"seed": 0x2F6E2B1,
+		"bot_comp": ["blade", "tank", "assassin", "mage", "archer"],
+	})
+	var dt := 1.0 / MatchSim.TICK_RATE
+	var first_tower := -1.0
+	var limit := 900.0
+	while not sim.ended and sim.state.time < limit:
+		sim.tick(dt)
+		for ev in sim.consume_events():
+			if str(ev.get("type", "")) == "tower_destroyed" and first_tower < 0.0:
+				first_tower = float(sim.state.time)
+	check(sim.ended, "5v5 bot 对局必须在 15 分钟内结束，否则节奏已回弹")
+	if not sim.ended:
+		return
+	var duration := float(sim.state.time)
+	check(duration >= 420.0, "局时 %.0fs 低于 7 分钟，节奏被压得过紧" % duration)
+	check(duration <= 810.0, "局时 %.0fs 超过 13.5 分钟，节奏回弹（曾回到 15:00）" % duration)
+	check(first_tower > 0.0, "整局必须能观测到首塔")
+	check(first_tower >= 60.0, "首塔 %.0fs 早于 1 分钟，对线期被压没了" % first_tower)
+	check(first_tower <= 360.0, "首塔 %.0fs 晚于 6 分钟，推塔节奏过慢" % first_tower)

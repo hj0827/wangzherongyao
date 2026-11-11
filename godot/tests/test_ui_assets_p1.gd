@@ -43,6 +43,45 @@ func test_frame_set_has_panel_button_and_quality_tiers() -> void:
 	check(GameTheme.quality_frame("basic").texture != GameTheme.quality_frame("epic").texture,
 		"basic 与 epic 必须是两张不同的品质框")
 
+# ---------------------------------------------------------------- UI-07 队伍色边框 / 小地图金框
+
+func _dominant_hue(image: Image) -> float:
+	var img: Image = image.duplicate()
+	if img.is_compressed():
+		img.decompress()
+	img.convert(Image.FORMAT_RGBA8)
+	var sx := 0.0
+	var sy := 0.0
+	var count := 0
+	for y in img.get_height():
+		for x in img.get_width():
+			var color := img.get_pixel(x, y)
+			if color.a < 0.5 or color.s < 0.25:
+				continue
+			sx += cos(color.h * TAU)
+			sy += sin(color.h * TAU)
+			count += 1
+	if count == 0:
+		return -1.0
+	return fposmod(atan2(sy, sx) / TAU, 1.0)
+
+func test_team_panels_recolor_the_gold_frame_into_team_hues() -> void:
+	var blue := GameTheme.team_panel("blue")
+	var red := GameTheme.team_panel("red")
+	check(blue.texture != null and red.texture != null, "蓝/红队伍面板必须都有边框")
+	check(blue.texture != red.texture, "蓝/红必须是两张不同色相的边框")
+	var blue_hue := _dominant_hue(blue.texture.get_image())
+	var red_hue := _dominant_hue(red.texture.get_image())
+	check(blue_hue > 0.45 and blue_hue < 0.72, "蓝方边框主色相应在蓝色区间，实际 %.2f" % blue_hue)
+	check(red_hue > 0.9 or red_hue < 0.08, "红方边框主色相应在红色区间，实际 %.2f" % red_hue)
+	check(GameTheme.team_panel("blue") == blue, "同一队伍的面板必须缓存，不能每次重染")
+
+func test_minimap_frame_is_a_compact_gold_border() -> void:
+	var frame := GameTheme.minimap_frame()
+	check(frame.texture != null, "小地图要有金框")
+	gt(float(frame.texture_margin_left), 0.0, "小地图金框必须是 9-slice")
+	lt(float(frame.texture_margin_left), 24.0, "小地图金框的切片必须比大面板更窄，避免吃掉地图面积")
+
 func test_kill_banner_asset_is_four_to_one() -> void:
 	var banner := GameTheme.kill_banner()
 	check(banner != null, "缺少击杀横幅底图")

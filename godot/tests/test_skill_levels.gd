@@ -21,6 +21,7 @@ const NetProtocol = preload("res://net/net_protocol.gd")
 # TouchLayout 没有 class_name（其余 UI 类有），必须显式 preload 才能按类名引用。
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
 const SkillGlyph = preload("res://scripts/ui/skill_glyph.gd")
+const Arena = preload("res://scripts/game/arena.gd")
 const TICK := 1.0 / 30.0
 
 func _duel(attacker_type := "blade", victim_type := "tank", auto_points := true) -> Dictionary:
@@ -679,6 +680,67 @@ func test_manual_mode_only_holds_points_for_humans_not_bots() -> void:
 		eq(int(entity.get("skill_points", -1)), 0, "bot 不受玩家自动加点开关影响，点数必须花掉")
 	gt(bots, 0, "这局必须有 bot，否则用例空转")
 	gt(leveled, 0, "bot 必须真的升过级，否则「点数已花掉」是空断言")
+
+# ---------------------------------------------------------------- B7：触屏手动加点入口
+
+func test_touch_hud_shows_level_button_only_when_points_remain() -> void:
+	var hud: Control = GameHUD.new()
+	hud.setup("p1", "blue", "blade", "苍刃", true, false)
+	hud._ready()
+	hud.size = Vector2(1600.0, 900.0)
+	hud._apply_layout()
+	hud._sync_level_ui({"skill_points": 0})
+	check(not hud._level_button.visible, "0 点不显示加点入口")
+	hud._sync_level_ui({"skill_points": 2})
+	check(hud._level_button.visible, "触屏有剩余点数必须给出加点入口")
+	hud.free()
+
+func test_desktop_hud_hides_level_button() -> void:
+	var hud: Control = GameHUD.new()
+	hud.setup("p1", "blue", "blade", "苍刃", false, false)
+	hud._ready()
+	hud.size = Vector2(1600.0, 900.0)
+	hud._apply_layout()
+	hud._sync_level_ui({"skill_points": 2})
+	check(not hud._level_button.visible, "桌面有 Ctrl+技能，不重复放按钮")
+	hud.free()
+
+func test_level_choice_emits_upgrade_request() -> void:
+	var hud: Control = GameHUD.new()
+	hud.setup("p1", "blue", "blade", "苍刃", true, false)
+	hud._ready()
+	hud.size = Vector2(1600.0, 900.0)
+	hud._apply_layout()
+	var got: Array = []
+	hud.upgrade_requested.connect(func(slot): got.append(slot))
+	hud._level_panel.visible = true
+	hud._on_level_choice("w")
+	eq(got, ["w"], "选 W 必须发出 upgrade_requested")
+	check(not hud._level_panel.visible, "选择后关闭浮层")
+	hud.free()
+
+func test_level_panel_disables_maxed_skill() -> void:
+	var hud: Control = GameHUD.new()
+	hud.setup("p1", "blue", "blade", "苍刃", true, false)
+	hud._ready()
+	hud.size = Vector2(1600.0, 900.0)
+	hud._apply_layout()
+	hud._sync_level_ui({
+		"skill_points": 1, "skill_q_level": MatchSim.MAX_SKILL_LEVEL_NORMAL,
+		"skill_w_level": 1, "skill_e_level": 1, "skill_r_level": 0,
+	})
+	check(hud._level_buttons["q"].disabled, "满级技能在浮层里必须置灰")
+	check(not hud._level_buttons["w"].disabled, "未满级技能可点")
+	check(not hud._level_buttons["r"].disabled, "0 级大招在门口可点（等级门槛交给 sim）")
+	hud.free()
+
+func test_arena_accepts_only_legal_upgrade_slots() -> void:
+	var arena: Node3D = Arena.new()
+	arena._on_upgrade_requested("q")
+	eq(arena._queued_upgrade, "q", "合法槽位进队列")
+	arena._on_upgrade_requested("z")
+	eq(arena._queued_upgrade, "q", "非法槽位不得覆盖队列")
+	arena.free()
 
 func test_bots_level_their_skills_and_cast_their_ultimate() -> void:
 	# 验收表 2.4 的真机口径：不操作也能正常成长。bot 走同一套自动方案。

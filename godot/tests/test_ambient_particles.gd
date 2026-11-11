@@ -1,7 +1,7 @@
 extends "res://tests/test_base.gd"
 
-# 环境浮尘（P1 SCENE-03 的第一版）。
-# 36 个光点在 1600×900 下几乎看不见；桌面 120 / 移动端 60，仍是单批次。
+# 环境浮尘（P1 SCENE-03）。
+# 密度目标：桌面 400 / 移动端 200（旧版 120/60），仍是单批次。
 
 const Arena = preload("res://scripts/game/arena.gd")
 const FxTextures = preload("res://scripts/game/fx_textures.gd")
@@ -20,8 +20,13 @@ func test_ambient_particles_are_dense_enough_and_soft() -> void:
 	if particle == null:
 		arena.free()
 		return
-	check(particle.amount >= 60, "环境粒子至少 60 个，实际 %d" % particle.amount)
+	# 无头桌面机没有 mobile 特性，走桌面档。
+	check(particle.amount >= 200, "环境粒子至少 200 个（桌面目标 400），实际 %d" % particle.amount)
 	check(particle.emitting, "环境粒子默认发射")
 	var material := (particle.draw_pass_1 as QuadMesh).material as StandardMaterial3D
 	check(material != null and material.albedo_texture == FxTextures.soft_glow(), "环境粒子用柔光贴图")
+	var process := particle.process_material as ParticleProcessMaterial
+	var ramp := process.color_ramp as GradientTexture1D if process != null else null
+	check(ramp != null and ramp.gradient != null and ramp.gradient.get_point_count() >= 4,
+		"浮尘要有青→绿→金的生命期渐变，而不是单色")
 	arena.free()

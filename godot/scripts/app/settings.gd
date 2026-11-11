@@ -30,6 +30,9 @@ static var music_volume := 0.7
 static var sfx_volume := 1.0
 static var quality := ""
 static var auto_skill_points := true
+# 特效强度（FX-09）：0 = 只留身份信息（主环/飘字），1 = 全量粒子与震屏。
+# 只缩放装饰量，不缩放命中/技能主环，避免「调低强度后读不出技能」。
+static var fx_intensity := 1.0
 static var loaded := false
 
 static func default_quality() -> String:
@@ -41,6 +44,7 @@ static func reset_defaults() -> void:
 	sfx_volume = 1.0
 	quality = default_quality()
 	auto_skill_points = true
+	fx_intensity = 1.0
 	loaded = false
 
 static func load_from(path := PATH) -> void:
@@ -55,6 +59,7 @@ static func load_from(path := PATH) -> void:
 	var saved_quality := str(cfg.get_value("video", "quality", quality))
 	quality = saved_quality if QUALITY_KEYS.has(saved_quality) else default_quality()
 	auto_skill_points = bool(cfg.get_value("gameplay", "auto_skill_points", auto_skill_points))
+	fx_intensity = clampf(float(cfg.get_value("video", "fx_intensity", fx_intensity)), 0.0, 1.0)
 	loaded = true
 
 static func save_to(path := PATH) -> void:
@@ -64,6 +69,7 @@ static func save_to(path := PATH) -> void:
 	cfg.set_value("audio", "music", music_volume)
 	cfg.set_value("audio", "sfx", sfx_volume)
 	cfg.set_value("video", "quality", quality if QUALITY_KEYS.has(quality) else default_quality())
+	cfg.set_value("video", "fx_intensity", clampf(fx_intensity, 0.0, 1.0))
 	cfg.set_value("gameplay", "auto_skill_points", auto_skill_points)
 	cfg.save(path)
 

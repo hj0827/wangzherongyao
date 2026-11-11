@@ -276,6 +276,34 @@ func test_wall_foot_rocks_use_the_same_stone_material() -> void:
 		gt(float(minus), 0.0, "墙脚石必须左右两侧都有（左）：%s" % id)
 	arena.free()
 
+# ---------------------------------------------------------------- 藤蔓 / 墙顶
+func test_jungle_walls_grow_hanging_vines() -> void:
+	# WALL-03：墙体只有几何会「像积木」。藤蔓从墙顶中上段垂下来，
+	# 复用草叶网格但整体翻 180°，并且必须留出裸岩面积。
+	var arena: Node3D = Arena.new()
+	arena._props_root = Node3D.new()
+	arena.add_child(arena._props_root)
+	arena._build_map_features()
+	var node := arena._props_root.get_node_or_null(NodePath("wallvine_curtain")) as MultiMeshInstance3D
+	check(node != null, "墙体必须有一层藤蔓，而不是纯几何")
+	if node == null:
+		arena.free()
+		return
+	gt(node.multimesh.instance_count, 40, "藤蔓要铺在整圈墙上，数量明显偏少")
+	# 无头模式下 MultiMesh 的实例缓冲不回读，逐实例变换按石壁测试的惯例从 meta 取。
+	var specs: Array = node.get_meta("vine_specs", [])
+	eq(specs.size(), node.multimesh.instance_count, "每个实例都要有可核对的变换")
+	if specs.is_empty():
+		arena.free()
+		return
+	var transform: Transform3D = specs[0].transform
+	lt(transform.basis.y.y, -0.5, "藤蔓必须朝下悬垂（+Y 翻成 -Y）")
+	near(transform.origin.y, MapLayout.WALL_CORE_HEIGHT - 0.02, 0.05, "藤蔓从墙顶中上段挂下来")
+	check(node.material_override is ShaderMaterial, "藤蔓要用草叶 shader（根部深、叶尖浅）")
+	# 节点名不能以 wall_ 开头，否则会被当成石构件统计材质。
+	check(not str(node.name).begins_with("wall_"), "藤蔓节点不能混进石构件前缀")
+	arena.free()
+
 func test_jungle_and_boundary_walls_split_material_language() -> void:
 	# 契约变更（2026-11-10，用户批准）：野区墙是自然岩壁（无砖缝），
 	# 边界墙是砌石城防（有砖缝）。两者共用同一 shader，只靠 brick_amount 区分；

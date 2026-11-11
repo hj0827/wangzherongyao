@@ -20,8 +20,12 @@ const RecallRules = preload("res://sim/map/recall.gd")
 const Crystal = preload("res://sim/map/crystal.gd")
 const River = preload("res://sim/map/river.gd")
 const Teleport = preload("res://sim/map/teleport.gd")
+const PingRules = preload("res://sim/ping_rules.gd")
 
 const TICK_RATE := 30.0
+# 快捷信号冷却：按住连发时最多每 1.5 秒出一条，避免地图被自己的标点刷屏。
+# 放在模拟侧而不是 UI：客户端的输入频率是 20Hz，只有主机做权威去重才防得住刷屏。
+const PING_COOLDOWN := 1.5
 
 # 路径跟随的"卡死"恢复参数（项 6b）。
 # 背景：实体沿 waypoint 前进，但碰撞系统会把被墙挡住的位移吃掉大半，
@@ -177,14 +181,17 @@ const TOWER_HP := {"outer": 2800.0, "inner": 3200.0, "high": 3600.0}
 const TOWER_DAMAGE := {"outer": 150.0, "inner": 170.0, "high": 190.0}
 
 # --- 节奏标定旋钮（C4/C6，验收 6.3）---
-# 默认值 = 2026-11-10 实测基线（5v5 镜像局首塔中位 2m27s、红蓝 9:3），
-# 所以不传 balance 的对局与历史逐位相同。
+# 默认值 = 2026-11-11 标定版（5v5 标准阵容 12 局、单种子序列）：
+#   塔血 ×1.3 → 首塔中位 2m18s、时长中位 10m44s、8–12 分钟带 92%、蓝方胜率 42%。
+# 标定目标是盘点里的「首塔 2m27s / 镜像局 3:9」：首塔已贴近，胜率仍偏蓝，
+# 属 item6b 记录的 bot 决策级偏向，未用塔血去硬凑（会引入更难查的问题）。
+# 不传 balance 时用这一版；要复现 2026-11-10 旧值传 tower_hp_scale:1.0。
 # 只允许**单局 config["balance"]** 覆盖，不用全局静态变量：后者会被某个用例
 # 改完后泄漏到后续对局，让测试结果依赖执行顺序。
 # 三个真正影响首塔时刻的旋钮是「塔血 / 保护期 / 兵线成长」，
 # 验收 6.3 已注明调 TOWER_HP 或 EARLY_PROTECTION_SCALE 会与项 2 的大招门槛耦合。
 const BALANCE_DEFAULTS := {
-	"tower_hp_scale": 1.0,
+	"tower_hp_scale": 1.3,
 	"tower_damage_scale": 1.0,
 	"minion_hp_scale": 1.0,
 	"minion_damage_scale": 1.0,
@@ -526,6 +533,13 @@ func _spawn_hero(owner_id: String, display_name: String, team: String, controlle
 		"skill_w_cd": 0.0,
 		"skill_e_cd": 0.0,
 		"skill_r_cd": 0.0,
+		# 技能前摇 / 后摇（项 3.3）。cast_slot 非空 = 正在起手，cast_left 是剩余前摇；
+		# cast_recover 是结算后的后摇（禁施法/普攻，不禁移动）。三个字段都进快照与白名单，
+		# 否则客机看不到"对方正在起手"——前摇就失去了"看到起手再交控"的意义。
+		"cast_slot": "",
+		"cast_left": 0.0,
+		"cast_aim": spawn,
+		"cast_recover": 0.0,
 		# 技能等级（项 2）。q/w/e 出生已学 1 级，r 出生 0 级 = 未学习。
 		"skill_q_level": 1,
 		"skill_w_level": 1,
@@ -789,6 +803,7 @@ func tick(dt: float) -> void:
 	for spot in River.tick(state, dt):
 		_spawn_monster(River.spirit_stats(spot))
 	_update_hero_timers(dt)
+	_tick_casts(dt)
 	_apply_human_inputs(dt)
 	_update_bots(dt)
 	_update_minions(dt)
@@ -1062,10 +1077,28 @@ func _apply_human_inputs(dt: float) -> void:
 		var sell_slot := int(input.get("sell_slot", -1))
 		# 项 2：加点是离散意图，和购买一样"取走即清"，否则下一条纯移动输入会重放它。
 		var upgrade_slot := str(input.get("upgrade_slot", ""))
+		# 快捷信号（项 11.1）：一次性意图，取走即清，并在这里做权威冷却。
+		# 事件带 team，Vision.filter_events 会把敌队的这条直接丢掉（标点不泄露位置）。
+		var ping_kind := str(input.get("ping_kind", ""))
+		var ping_x := float(input.get("ping_x", 0.0))
+		var ping_y := float(input.get("ping_y", 0.0))
 		# 意图只消费一次：否则 set_input 的合并逻辑会把旧购买带进下一个输入序列。
 		input["buy_item"] = ""
 		input["sell_slot"] = -1
 		input["upgrade_slot"] = ""
+		input["ping_kind"] = ""
+		if ping_kind != "" and PingRules.is_valid(ping_kind):
+			var since := float(state.time) - float(entity.get("last_ping_time", -999.0))
+			if since >= PING_COOLDOWN:
+				entity["last_ping_time"] = float(state.time)
+				_emit("ping_mark", {
+					"team": str(entity.team),
+					"hero": int(entity.id),
+					"name": str(entity.get("name", "")),
+					"kind": ping_kind,
+					"x": clampf(ping_x, -MapData.BOUNDS, MapData.BOUNDS),
+					"y": clampf(ping_y, -MapData.BOUNDS, MapData.BOUNDS),
+				})
 		if seq > int(entity.get("last_input_seq", -1)):
 			entity["last_input_seq"] = seq
 		# 购买走可靠通道，可能与不可靠的移动输入乱序，所以用独立的购买序号去重，
@@ -1718,13 +1751,31 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 	if target.type == "hero":
 		target["damage_taken"] = float(target.get("damage_taken", 0.0)) + incoming
 	var remaining := incoming
+	var absorbed_total := 0.0
 	if float(target.get("shield", 0.0)) > 0.0:
 		var absorbed: float = minf(float(target.shield), remaining)
 		target.shield = float(target.shield) - absorbed
 		remaining -= absorbed
+		absorbed_total = absorbed
 		if target.type == "base":
 			target["last_shield_hit_time"] = float(state.time)
 	if remaining <= 0.0:
+		# 全额被护盾吃掉时也要发一条 hit（amount=0 + absorbed），否则玩家看不到
+		# 「盾吃了多少」——画面会像这次攻击完全没命中。小兵互打仍然静默。
+		var shielded_quiet := str(target.type) == "minion" and not source.is_empty() \
+			and str(source.get("type", "")) == "minion"
+		if absorbed_total > 0.01 and not shielded_quiet:
+			_emit("hit", {
+				"target": target.id,
+				"target_type": target.type,
+				"source": int(source.get("id", -1)) if not source.is_empty() else -1,
+				"source_type": str(source.get("type", "")),
+				"x": float(target.pos.x),
+				"y": float(target.pos.y),
+				"amount": 0.0,
+				"absorbed": absorbed_total,
+				"team": target.team,
+			})
 		return
 	target.hp = float(target.hp) - remaining
 	# —— 吸血（装备深度）——
@@ -1739,6 +1790,16 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 			and bool(source.get("alive", true)):
 		var heal := remaining * lifesteal
 		source["hp"] = minf(float(source.get("hp", 0.0)) + heal, float(source.get("max_hp", 0.0)))
+		# FX-11 治疗飘字：吸血是唯一「打人回血」的常规来源，必须给表现层一个
+		# 带来源坐标的 heal 事件，否则玩家只能看着血条莫名上涨。
+		if heal > 0.5:
+			_emit("heal", {
+				"team": str(source.get("team", "")),
+				"hero": int(source.get("id", -1)),
+				"x": float(source.pos.x),
+				"y": float(source.pos.y),
+				"amount": heal,
+			})
 	# 项 3.5：**小兵打小兵不广播 hit**。
 	# 实测事件构成：hit 占 7301 次（总量 65% 的大头之一），而双方小兵每波互殴
 	# 会产生大量只为"飘个伤害数字"的事件。玩家不会去数小兵互相打了多少，
@@ -1758,6 +1819,7 @@ func _damage(target: Dictionary, amount: float, source: Dictionary, damage_type 
 			"x": float(target.pos.x),
 			"y": float(target.pos.y),
 			"amount": remaining,
+			"absorbed": absorbed_total,
 			"team": target.team,
 		})
 	if float(target.hp) <= 0.0:
@@ -2404,6 +2466,9 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["attack_cd"] = float(entity.attack_cd)
 		data["haste_timer"] = float(entity.haste_timer)
 		data["slow_timer"] = float(entity.slow_timer)
+		# 免控（FX-11）：客机要画金色护体光环，必须拿到剩余时间而不是布尔，
+		# 否则光环会在最后 0.5 秒提前熄灭，看起来像「免控没生效」。
+		data["cc_immune_timer"] = float(entity.get("cc_immune_timer", 0.0))
 		# 硬控（项 4，链路 3）：客机要靠这些画头顶状态图标。
 		# 同时下发聚合状态码 cc_status，免得客机自己按优先级重算一遍 ——
 		# "哪个控更重"属于规则，双实现必然漂移。空串表示未被控。

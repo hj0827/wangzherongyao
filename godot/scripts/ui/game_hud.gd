@@ -15,6 +15,11 @@ signal pause_requested
 # 按住小地图 → 请求把镜头移到该世界坐标；松手 → 立刻回到英雄。
 signal map_focus_requested(world: Vector2)
 signal map_focus_released
+# 快捷信号（项 11.1）：轮盘打开时 arena 记下当前指向；选择某一类后由 arena 解析落点。
+signal ping_wheel_opened
+signal ping_requested(kind: String)
+# 手动加点（项 2 链路 6 / B7）：触屏没有 Ctrl+技能，必须给一个可点的入口。
+signal upgrade_requested(slot: String)
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
@@ -36,6 +41,7 @@ const TouchActionButton = preload("res://scripts/ui/touch_action_button.gd")
 const TouchLayout = preload("res://scripts/ui/touch_layout.gd")
 const HudLayout = preload("res://scripts/ui/hud_layout.gd")
 const RecallBar = preload("res://scripts/ui/recall_bar.gd")
+const PingRules = preload("res://sim/ping_rules.gd")
 
 var arena: Node = null
 var local_owner := ""
@@ -115,7 +121,7 @@ const CANCEL_ZONE_RADIUS := 66.0
 # 现在分成两行、每行只放 4~5 组键位，并且垫一层底板，水面上也读得出来。
 const KEY_HINT_LINES := [
 	"左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师",
-	"B 回城   ·   T 传送   ·   Ctrl+技能 升级   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停",
+	"B 回城   ·   T 传送   ·   G 快捷信号   ·   Ctrl+技能 升级   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停",
 ]
 const KEY_HINTS := "左键 移动   ·   右键 / 空格 普攻   ·   Q / 1 / E / R 技能   ·   F 召唤师   ·   B 回城   ·   T 传送   ·   Ctrl+技能 升级   ·   滚轮 缩放视角   ·   Tab 计分板   ·   Esc 暂停"
 
@@ -159,11 +165,31 @@ var _result_bg: TextureRect
 var _result_medal: TextureRect
 var _result_sub: Label
 var _result_stats: Label
+# UI-06 结算数据条：输出 / 承伤 / 参团。数值取快照里本队英雄的相对峰值。
+var _result_bars: Dictionary = {}
+var _like_button: Button
+var _likes := 0
+const RESULT_BAR_ROWS := [
+	{"key": "dealt", "label": "输出"},
+	{"key": "taken", "label": "承伤"},
+	{"key": "join", "label": "参团"},
+]
 var _pause_overlay: Control
 var _pause_title: Label
 var _pause_hint: Label
 var _loading_overlay: Control
 var _bush_label: Label
+# 快捷信号：一颗常驻入口 + 四选一浮层；标点本身由 arena 广播、这里只管显示。
+var _ping_button: Button
+var _ping_panel: PanelContainer
+var _pings: Array = []
+const PING_LIFETIME := 4.0
+# FX-11 低血红晕：全屏径向渐变，只在血量低于 30% 时按缺失比例淡入。
+var _low_health: TextureRect
+# 手动加点：有剩余点数时才出现的「加点」按钮 + 四技能浮层（仅触屏）。
+var _level_button: Button
+var _level_panel: PanelContainer
+var _level_buttons: Dictionary = {}
 
 func setup(owner_id: String, team: String, type_id: String, display: String, mobile := false, online := false) -> void:
 	local_owner = owner_id
@@ -180,10 +206,14 @@ func _ready() -> void:
 	theme = GameTheme.theme()
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# 红晕必须最先加、压在最底层：晚加会盖住血条和技能键。
+	_build_low_health()
 	_build_top_bar()
 	_build_econ_strip()
 	_build_bush_indicator()
 	_build_minimap()
+	_build_ping_ui()
+	_build_level_ui()
 	_build_feed()
 	_build_announcement()
 	_build_kill_banner()
@@ -202,6 +232,8 @@ func _ready() -> void:
 	_apply_layout()
 	resized.connect(_apply_layout)
 	set_process_unhandled_key_input(true)
+	# 标点有生命周期（4 秒倒计时），必须每帧推进；没有标点时 _process 直接返回。
+	set_process(true)
 
 # 按当前视口重算所有常驻面板的位置。窗口拉伸、旋转屏、改分辨率都走这里。
 func _apply_layout() -> void:
@@ -211,6 +243,8 @@ func _apply_layout() -> void:
 		viewport = Vector2(1600.0, 900.0)
 	var insets := _safe_insets(viewport)
 	_layout = HudLayout.zones(viewport, touch_mode, insets)
+	if _low_health != null:
+		_low_health.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_place_zone(_score_panel, _layout["score"])
 	# 经济条贴在比分板右侧；窗口太窄时分区宽度会被压到 0，这时整条隐藏，
 	# 而不是让它压在商店按钮上。
@@ -218,6 +252,27 @@ func _apply_layout() -> void:
 	_econ_panel.visible = econ_rect.size.x >= 100.0
 	_place_zone(_econ_panel, econ_rect)
 	_place_zone(_minimap_panel, _layout["minimap"])
+	# 快捷信号入口贴在小地图右侧，浮层在底部中间弹出。
+	var mini: Rect2 = _layout["minimap"]
+	_place_zone(_ping_button, Rect2(mini.end.x + 8.0, mini.position.y, 104.0, 56.0))
+	if _ping_panel != null:
+		_place_zone(_ping_panel, Rect2(
+			(viewport.x - 440.0) * 0.5,
+			viewport.y - (300.0 if touch_mode else 240.0),
+			440.0,
+			108.0
+		))
+	# 加点入口贴在技能条左上角；桌面隐藏，浮层在技能条上方弹出。
+	if _level_button != null:
+		var skills: Rect2 = _layout["skills"]
+		_place_zone(_level_button, Rect2(skills.position.x - 104.0, skills.end.y - 48.0, 96.0, 44.0))
+	if _level_panel != null:
+		_place_zone(_level_panel, Rect2(
+			(viewport.x - 440.0) * 0.5,
+			viewport.y - (370.0 if touch_mode else 310.0),
+			440.0,
+			108.0
+		))
 	_place_zone(_feed_box, _layout["feed"])
 	_place_zone(_bush_label, _layout["bush"])
 	_place_zone(_hero_panel, _layout["hero"])
@@ -446,7 +501,7 @@ func set_rtt(ms: int) -> void:
 
 func _build_minimap() -> void:
 	_minimap_panel = PanelContainer.new()
-	_minimap_panel.add_theme_stylebox_override("panel", GameTheme.style(Color(0.02, 0.035, 0.05, 0.82), Color(0.55, 0.44, 0.24, 0.65), 1, 9))
+	_minimap_panel.add_theme_stylebox_override("panel", GameTheme.minimap_frame())
 	add_child(_minimap_panel)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 4)
@@ -488,6 +543,180 @@ func _build_minimap() -> void:
 
 func _on_minimap_location_clicked(world: Vector2) -> void:
 	map_focus_requested.emit(world)
+
+# --- FX-11 低血红晕 ----------------------------------------------------------
+
+func _build_low_health() -> void:
+	# 用径向渐变而不是纯色矩形：纯红会整体染色，连小地图都看不清。
+	var gradient := Gradient.new()
+	gradient.offsets = PackedFloat32Array([0.0, 0.58, 1.0])
+	gradient.colors = PackedColorArray([
+		Color(0.0, 0.0, 0.0, 0.0),
+		Color(0.72, 0.02, 0.02, 0.0),
+		Color(0.92, 0.05, 0.03, 0.6),
+	])
+	var texture := GradientTexture2D.new()
+	texture.gradient = gradient
+	texture.fill = GradientTexture2D.FILL_RADIAL
+	texture.fill_from = Vector2(0.5, 0.5)
+	texture.fill_to = Vector2(1.0, 0.5)
+	texture.width = 256
+	texture.height = 256
+	_low_health = TextureRect.new()
+	_low_health.texture = texture
+	_low_health.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_low_health.stretch_mode = TextureRect.STRETCH_SCALE
+	_low_health.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_low_health.visible = false
+	add_child(_low_health)
+
+# 比例来自本机英雄快照；死亡时调用方传 1.0 关掉红晕（复活后再按血量恢复）。
+func set_low_health(ratio: float) -> void:
+	if _low_health == null:
+		return
+	var missing := clampf((0.3 - ratio) / 0.3, 0.0, 1.0)
+	_low_health.visible = missing > 0.01
+	_low_health.modulate.a = missing
+
+# --- 快捷信号（项 11.1）-----------------------------------------------------
+# 入口放在小地图右侧：标点是「地图上的事」，挨着地图最符合直觉；
+# 四类信号收在一个浮层里，避免再往拇指区塞四颗常驻按钮。
+
+func _build_ping_ui() -> void:
+	_ping_button = Button.new()
+	_ping_button.text = "信号 (G)"
+	_ping_button.focus_mode = Control.FOCUS_NONE
+	_ping_button.pressed.connect(_toggle_ping_panel)
+	add_child(_ping_button)
+
+	_ping_panel = PanelContainer.new()
+	_ping_panel.add_theme_stylebox_override("panel", GameTheme.style(
+		Color(0.02, 0.035, 0.05, 0.96), Color(0.55, 0.44, 0.24, 0.8), 1, 10
+	))
+	_ping_panel.visible = false
+	add_child(_ping_panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 6)
+	_ping_panel.add_child(column)
+	var hint := _make_label("发送快捷信号", 13, GameTheme.MUTED)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(hint)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	column.add_child(row)
+	for kind in PingRules.KINDS:
+		var button := Button.new()
+		button.text = PingRules.label(kind)
+		button.focus_mode = Control.FOCUS_NONE
+		button.custom_minimum_size = Vector2(92, 56)
+		button.pressed.connect(_on_ping_choice.bind(kind))
+		row.add_child(button)
+
+func _toggle_ping_panel() -> void:
+	_show_ping_panel(_ping_panel != null and not _ping_panel.visible)
+
+func _show_ping_panel(value: bool) -> void:
+	if _ping_panel == null:
+		return
+	_ping_panel.visible = value
+	if value:
+		ping_wheel_opened.emit()
+
+func _on_ping_choice(kind: String) -> void:
+	_show_ping_panel(false)
+	ping_requested.emit(kind)
+
+# 收到一条标点（本机或队友）：小地图图标 + 播报条，发送者名来自事件。
+func show_ping(event: Dictionary) -> void:
+	var kind := str(event.get("kind", ""))
+	if not PingRules.is_valid(kind):
+		return
+	_pings.append({
+		"kind": kind,
+		"x": float(event.get("x", 0.0)),
+		"y": float(event.get("y", 0.0)),
+		"duration": PING_LIFETIME,
+		"remaining": PING_LIFETIME,
+	})
+	if _minimap != null:
+		_minimap.set_pings(_pings)
+	var text := PingRules.feed_text(kind, str(event.get("name", "")))
+	# 播报条依赖 Tween，只有进树后才能创建；纯数据测试里 HUD 是游离节点。
+	if is_inside_tree():
+		add_feed(text, PingRules.color(kind))
+		announce(text, PingRules.color(kind), 1.4)
+
+func _process(delta: float) -> void:
+	if _pings.is_empty():
+		return
+	var alive: Array = []
+	for ping in _pings:
+		ping["remaining"] = float(ping.get("remaining", 0.0)) - delta
+		if float(ping["remaining"]) > 0.0:
+			alive.append(ping)
+	_pings = alive
+	if _minimap != null:
+		_minimap.set_pings(_pings)
+
+# --- 手动加点（B7）-----------------------------------------------------------
+# 只有触屏需要：桌面已有 Ctrl+技能。按钮仅在 skill_points > 0 时出现，
+# 点开后再选具体技能，避免把四个「+」常驻压在技能键上误触。
+
+func _build_level_ui() -> void:
+	_level_button = Button.new()
+	_level_button.text = "加点"
+	_level_button.focus_mode = Control.FOCUS_NONE
+	_level_button.visible = false
+	_level_button.pressed.connect(_toggle_level_panel)
+	add_child(_level_button)
+
+	_level_panel = PanelContainer.new()
+	_level_panel.add_theme_stylebox_override("panel", GameTheme.style(
+		Color(0.02, 0.035, 0.05, 0.96), Color(0.55, 0.44, 0.24, 0.8), 1, 10
+	))
+	_level_panel.visible = false
+	add_child(_level_panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 6)
+	_level_panel.add_child(column)
+	var hint := _make_label("升级哪个技能？", 13, GameTheme.MUTED)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(hint)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	column.add_child(row)
+	for slot in ["q", "w", "e", "r"]:
+		var button := Button.new()
+		button.focus_mode = Control.FOCUS_NONE
+		button.custom_minimum_size = Vector2(92, 56)
+		button.pressed.connect(_on_level_choice.bind(slot))
+		row.add_child(button)
+		_level_buttons[slot] = button
+
+func _toggle_level_panel() -> void:
+	if _level_panel == null:
+		return
+	_level_panel.visible = not _level_panel.visible
+
+func _on_level_choice(slot: String) -> void:
+	_level_panel.visible = false
+	upgrade_requested.emit(slot)
+
+# 每次快照刷新：点数决定按钮显隐，等级决定浮层按钮文案与可用性。
+func _sync_level_ui(local: Dictionary) -> void:
+	if _level_button == null:
+		return
+	var points := int(local.get("skill_points", 0))
+	_level_button.visible = touch_mode and points > 0
+	if points <= 0 and _level_panel != null:
+		_level_panel.visible = false
+	for slot in _level_buttons.keys():
+		var button: Button = _level_buttons[slot]
+		var level_key := "skill_%s_level" % slot
+		var level := int(local.get(level_key, 0))
+		var max_level := HeroDefs.MAX_SKILL_LEVEL_ULT if slot == "r" else HeroDefs.MAX_SKILL_LEVEL_NORMAL
+		button.text = "%s Lv%d" % [slot.to_upper(), level]
+		button.disabled = level >= max_level or points <= 0
 
 # 按住拖动时持续改目标，相机就跟着手指走。
 func _on_minimap_location_dragged(world: Vector2) -> void:
@@ -1285,8 +1514,8 @@ func _build_result_overlay() -> void:
 	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
 	panel.offset_left = -330.0
 	panel.offset_right = 330.0
-	panel.offset_top = -220.0
-	panel.offset_bottom = 220.0
+	panel.offset_top = -260.0
+	panel.offset_bottom = 260.0
 	var ornate := GameTheme.ornate_panel()
 	if ornate.texture != null:
 		panel.add_theme_stylebox_override("panel", ornate)
@@ -1339,6 +1568,43 @@ func _build_result_overlay() -> void:
 	_result_stats = _make_label("", 16, GameTheme.MUTED)
 	_result_stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(_result_stats)
+	# 数据条：三条相对本队峰值的横条。只读同队英雄，敌方数值不参与归一化。
+	var bars := VBoxContainer.new()
+	bars.add_theme_constant_override("separation", 5)
+	box.add_child(bars)
+	for spec in RESULT_BAR_ROWS:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		bars.add_child(row)
+		var title := _make_label(str(spec.label), 14, GameTheme.MUTED)
+		title.custom_minimum_size = Vector2(44.0, 0.0)
+		row.add_child(title)
+		var bar := ProgressBar.new()
+		bar.min_value = 0.0
+		bar.max_value = 1.0
+		bar.value = 0.0
+		bar.show_percentage = false
+		bar.custom_minimum_size = Vector2(300.0, 14.0)
+		bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bar.add_theme_stylebox_override("background", GameTheme.style(
+			Color(0.06, 0.08, 0.10, 0.92), Color(0.18, 0.22, 0.26, 0.9), 1, 4, 0, 0.0
+		))
+		bar.add_theme_stylebox_override("fill", GameTheme.style(
+			Color(0.78, 0.60, 0.32, 0.95), Color(0.0, 0.0, 0.0, 0.0), 0, 4, 0, 0.0
+		))
+		row.add_child(bar)
+		var readout := _make_label("", 13, GameTheme.TEXT)
+		readout.custom_minimum_size = Vector2(84.0, 0.0)
+		readout.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		row.add_child(readout)
+		_result_bars[str(spec.key)] = {"bar": bar, "value": readout}
+	# 点赞：按视觉文档的口径只做 UI，不接后端；同一局只能点一次。
+	_like_button = Button.new()
+	_like_button.text = "点赞"
+	_like_button.focus_mode = Control.FOCUS_NONE
+	_like_button.custom_minimum_size = Vector2(132.0, 40.0)
+	_like_button.pressed.connect(_on_result_like)
+	box.add_child(_like_button)
 	var leave := Button.new()
 	leave.text = "返回主菜单"
 	leave.custom_minimum_size = TouchLayout.RESULT_BUTTON_SIZE if touch_mode else Vector2(220, 52)
@@ -1382,6 +1648,11 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
 	var key := event as InputEventKey
+	if key.pressed and not key.echo and key.keycode == KEY_G:
+		# G = 快捷信号轮盘：和小地图旁的「信号」按钮同一个入口。
+		_toggle_ping_panel()
+		accept_event()
+		return
 	if key.pressed and not key.echo and key.keycode == KEY_TAB:
 		# Tab 是「看一眼就关」的临时面板，和商店一样属于 UI 层，不进 sim 输入。
 		if _scoreboard != null:
@@ -1530,6 +1801,7 @@ func update_snapshot(data: Dictionary) -> void:
 	_apply_skill_state(_skill_w, local, hero_def.w, "skill_w_cd", mp, not alive)
 	_apply_skill_state(_skill_e, local, hero_def.e, "skill_e_cd", mp, not alive)
 	_apply_skill_state(_skill_r, local, hero_def.r, "skill_r_cd", mp, not alive)
+	_sync_level_ui(local)
 	if _summoner_button != null:
 		var spell := SkillSystem.get_summoner_spell(str(local.get("summoner_spell", "flash")))
 		_summoner_button.set_state(
@@ -1756,8 +2028,54 @@ func show_result(winner: String, local: Dictionary) -> void:
 		int(team_score.get("towers", 0)),
 		_format_time(float(snapshot.get("time", 0.0))),
 	]
+	_update_result_bars(local)
+	_likes = 0
+	if _like_button != null:
+		_like_button.text = "点赞"
+		_like_button.disabled = false
 	_result_overlay.visible = true
 	announce("对局结束", GameTheme.GOLD_LIGHT, 1.5)
+
+func _on_result_like() -> void:
+	# 仅 UI：视觉文档明确不接后端，所以这里只做一次性的本地反馈。
+	_likes += 1
+	if _like_button != null:
+		_like_button.text = "已点赞 (%d)" % _likes
+		_like_button.disabled = true
+
+# 输出/承伤按本队最高值归一化；参团 = (击杀+助攻) / 本队总击杀。
+# 客机快照只含本队实体，敌方数值本来就不该进来参与比较。
+func _update_result_bars(local: Dictionary) -> void:
+	if _result_bars.is_empty():
+		return
+	var max_dealt := 1.0
+	var max_taken := 1.0
+	var team_kills := 0
+	for entity in snapshot.get("entities", []):
+		if str(entity.get("type", "")) != "hero" or str(entity.get("team", "")) != local_team:
+			continue
+		max_dealt = maxf(max_dealt, float(entity.get("damage_dealt", 0.0)))
+		max_taken = maxf(max_taken, float(entity.get("damage_taken", 0.0)))
+		team_kills += int(entity.get("kills", 0))
+	var dealt := float(local.get("damage_dealt", 0.0))
+	var taken := float(local.get("damage_taken", 0.0))
+	var involvement := int(local.get("kills", 0)) + int(local.get("assists", 0))
+	var participation := clampf(float(involvement) / float(maxi(1, team_kills)), 0.0, 1.0)
+	_set_result_bar("dealt", clampf(dealt / max_dealt, 0.0, 1.0), _format_amount(dealt))
+	_set_result_bar("taken", clampf(taken / max_taken, 0.0, 1.0), _format_amount(taken))
+	_set_result_bar("join", participation, "%d%%" % roundi(participation * 100.0))
+
+func _set_result_bar(key: String, ratio: float, text: String) -> void:
+	var entry: Dictionary = _result_bars.get(key, {})
+	if entry.is_empty():
+		return
+	(entry["bar"] as ProgressBar).value = ratio
+	(entry["value"] as Label).text = text
+
+func _format_amount(value: float) -> String:
+	if value >= 1000.0:
+		return "%.1fk" % (value / 1000.0)
+	return "%d" % roundi(maxf(0.0, value))
 
 func _format_time(seconds: float) -> String:
 	var total := int(maxf(0.0, seconds))

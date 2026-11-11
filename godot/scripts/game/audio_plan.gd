@@ -35,6 +35,7 @@ const CUE_SHIELD_BREAK := "shield_break"
 const CUE_LEVEL_UP := "level_up"
 const CUE_PURCHASE := "purchase"
 const CUE_OBJECTIVE_DOWN := "objective_down"
+const CUE_OBJECTIVE_ROAR := "objective_roar"
 const CUE_BUFF_TAKEN := "buff_taken"
 const CUE_SPIRIT_DOWN := "spirit_down"
 const CUE_WAVE_HORN := "wave_horn"
@@ -57,7 +58,7 @@ const CUES := [
 	CUE_SKILL_BLADE, CUE_SKILL_TANK, CUE_SKILL_MAGE, CUE_SKILL_ARCHER, CUE_SKILL_ASSASSIN, CUE_SKILL_ULT,
 	CUE_SUMMONER,
 	CUE_DEATH_HERO, CUE_DEATH_MINION, CUE_TOWER_DOWN, CUE_GUARD_DOWN, CUE_SHIELD_BREAK,
-	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
+	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_OBJECTIVE_ROAR, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
 	CUE_MONSTER_SWIPE, CUE_MONSTER_SLAM,
 ]
@@ -178,6 +179,9 @@ func cues_for(event: Dictionary, ctx: Dictionary) -> Array:
 			_push(out, CUE_SHIELD_BREAK, _distance_gain(event, ctx), -6.0)
 		"objective_killed":
 			_push(out, CUE_OBJECTIVE_DOWN, _distance_gain(event, ctx), -4.0)
+		"objective_spawn":
+			# 首领刷新是全局宣告：不做距离衰减，否则在边路的人听不到「暴君起来了」。
+			_push(out, CUE_OBJECTIVE_ROAR, 0.0, -2.0)
 		"buff_taken":
 			_push(out, CUE_BUFF_TAKEN, _distance_gain(event, ctx))
 		"river_spirit_killed":

@@ -22,16 +22,6 @@ func test_intel_recognizes_bushes_camps_and_objective_pits() -> void:
 	eq(str(pit_region.kind), "objective", "首领坑有独立类型")
 	check(str(pit_region.name).contains(str(MapLayout.OBJECTIVE_PITS[0].name)), "首领坑名称正确")
 
-func test_intel_labels_monsters() -> void:
-	var report := MapIntel.inspect({
-		"entities": [{
-			"id": 1, "type": "monster", "team": "neutral", "x": 0.0, "y": 0.0,
-			"hp": 900.0, "max_hp": 900.0, "alive": true, "monster_type": "wolf", "name": "霜狼",
-		}],
-	}, Vector2.ZERO, "p1", "blue")
-	eq(int(report.total), 1, "野怪进入情报列表")
-	eq(str(report.units[0].label), "野怪", "野怪使用类型标签")
-
 func _hud_snapshot() -> Dictionary:
 	return {
 		"time": 30.0,

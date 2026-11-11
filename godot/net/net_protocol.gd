@@ -3,6 +3,7 @@ extends RefCounted
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const ItemShop = preload("res://sim/item_shop.gd")
 const ControlRules = preload("res://sim/control_rules.gd")
+const PingRules = preload("res://sim/ping_rules.gd")
 
 const MAGIC := 0x4D4F4241
 const VERSION := 1
@@ -25,6 +26,8 @@ const MAX_CRIT_DAMAGE := 10.0
 const MAX_REGEN := 100000.0
 # 装备深度：吸血比例钳到 100%，穿透复用抗性上限。
 const MAX_LIFESTEAL := 1.0
+# 快捷信号坐标上限：地图 BOUNDS 是 58，留 2m 余量吸收边界取整。
+const MAX_PING_COORD := 60.0
 # 压缩帧：1 字节编解码标记 + 4 字节原始长度 + ZSTD 数据。
 # 不压缩的包保持 var_to_bytes 原样，首字节是 Variant 类型号（Dictionary = 27），
 # 与压缩标记 1 天然不冲突，所以两种格式在线上共存、不会误判。
@@ -70,6 +73,10 @@ const EMPTY_INPUT := {
 	"buy_item": "",
 	"sell_slot": -1,
 	"upgrade_slot": "",
+	# 快捷信号：一次性意图，模拟侧消费后清空；坐标由发送端在本机解析。
+	"ping_kind": "",
+	"ping_x": 0.0,
+	"ping_y": 0.0,
 	"seq": 0,
 }
 
@@ -176,6 +183,14 @@ static func sanitize_input(raw: Dictionary) -> Dictionary:
 	# 否则客机可以借 "upgrade_slot" 让主机点它自己没权限点的技能。
 	var upgrade_slot := str(raw.get("upgrade_slot", ""))
 	input.upgrade_slot = upgrade_slot if HeroDefs.SKILL_SLOTS.has(upgrade_slot) else ""
+	# 快捷信号：kind 只接受枚举值，坐标钳到地图范围（BOUNDS=58，留 2m 余量）。
+	# 非法 kind 必须清空而不是回落成某个合法值 —— 否则客机随便发个字符串
+	# 就会在队友地图上多出一个「进攻」标。
+	var ping_kind := str(raw.get("ping_kind", ""))
+	input.ping_kind = ping_kind if PingRules.is_valid(ping_kind) else ""
+	if input.ping_kind != "":
+		input.ping_x = clampf(_number(raw.get("ping_x", 0.0)), -MAX_PING_COORD, MAX_PING_COORD)
+		input.ping_y = clampf(_number(raw.get("ping_y", 0.0)), -MAX_PING_COORD, MAX_PING_COORD)
 	input.seq = maxi(0, int(_number(raw.get("seq", 0))))
 	return input
 
@@ -482,6 +497,8 @@ static func _sanitize_entity(raw: Variant, bounds: float) -> Dictionary:
 		entity["attack_cd"] = clampf(_number(source.get("attack_cd", 0.0)), 0.0, 60.0)
 		entity["haste_timer"] = clampf(_number(source.get("haste_timer", 0.0)), 0.0, 60.0)
 		entity["slow_timer"] = clampf(_number(source.get("slow_timer", 0.0)), 0.0, 60.0)
+		# 免控光环（FX-11）：客机按剩余时间画金色护体，0~10 秒与硬控上限一致。
+		entity["cc_immune_timer"] = clampf(_number(source.get("cc_immune_timer", 0.0)), 0.0, 10.0)
 		# 硬控（项 4，链路 4）：时长钳到 0~10 秒（没有哪个控该超过 10 秒，
 		# 否则客机会画出一个"永久眩晕"的图标）；cc_status 只收白名单枚举，
 		# 避免客机把任意字符串塞进 UI 层。
@@ -601,6 +618,9 @@ static func _sanitize_event(raw: Variant) -> Dictionary:
 		"pad", "to_x", "to_y", "spell_id", "caster_id",
 		"killer_id", "victim_id", "amount", "minion_type", "source_type", "target_type",
 		"announcement", "streak_title", "buy_item", "sell_slot", "crit",
+		# FX-11：护盾吸收量。缺这个字段时客机只能看到 amount=0 的命中，
+		# 表现成「打中了但既没伤害也没反馈」。
+		"absorbed",
 		# FX-10：技能/投射物事件的特效种类与实体归属。缺 kind 时客机只能靠
 		# hero_type + slot 猜特效，单机与联机的表现会不一致。
 		"kind", "id", "owner_id",

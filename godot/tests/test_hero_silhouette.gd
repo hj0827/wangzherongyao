@@ -62,6 +62,23 @@ func test_weapons_carry_the_hero_accent() -> void:
 		check(tinted, "%s 的武器要带主色染色" % hero_type)
 		view.free()
 
+# ---------------------------------------------------------------- HERO-02 辨识度
+
+func test_each_hero_has_a_distinct_autoattack_clip() -> void:
+	var seen := {}
+	for hero_type in HEROES:
+		var clip := str(UnitVisual.ANIM_ATTACK.get(hero_type, ""))
+		check(clip != "", "%s 必须有普攻动作" % hero_type)
+		check(not seen.has(clip),
+			"%s 的普攻动作与 %s 重复（%s），换英雄就只剩换色" % [hero_type, seen.get(clip, ""), clip])
+		seen[clip] = hero_type
+
+func test_hair_color_follows_the_outfit_palette() -> void:
+	for hero_type in HEROES:
+		var setup: Dictionary = UnitVisual.HERO_SETUPS.get(hero_type, {})
+		check(setup.has("hair_tint"), "%s 必须声明 hair_tint" % hero_type)
+		check(float(setup.get("hair_tint_amount", 0.0)) > 0.0, "%s 的头发必须真的被染色" % hero_type)
+
 func test_hero_setup_declares_its_own_body_and_weapon_scale() -> void:
 	var body_scales := {}
 	var weapon_scales := {}

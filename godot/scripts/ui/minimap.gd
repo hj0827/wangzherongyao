@@ -13,6 +13,7 @@ const MapView = preload("res://scripts/game/map_view.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const Jungle = preload("res://sim/map/jungle.gd")
 const Objectives = preload("res://sim/map/objectives.gd")
+const PingRules = preload("res://sim/ping_rules.gd")
 
 const MARGIN := 13.0
 const DISPLAY_SIZE := Vector2(206, 206)
@@ -288,6 +289,8 @@ static func hero_facing_tab(pos: Vector2, facing: Vector2, radius: float) -> Pac
 var snapshot: Dictionary = {}
 var local_owner := ""
 var local_team := "blue"
+# 快捷信号标点：HUD 每帧把未过期的列表推进来，含剩余时间（画倒计时弧）。
+var _pings: Array = []
 var _panel_style: StyleBoxFlat
 # --- 拖拽定位 ---
 # 按住地图拖动 = 连续改变相机注视点。鼠标拖出控件后 _gui_input 收不到事件，
@@ -314,6 +317,11 @@ func set_snapshot(data: Dictionary, owner: String, team: String) -> void:
 	snapshot = data
 	local_owner = owner
 	local_team = team
+	queue_redraw()
+
+# 标点由 HUD 维护生命周期，小地图只负责画：remaining/duration 决定倒计时弧。
+func set_pings(pings: Array) -> void:
+	_pings = pings
 	queue_redraw()
 
 func _draw() -> void:
@@ -450,6 +458,27 @@ func _draw() -> void:
 				draw_circle(pos, radius * 1.5, Color(team_color.r, team_color.g, team_color.b, 0.25))
 				draw_circle(pos, radius, team_color)
 				draw_arc(pos, radius + 1.4, 0, TAU, 16, Color(0.8, 0.97, 1.0, 0.9), 1.0, true)
+
+	# 快捷信号：压在实体之上，队友一眼能看到谁在哪标了什么。
+	for ping in _pings:
+		var kind := str(ping.get("kind", ""))
+		var ping_pos := world_to_screen(Vector2(float(ping.get("x", 0.0)), float(ping.get("y", 0.0))))
+		var total := maxf(0.001, float(ping.get("duration", 4.0)))
+		var left := clampf(float(ping.get("remaining", 0.0)) / total, 0.0, 1.0)
+		var ping_color := PingRules.color(kind)
+		draw_circle(ping_pos, 8.0, Color(0.02, 0.03, 0.04, 0.78))
+		draw_arc(ping_pos, 8.6, -PI * 0.5, -PI * 0.5 + TAU * left, 24, ping_color, 2.0, true)
+		var glyph := PingRules.glyph(kind)
+		var glyph_size := GameTheme.FONT_REGULAR.get_string_size(glyph, HORIZONTAL_ALIGNMENT_LEFT, -1, 11)
+		draw_string(
+			GameTheme.FONT_REGULAR,
+			ping_pos + Vector2(-glyph_size.x * 0.5, glyph_size.y * 0.34),
+			glyph,
+			HORIZONTAL_ALIGNMENT_LEFT,
+			-1,
+			11,
+			ping_color
+		)
 
 	# 视野圈先画、墙后画：镜头贴边时圆的轮廓会被夹成贴着内框的直边，
 	# 让墙压在上面才像「视野被地图边界截住」，而不是一条浮在边框外的金线。

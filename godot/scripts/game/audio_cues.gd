@@ -141,6 +141,8 @@ const CUE_SHIELD_BREAK := "shield_break"
 const CUE_LEVEL_UP := "level_up"
 const CUE_PURCHASE := "purchase"
 const CUE_OBJECTIVE_DOWN := "objective_down"
+# 首领刷新的领地宣告。和野怪砸地区分：更长、更低、带颤音，是「来了」不是「打你一下」。
+const CUE_OBJECTIVE_ROAR := "objective_roar"
 const CUE_BUFF_TAKEN := "buff_taken"
 const CUE_SPIRIT_DOWN := "spirit_down"
 const CUE_WAVE_HORN := "wave_horn"
@@ -163,7 +165,7 @@ const NAMES := [
 	CUE_SKILL_BLADE, CUE_SKILL_TANK, CUE_SKILL_MAGE, CUE_SKILL_ARCHER, CUE_SKILL_ASSASSIN, CUE_SKILL_ULT,
 	CUE_SUMMONER,
 	CUE_DEATH_HERO, CUE_DEATH_MINION, CUE_TOWER_DOWN, CUE_GUARD_DOWN, CUE_SHIELD_BREAK,
-	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
+	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_OBJECTIVE_ROAR, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
 	CUE_MONSTER_SWIPE, CUE_MONSTER_SLAM,
 	CUE_UI_CLICK, CUE_UI_CONFIRM, CUE_UI_BACK, CUE_UI_ERROR,
@@ -215,6 +217,8 @@ static func cue(cue_name: String) -> AudioStreamWAV:
 			return purchase()
 		CUE_OBJECTIVE_DOWN:
 			return objective_down()
+		CUE_OBJECTIVE_ROAR:
+			return objective_roar()
 		CUE_BUFF_TAKEN:
 			return buff_taken()
 		CUE_SPIRIT_DOWN:
@@ -373,6 +377,17 @@ static func objective_down() -> AudioStreamWAV:
 		return _layer(1.5, 3607, [
 			{"at": 0.0, "dur": 1.5, "spec": {"from": 70.0, "to": 30.0, "curve": 1.5, "harm": [1.0, 0.55], "noise": 0.5, "noise_decay": 1.6, "decay": 1.7, "gain": 0.85}},
 			{"at": 0.0, "dur": 0.9, "spec": {"freq": 155.0, "harm": [1.0, 0.5, 0.3], "attack": 0.06, "sustain": 0.5, "decay": 1.2, "trem": 5.0, "trem_depth": 0.35, "gain": 0.42}},
+		])
+	)
+
+# 首领刷新咆哮：领地宣告。
+# 和 monster_slam（一次砸地，0.3s）刻意拉开：这里 1.15s、双段低音 + 颤音 + 沙哑噪声，
+# 听起来是「我从坑里出来了」，而不是「我打了你一下」。全局播放，不做距离衰减。
+static func objective_roar() -> AudioStreamWAV:
+	return _cached(CUE_OBJECTIVE_ROAR, func() -> AudioStreamWAV:
+		return _layer(1.15, 5209, [
+			{"at": 0.0, "dur": 1.15, "spec": {"from": 150.0, "to": 52.0, "curve": 1.6, "harm": [1.0, 0.55, 0.28], "trem": 13.0, "trem_depth": 0.4, "noise": 0.34, "noise_decay": 2.2, "attack": 0.05, "sustain": 0.35, "decay": 1.8, "gain": 0.82}},
+			{"at": 0.06, "dur": 1.05, "spec": {"freq": 74.0, "harm": [1.0, 0.5, 0.25], "trem": 6.0, "trem_depth": 0.3, "attack": 0.08, "sustain": 0.4, "decay": 1.5, "gain": 0.5}},
 		])
 	)
 

@@ -7,6 +7,9 @@ signal ready_for_battle
 
 const MatchSim = preload("res://sim/match_sim.gd")
 const MapData = preload("res://sim/map_data.gd")
+const MapIntel = preload("res://sim/map_intel.gd")
+const PingRules = preload("res://sim/ping_rules.gd")
+const FxIntensity = preload("res://scripts/game/fx_intensity.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const ModelUtils = preload("res://scripts/game/model_utils.gd")
@@ -211,6 +214,12 @@ var skill_fx_count := 0
 var particle_bursts := 0
 # 池空时抢占旧簇的次数（抢占是有意的：掐掉快消失的那簇，保住刚放的那簇）。
 var particle_steals := 0
+# FX-08：每帧特效预算。身份信息（P0/P1）不占预算、永远放行；
+# P2/P3 在预算耗尽时丢弃并计数，而不是整帧卡在 new/restart 上。
+const FX_BUDGET_PER_FRAME := 24
+const FX_FAR_DISTANCE := 26.0
+var fx_dropped := 0
+var _fx_budget_left := FX_BUDGET_PER_FRAME
 var _props_root: Node3D
 # 营地/首领坑地面的符阵材质，按 camp / pit id 索引；野怪死亡时把它们调暗。
 var _sigil_shader: Shader = null
@@ -272,6 +281,14 @@ var _hud_timer := 0.0
 var _snapshot_timer := 0.0
 var _input_timer := 0.0
 var _pending_events: Array = []
+# 快捷信号：待发的一条标点 + 本机节流 + 打开轮盘时锁定的小地图落点。
+# 落点在打开轮盘那一刻锁定：鼠标移到按钮/浮层上时指针已经不在战场上，
+# 再取 _mouse_ground 会落到屏幕底部而不是玩家原本指着的位置。
+var _queued_ping: Dictionary = {}
+var _ping_cooldown := 0.0
+var _signal_target := Vector2.ZERO
+var _signal_target_valid := false
+const PING_INPUT_COOLDOWN := 1.2
 var _paused := false
 # 开发者调试（F3）。时间倍率只作用于主机模拟，表现层仍按真实时间走。
 var _debug_panel = null
@@ -289,6 +306,22 @@ var _local_id := -1
 var _local_entity_id := -1
 var _hit_stop := HitStopManager.new()
 var _camera_shake := 0.0
+# FX-07 击杀慢动作：只作用于主机/单机的模拟推进。客机渲染的是服务端快照，
+# 本地再减速只会让画面与服务端脱节；且两端各自减速会让联机节奏不同步。
+# 数值随特效强度缩放，强度 0 时完全不触发。
+const KILL_SLOW_SCALE := 0.35
+const KILL_SLOW_SECONDS := 0.34
+var _cinematic_scale := 1.0
+var _cinematic_timer := 0.0
+# MON-04 首领出场的镜头轻推：只加一个会衰减的 zoom 偏置，不改玩家自己的缩放值。
+const OBJECTIVE_ZOOM_KICK := 1.8
+const OBJECTIVE_ZOOM_RECOVER := 5.0
+var _zoom_kick := 0.0
+# 敌方 AOE 的危险圈：只在敌队施法时画，避免队友技能也铺红圈。
+const DANGER_SKILL_KINDS := [
+	"burst", "leap_slam", "meteor_storm", "quake",
+	"taunt_aura", "arrow_barrage", "aoe_shot", "slow",
+]
 # 客机本地预测：立即响应移动输入，再用服务端 last_input_seq 校正。
 var _prediction = ClientPrediction.new()
 var _prediction_ready := false
@@ -362,6 +395,9 @@ var _local_input := {
 	"buy_item": "",
 	"sell_slot": -1,
 	"upgrade_slot": "",
+	"ping_kind": "",
+	"ping_x": 0.0,
+	"ping_y": 0.0,
 	"seq": 0,
 }
 var _started_announcement := false
@@ -571,6 +607,9 @@ func _build_hud() -> void:
 	hud.pause_requested.connect(_toggle_pause)
 	hud.map_focus_requested.connect(focus_world_point)
 	hud.map_focus_released.connect(release_camera_focus)
+	hud.ping_wheel_opened.connect(_on_ping_wheel_opened)
+	hud.ping_requested.connect(_on_ping_requested)
+	hud.upgrade_requested.connect(_on_upgrade_requested)
 	layer.add_child(hud)
 
 func _debug_enabled() -> bool:
@@ -616,6 +655,10 @@ func debug_metrics() -> Dictionary:
 		"authoritative": authoritative,
 		"time_scale": _debug_time_scale,
 		"paused": _paused or _debug_paused,
+		# FX-08/09：被预算/距离档丢掉的装饰特效数，以及当前强度滑杆值。
+		"fx_dropped": fx_dropped,
+		"fx_intensity": _fx_intensity(),
+		"cinematic_scale": _cinematic_scale,
 	}
 
 func debug_set_time_scale(value: float) -> void:
@@ -709,7 +752,57 @@ func _debug_set_local_flag(key: String, value: bool) -> void:
 func _trigger_hit_stop(freeze_duration: float, shake_strength: float = 0.3) -> void:
 	if _debug_no_hit_stop:
 		return
-	_hit_stop.trigger_hit_stop(freeze_duration, shake_strength)
+	# FX-09：强度滑杆缩放的只是顿帧/震屏幅度，命中判定和 sim 完全不受影响。
+	var intensity := _fx_intensity()
+	_hit_stop.trigger_hit_stop(
+		FxIntensity.scale_time(freeze_duration, intensity),
+		FxIntensity.scale_time(shake_strength, intensity)
+	)
+
+# FX-07 击杀慢动作：纯时间缩放的短促下潜，顿帧结束后立即回到 1.0。
+# 与顿帧分开：顿帧冻结表现层，慢动作是让 sim 真的走慢一点，读得出「这一下打死了」。
+func _trigger_kill_slow_mo() -> void:
+	if not authoritative or _debug_no_hit_stop:
+		return
+	var intensity := _fx_intensity()
+	if intensity <= 0.001:
+		return
+	_cinematic_scale = lerpf(1.0, KILL_SLOW_SCALE, intensity)
+	_cinematic_timer = KILL_SLOW_SECONDS
+
+func _tick_cinematic(delta: float) -> void:
+	if _cinematic_timer <= 0.0:
+		_cinematic_scale = 1.0
+		return
+	_cinematic_timer = maxf(0.0, _cinematic_timer - delta)
+	if _cinematic_timer <= 0.0:
+		_cinematic_scale = 1.0
+
+# --- FX-08 / FX-09 -----------------------------------------------------------
+
+func _fx_intensity() -> float:
+	return clampf(GameSettings.fx_intensity, 0.0, 1.0)
+
+# 每帧重置预算：数量与强度无关（强度只缩粒子颗数），避免两套缩放叠乘。
+func _fx_budget_tick(_delta: float) -> void:
+	_fx_budget_left = FX_BUDGET_PER_FRAME
+
+# 优先级：数字越小越重要。P0/P1（终局、技能主环、击杀、飘字）不参与预算；
+# P2/P3 先看距离档（远处只留身份信息），再看本帧预算。
+func _fx_allowed(priority: int, world: Vector3) -> bool:
+	if priority <= 1:
+		return true
+	if camera != null:
+		var focus := camera.global_position
+		var distance := Vector2(world.x, world.z).distance_to(Vector2(focus.x, focus.z))
+		if distance > FX_FAR_DISTANCE:
+			fx_dropped += 1
+			return false
+	if _fx_budget_left <= 0:
+		fx_dropped += 1
+		return false
+	_fx_budget_left -= 1
+	return true
 
 func _on_skill_button(slot: String) -> void:
 	# 按了但放不出来（CD / 蓝不够 / 大招未学）必须有声音反馈：手机上玩家看不到 CD 数字时，
@@ -926,7 +1019,10 @@ func _process(delta: float) -> void:
 		_audio.set_context(_audio_ctx)
 	if _paused:
 		return
+	_ping_cooldown = maxf(0.0, _ping_cooldown - delta)
+	_fx_budget_tick(delta)
 	_hit_stop.tick(delta)
+	_tick_cinematic(delta)
 	# 顿帧只冻结表现层。以前这里直接 return，把 sim.tick 和 10Hz 快照广播一起停掉：
 	# 一次击杀 90ms 的顿帧刚好抽掉一格快照，客机 jitter buffer 欠载就会「回拉」。
 	# 现在还照常推进模拟、消费输入、发送网络包，只在最后跳过视觉同步。
@@ -953,7 +1049,7 @@ func _process(delta: float) -> void:
 		var frame_events: Array = []
 		# 调试暂停只停模拟，不改输入采集与网络收发：单步之后立即能看到下一 tick 的画面。
 		if not _debug_paused:
-			_accumulator += minf(delta, 0.1) * _debug_time_scale
+			_accumulator += minf(delta, 0.1) * _debug_time_scale * _cinematic_scale
 		var guard := 0
 		var tick_count := 0
 		var tick_started := Time.get_ticks_usec()
@@ -1007,7 +1103,7 @@ func _process(delta: float) -> void:
 		_gather_input()
 		_update_local_prediction(delta)
 		_input_timer += delta
-		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.attack or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0 or _local_input.upgrade_slot != "":
+		if _input_timer >= 0.05 or _local_input.skill_q or _local_input.skill_w or _local_input.skill_e or _local_input.skill_r or _local_input.summoner or _local_input.attack or _local_input.recall or _local_input.teleport or _local_input.buy_item != "" or _local_input.sell_slot >= 0 or _local_input.upgrade_slot != "" or _local_input.ping_kind != "":
 			_input_timer = 0.0
 			session.submit_input(_local_input.duplicate())
 			# 每个发出的输入都占一个序列号，服务端逐条确认，预测记录用同一个号。
@@ -1163,6 +1259,7 @@ func _gather_input() -> void:
 	_local_input.attack_mode = _attack_mode
 	_local_input.locked_target = _locked_target
 	_apply_pending_purchase()
+	_apply_pending_ping()
 
 # 点击移动：算出本 tick 该走的向量。
 # 返回值长度可能小于 1（模拟侧只在 >1 时才归一化），一步能走完时按剩余距离缩短。
@@ -1245,6 +1342,7 @@ func _gather_touch_input() -> void:
 	_local_input.attack_mode = _attack_mode
 	_local_input.locked_target = _locked_target
 	_apply_pending_purchase()
+	_apply_pending_ping()
 
 func _apply_pending_purchase() -> void:
 	if _pending_purchases.is_empty():
@@ -1531,7 +1629,7 @@ func _update_camera(delta: float, instant: bool) -> void:
 	# 贴到边界墙时把注视点往地图中心推（见 camera_edge.gd）：
 	# 不然相机跟着英雄越过城墙，近侧墙占掉小半屏、墙外草地也露一大块。
 	# 这一步是纯几何映射（连续、无滞后），不会和 look_at 产生相位差。
-	target = CameraEdge.inset(target, _zoom_current if _cam_initialized else zoom, _camera_forward())
+	target = CameraEdge.inset(target, _zoom_current + _zoom_kick if _cam_initialized else zoom, _camera_forward())
 	# 缩放单独平滑：位置跟随必须刚性（否则与 look_at 产生相位差而抖动），
 	# 但 zoom 一步变 2.0 会让相机整体瞬移，观感上同样是「跳」。
 	# 用恒定速率而非指数衰减——指数衰减「前快后慢」，首帧就会走掉一大截。
@@ -1541,7 +1639,9 @@ func _update_camera(delta: float, instant: bool) -> void:
 	else:
 		_zoom_current = move_toward(_zoom_current, zoom, delta * ZOOM_GLIDE_SPEED)
 		camera.fov = move_toward(camera.fov, _camera_fov_target, delta * FOV_GLIDE_SPEED)
-	var placement := camera_placement(target, _camera_forward(), _zoom_current)
+	# 首领出场的轻推：偏置单独衰减，玩家滚轮设定的 zoom 不受影响。
+	_zoom_kick = move_toward(_zoom_kick, 0.0, delta * OBJECTIVE_ZOOM_RECOVER)
+	var placement := camera_placement(target, _camera_forward(), _zoom_current + _zoom_kick)
 	# 目标位置本身已是逐帧插值后的平滑轨迹，相机再叠一层 lerp 只会引入滞后；
 	# 而朝向用的是即时 target，两者相位不一致正是移动时画面抖动的主因。
 	# 改为刚性锁定：角色在屏幕上保持稳定，背景匀速滚动（MOBA 的标准手感）。
@@ -1587,6 +1687,58 @@ func release_camera_focus() -> void:
 
 func is_camera_focusing_map() -> bool:
 	return _camera_focus.is_active()
+
+# --- 快捷信号（项 11.1）-----------------------------------------------------
+# 落点优先取「玩家正在指的地方」：键鼠是鼠标地面点，触屏是手动瞄准点；
+# 都没有（刚进场/指针在 UI 上）时退回英雄脚下，保证信号永远发得出去。
+
+func _resolve_signal_point() -> Vector2:
+	if touch_mode:
+		if _touch_aim_valid:
+			return _touch_aim
+	else:
+		if _mouse_valid:
+			return _mouse_ground
+	var local := _snapshot_local_hero()
+	if not local.is_empty():
+		return Vector2(float(local.get("x", 0.0)), float(local.get("y", 0.0)))
+	return Vector2.ZERO
+
+func _on_ping_wheel_opened() -> void:
+	_signal_target = _resolve_signal_point()
+	_signal_target_valid = true
+
+# 触屏手动加点（B7）：只是把 intent 塞进下一条输入，点数校验仍在 sim 侧。
+func _on_upgrade_requested(slot: String) -> void:
+	if HeroDefs.SKILL_SLOTS.has(slot):
+		_queued_upgrade = slot
+
+func _on_ping_requested(kind: String) -> void:
+	if not _signal_target_valid:
+		_signal_target = _resolve_signal_point()
+		_signal_target_valid = true
+	_queue_ping(kind, _signal_target)
+
+func _queue_ping(kind: String, world: Vector2) -> void:
+	if not PingRules.is_valid(kind) or _ping_cooldown > 0.0:
+		return
+	_ping_cooldown = PING_INPUT_COOLDOWN
+	_queued_ping = {
+		"kind": kind,
+		"x": clampf(world.x, -MapData.BOUNDS, MapData.BOUNDS),
+		"y": clampf(world.y, -MapData.BOUNDS, MapData.BOUNDS),
+	}
+
+# 一次性意图：写进这一帧的输入后立刻清空，避免 20Hz 输入把同一条标点重复广播。
+func _apply_pending_ping() -> void:
+	if _queued_ping.is_empty():
+		_local_input.ping_kind = ""
+		return
+	_local_input.ping_kind = str(_queued_ping.get("kind", ""))
+	_local_input.ping_x = float(_queued_ping.get("x", 0.0))
+	_local_input.ping_y = float(_queued_ping.get("y", 0.0))
+	_queued_ping = {}
+
 
 # 相机在地面上的可视范围。返回四角点（世界 XZ 顺序：左上、右上、右下、左下），
 # 用多边形而不是 AABB —— 透视下地面可视区是梯形，AABB 的中心会往远处偏，
@@ -2789,6 +2941,8 @@ func _build_map_features() -> void:
 
 	# 墙脚草：让石壁和草地之间有一圈植被过渡，而不是一条灰色石头直接插在绿地上。
 	_build_wall_tufts()
+	# 藤蔓：从石壁上半段垂下来的深绿草叶，补上「墙体只有几何、没有植被」的缺口。
+	_build_wall_vines()
 	# 基地旗/灯笼：给出生点一点阵营氛围，纯装饰、不参与碰撞。
 	_build_base_props()
 	# 野区兽骨/石碑：让野点不只是"圆盘 + 野怪"，也有环境叙事。
@@ -3147,6 +3301,84 @@ func _build_wall_tufts() -> void:
 	node.multimesh = multimesh
 	node.set_meta("tuft_points", points.duplicate())
 	node.material_override = GrassField.build_material()
+	node.custom_aabb = AABB(Vector3(-62.0, -2.0, -62.0), Vector3(124.0, 6.0, 124.0))
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_props_root.add_child(node)
+
+# WALL-03 藤蔓：从石壁中上段垂下来的深绿草叶。
+# 复用草簇的网格与 shader，但整体绕 X 轴转 180° 让叶片朝下，颜色压深，
+# 每处 2~3 条并排，读成「一帘藤」。仍然只用一个 MultiMeshInstance3D。
+func _build_wall_vines() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 66211
+	var strands: Array[Dictionary] = []
+	var walls: Array[Dictionary] = []
+	for wall in MapView.map_marks().walls:
+		walls.append({"a": wall.a, "b": wall.b, "boundary": false})
+	for wall in MapLayout.boundary_walls():
+		walls.append({"a": wall.a, "b": wall.b, "boundary": true})
+	for wall in walls:
+		var a: Vector2 = wall.a
+		var b: Vector2 = wall.b
+		var length := a.distance_to(b)
+		if length < 2.0:
+			continue
+		var dir := (b - a) / length
+		var perp := Vector2(-dir.y, dir.x)
+		var count := maxi(2, int(round(length / 2.8)))
+		var thickness := MapLayout.BOUNDARY_THICK if wall.boundary else MapLayout.WALL_THICKNESS
+		var center := (a + b) * 0.5
+		var sides: Array[float] = []
+		if wall.boundary:
+			sides = [1.0 if center.dot(perp) < 0.0 else -1.0]
+		else:
+			sides = [-1.0, 1.0]
+		for i in count:
+			var t := (float(i) + 0.5) / float(count)
+			var p := a.lerp(b, t) + dir * rng.randf_range(-0.7, 0.7)
+			for side in sides:
+				# 不铺满：成片的藤会把整面墙盖成绿幕，留出裸岩才像自然生长。
+				if rng.randf() < 0.42:
+					continue
+				var base := p + perp * side * (thickness * 0.5 + 0.09)
+				for _k in rng.randi_range(2, 3):
+					strands.append({
+						"point": base + dir * rng.randf_range(-0.32, 0.32),
+						"yaw": rng.randf_range(0.0, TAU),
+						"width": rng.randf_range(1.5, 2.2),
+						"length": rng.randf_range(4.2, 5.0),
+					})
+	if strands.is_empty():
+		return
+	var mesh := GrassField.build_mesh()
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = strands.size()
+	var placed: Array[Vector3] = []
+	var specs: Array[Dictionary] = []
+	for i in strands.size():
+		var strand: Dictionary = strands[i]
+		var point: Vector2 = strand.point
+		# 绕 X 轴翻 180°：草叶的 +Y 变 -Y，从墙顶垂下来。
+		var basis := Basis(Vector3.UP, float(strand.yaw)) \
+			* Basis(Vector3.RIGHT, PI) \
+			* Basis.from_scale(Vector3(float(strand.width), float(strand.length), float(strand.width)))
+		var origin := Vector3(point.x, MapLayout.WALL_CORE_HEIGHT - 0.02, point.y)
+		var xform := Transform3D(basis, origin)
+		multimesh.set_instance_transform(i, xform)
+		placed.append(origin)
+		specs.append({"transform": xform})
+	var material := GrassField.build_material()
+	material.set_shader_parameter("base_color", Color(0.04, 0.11, 0.03))
+	material.set_shader_parameter("tip_color", Color(0.16, 0.30, 0.09))
+	var node := MultiMeshInstance3D.new()
+	# 不能以 wall_ 开头：test_wall_look 把 wall_* 当作石构件统计材质。
+	node.name = "wallvine_curtain"
+	node.multimesh = multimesh
+	node.set_meta("vine_points", placed)
+	node.set_meta("vine_specs", specs)
+	node.material_override = material
 	node.custom_aabb = AABB(Vector3(-62.0, -2.0, -62.0), Vector3(124.0, 6.0, 124.0))
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(node)
@@ -3665,19 +3897,9 @@ func _build_scenery() -> void:
 			await _next_frame()
 
 func _lane_distance(point: Vector2) -> float:
-	var best := INF
-	for lane in MapData.LANE_ORDER:
-		var path: Array = MapData.lane_path(lane)
-		for i in range(path.size() - 1):
-			var a: Vector2 = path[i]
-			var b: Vector2 = path[i + 1]
-			var ab := b - a
-			var length_sq := ab.length_squared()
-			if length_sq < 0.0001:
-				continue
-			var t := clampf((point - a).dot(ab) / length_sq, 0.0, 1.0)
-			best = minf(best, point.distance_to(a + ab * t))
-	return best
+	# 最近兵线距离只有 MapIntel 一份实现：以前这里手抄过一遍同样的折线投影，
+	# 两边改路径时必然会漂移，植被就会长进路面或远离路面。
+	return float(MapIntel.nearest_lane(point).get("distance", INF))
 
 func _base_distance(point: Vector2) -> float:
 	return minf(point.distance_to(MapData.BLUE_BASE), point.distance_to(MapData.RED_BASE))
@@ -3746,6 +3968,13 @@ func _sync_units(snapshot: Dictionary, delta: float) -> void:
 		view.set_snapshot(entity, delta, _render_alpha, prev_xy)
 		view.process_visual(delta)
 	_sync_camp_states(snapshot)
+	# FX-11 低血红晕：只看本机英雄，死亡时强制关掉（否则复活读条 8 秒满屏红）。
+	if hud != null:
+		var local_hero := _snapshot_local_hero()
+		if local_hero.is_empty() or not bool(local_hero.get("alive", false)):
+			hud.set_low_health(1.0)
+		else:
+			hud.set_low_health(float(local_hero.get("hp", 1.0)) / maxf(1.0, float(local_hero.get("max_hp", 1.0))))
 
 	# 敌人离开视野：英雄不回收（等级/装备信息仍要在重新出现时立刻可用），但必须从画面消失。
 	for eid in _views:
@@ -4896,6 +5125,17 @@ func _process_events(events: Array) -> void:
 	# 召唤师技能的 summoner_cast 在这里归一。以前只认 skill，W/R 放出去毫无表现。
 	for request in SkillFx.requests(events):
 		_spawn_skill_fx(request)
+		# MON-04 技能预警：敌方 AOE 落地位置铺一圈红色危险圈。
+		# 不做"延迟伤害"式的假预警——sim 没有前摇，这里只是把危险范围画清楚，
+		# 让玩家在后续 0.6s 的余爆/残留里知道哪里不能站。
+		if str(request.get("team", "")) != "" and str(request.get("team", "")) != local_team:
+			var kind := str(request.get("kind", ""))
+			if DANGER_SKILL_KINDS.has(kind):
+				var aim: Vector2 = request.get("aim", Vector2.ZERO)
+				var radius := _recipe_radius(request.get("recipe", {}))
+				if radius >= 2.0:
+					_spawn_ring(Vector3(aim.x, 0.07, aim.y), Color(1.0, 0.24, 0.18),
+						radius * 0.97, radius, 0.6, 0.5, false, 1)
 	for event in events:
 		if not (event is Dictionary):
 			continue
@@ -4916,6 +5156,10 @@ func _process_events(events: Array) -> void:
 				_handle_hero_attack(event)
 			"hit":
 				_handle_hit_event(event)
+			"heal":
+				# FX-11 治疗飘字：绿色 + 号，位置在治疗者脚下（吸血/回复都走这里）。
+				var heal_pos := Vector3(float(event.get("x", 0.0)), 0.0, float(event.get("y", 0.0)))
+				_spawn_damage_number(heal_pos + Vector3(0, 1.9, 0), float(event.get("amount", 0.0)), Color(0.55, 0.95, 0.62), "+")
 			"death":
 				_handle_death_event(event)
 			"tower_destroyed":
@@ -4928,6 +5172,11 @@ func _process_events(events: Array) -> void:
 				_explosion(guard_pos, RED if str(event.get("team", "red")) == "red" else BLUE, 30)
 				_camera_shake = maxf(_camera_shake, 0.14)
 				_start_structure_collapse(event)
+			"ping_mark":
+				# 项 11.1：只画地面环 + 短时文字，不参与命中停顿/震屏，避免打断对线操作。
+				_spawn_ping_marker(event)
+				if hud != null:
+					hud.show_ping(event)
 			"crystal_shield_broken":
 				var crystal_pos := Vector3(float(event.get("x", 0.0)), 2.0, float(event.get("y", 0.0)))
 				_spawn_ring(crystal_pos, Color(0.55, 0.84, 1.0), 1.0, 8.0, 1.0)
@@ -4956,8 +5205,12 @@ func _process_events(events: Array) -> void:
 				for pit in MapLayout.OBJECTIVE_PITS:
 					var pit_pos := Vector3(float(pit.pos.x), 0.1, float(pit.pos.y))
 					_spawn_ring(pit_pos, Color(0.92, 0.66, 0.28), 1.0, 5.5, 1.0, 0.65)
+					# 2 秒的慢速预警环：在 1 秒冲击环散掉之后继续圈住坑位，
+					# 读成「这里已经有人了」，而不是一闪而过。
+					_spawn_ring(pit_pos, Color(1.0, 0.78, 0.36), 3.0, 5.8, 2.0, 0.28)
 					_spawn_particles(pit_pos + Vector3(0.0, 0.8, 0.0), GOLD, 16, 3.0, 0.1, 0.7)
 				_camera_shake = maxf(_camera_shake, 0.12)
+				_zoom_kick = maxf(_zoom_kick, OBJECTIVE_ZOOM_KICK * _fx_intensity())
 			"objective_killed":
 				var boss_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
 				_explosion(boss_pos, GOLD, 40)
@@ -5059,6 +5312,14 @@ func _handle_channel_break(entity_id: int, kind: String, pos: Vector3) -> void:
 # 技能表现：照着 SkillFx 的配方放环 / 粒子 / 抛射物 / 光带 / 震屏。
 # 不看「_views 里有没有这个英雄」——事件自带坐标，镜头外或刚进视野的施法也该有表现，
 # 否则会出现「听得到音效、看不到画面」。view 只用来播施法动作。
+static func _recipe_radius(recipe: Dictionary) -> float:
+	# 危险圈取配方里最大的落地半径：预警圈必须把后续余爆真正覆盖到的范围圈住，
+	# 不能只按主环画一个小圈。
+	var best := 0.0
+	for ring in recipe.get("rings", []):
+		best = maxf(best, float(ring.get("to", 0.0)))
+	return best
+
 func _spawn_skill_fx(request: Dictionary) -> void:
 	# 计数放在最前面：即使特效根节点还没建好（进场分帧构建期间），
 	# 也能证明「这条事件确实被技能表现链路消费了」，便于排查静默失效。
@@ -5384,6 +5645,16 @@ func _handle_hit_event(event: Dictionary) -> void:
 	var target_type := str(event.get("target_type", ""))
 	var color := Color(1.0, 0.92, 0.72) if amount >= 150.0 else Color(0.95, 0.96, 1.0)
 	_spawn_damage_number(pos + Vector3(0, 1.7 if target_type == "hero" else 1.0, 0), amount, color)
+	# FX-11 护盾吸收：蓝色「盾 N」飘在伤害数字上方。全额被盾吃掉时 amount=0，
+	# 这时更要显示吸收量，否则玩家会觉得这一下完全没打中。
+	var absorbed := float(event.get("absorbed", 0.0))
+	if absorbed > 0.5:
+		_spawn_damage_number(
+			pos + Vector3(0, 2.05 if target_type == "hero" else 1.35, 0),
+			absorbed,
+			Color(0.58, 0.84, 1.0),
+			"盾 "
+		)
 	# 受击反馈对所有单位生效：英雄/小兵/野怪被命中时都要缩身 + 闪白，
 	# 否则打野和清兵只剩飘字，模型毫无反应。
 	var view: UnitVisual = _views.get(target_id)
@@ -5427,6 +5698,9 @@ func _handle_death_event(event: Dictionary) -> void:
 		var is_local_killer := (killer_id == _local_entity_id)
 		var local_involved := is_local_victim or is_local_killer
 		_trigger_hit_stop(0.09 if local_involved else 0.05, 0.34 if local_involved else 0.16)
+		# FX-07：只在本机参与的击杀上做慢动作，远处换人头的团战不抢节奏。
+		if local_involved:
+			_trigger_kill_slow_mo()
 
 		# 多杀 / 一血 / 终结由模拟侧统一判定，联机两端看到的是同一份结果。
 		var announce_code := str(event.get("announcement", ""))
@@ -5698,10 +5972,11 @@ func _update_decals(delta: float) -> void:
 				material.emission_energy_multiplier = 0.8 * fade
 		i -= 1
 
-func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
+func _spawn_damage_number(pos: Vector3, amount: float, color: Color, prefix := "") -> void:
 	if _effects_root == null:
 		return
-	var slot: Dictionary = take_particle_slot(_damage_labels_pool, _damage_labels_active)
+	# 飘字是身份信息（FX-08 明确必须留），用 P1：预算耗尽或同池抢占时都不该丢它。
+	var slot: Dictionary = take_particle_slot(_damage_labels_pool, _damage_labels_active, 1)
 	if slot.is_empty():
 		return
 	var label: Label3D = slot.get("node")
@@ -5713,7 +5988,8 @@ func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 	# 代际号：被抢占的节点，上一次的归还回调必须作废，避免同一个节点被放回池两次。
 	var generation := int(label.get_meta("generation", 0)) + 1
 	label.set_meta("generation", generation)
-	label.text = str(int(round(amount)))
+	label.set_meta("fx_priority", 1)
+	label.text = "%s%d" % [prefix, roundi(amount)]
 	label.modulate = color
 	label.position = pos + Vector3(randf_range(-0.25, 0.25), 0.0, randf_range(-0.25, 0.25))
 	label.visible = true
@@ -5735,10 +6011,12 @@ func _spawn_damage_number(pos: Vector3, amount: float, color: Color) -> void:
 	)
 	label.set_meta("tween", tween)
 
-func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float, alpha := 0.65, tilt := false) -> void:
+func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float, duration: float, alpha := 0.65, tilt := false, priority := 1) -> void:
 	if _effects_root == null:
 		return
-	var slot: Dictionary = take_particle_slot(_ring_pool, _ring_active)
+	if not _fx_allowed(priority, pos):
+		return
+	var slot: Dictionary = take_particle_slot(_ring_pool, _ring_active, priority)
 	if slot.is_empty():
 		return
 	var ring: MeshInstance3D = slot.get("node")
@@ -5748,6 +6026,7 @@ func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float,
 			(old_tween as Tween).kill()
 	var generation := int(ring.get_meta("generation", 0)) + 1
 	ring.set_meta("generation", generation)
+	ring.set_meta("fx_priority", priority)
 	var material := ring.material_override as StandardMaterial3D
 	if material == null:
 		material = _make_fx_material(BaseMaterial3D.BLEND_MODE_ADD)
@@ -5778,21 +6057,81 @@ func _spawn_ring(pos: Vector3, color: Color, from_scale: float, to_scale: float,
 	)
 	ring.set_meta("tween", tween)
 
-# 从池里取一个粒子节点：优先空闲池，其次抢占最老的活动节点。
-# 抽成静态函数是为了能在无头环境里断言「不会把同一个节点借两次」——
-# 真机上它只由 _spawn_particles 调用，两个数组会被就地修改（pop）。
-static func take_particle_slot(pool: Array, active: Array) -> Dictionary:
+# 从池里取一个粒子节点：优先空闲池，其次抢占同/低优先级的活动节点。
+# priority 数字越小越重要：P0 终局、P1 技能主环/击杀、P2 普通命中、P3 纯装饰。
+# 池里全是比自己更重要（数字更小）的节点时不抢 —— 宁可丢这一簇，也不掐掉别人的击杀环。
+# P0/P1 同级之间同样不抢（见下方），只有 P2/P3 会互相 reuse。
+# 抽成静态函数是为了能在无头环境里断言「不会把同一个节点借两次」以及优先级抢占。
+static func take_particle_slot(pool: Array, active: Array, priority := 2) -> Dictionary:
 	if not pool.is_empty():
 		return {"node": pool.pop_back(), "stolen": false}
-	if not active.is_empty():
-		return {"node": active.pop_front(), "stolen": true}
-	return {}
+	var steal_index := -1
+	var steal_rank := -1
+	for index in active.size():
+		var node: Variant = active[index]
+		var rank := 2
+		if node is Node:
+			rank = int((node as Node).get_meta("fx_priority", 2))
+		elif node is Dictionary:
+			# 无头测试用字典伪造活动节点，避免为了测抢占去建 30 个真实粒子。
+			rank = int((node as Dictionary).get("priority", 2))
+		if rank < priority:
+			continue
+		# P0/P1 是同级的身份信息（终局、击杀环、技能主环），同级之间也不抢：
+		# 两个终局反馈撞在一起时，宁可丢新来的那一个，也不要抹掉正在播的终局。
+		if rank == priority and priority <= 1:
+			continue
+		# 越大越不重要，优先抢最不重要的；同级保持最老（active 头部）。
+		if rank > steal_rank:
+			steal_rank = rank
+			steal_index = index
+	if steal_index < 0:
+		return {}
+	return {"node": active.pop_at(steal_index), "stolen": true}
 
-func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, size := 0.12, lifetime := 0.55, texture := "") -> void:
+# 快捷信号落点：地面扩散环 + 上浮文字，1.6 秒淡出。信号很频繁但不该像技能一样抢镜，
+# 所以不走技能特效池、不做震屏，Label3D 临时创建后自毁（每次最多 4 个/秒，量可控）。
+func _spawn_ping_marker(event: Dictionary) -> void:
+	var kind := str(event.get("kind", ""))
+	if not PingRules.is_valid(kind):
+		return
+	var pos := Vector3(float(event.get("x", 0.0)), 0.12, float(event.get("y", 0.0)))
+	var color := PingRules.color(kind)
+	_spawn_ring(pos, color, 0.5, 2.6, 0.8, 0.8, false, 2)
+	_spawn_particles(pos + Vector3(0.0, 0.6, 0.0), color, 8, 2.0, 0.08, 0.45, "", 3)
 	if _effects_root == null:
 		return
+	var label := Label3D.new()
+	label.text = PingRules.label(kind)
+	label.font = FONT_SC
+	label.font_size = 48
+	label.pixel_size = 0.005
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = true
+	label.outline_size = 12
+	label.outline_modulate = Color(0.0, 0.0, 0.0, 0.85)
+	label.modulate = color
+	label.position = pos + Vector3(0.0, 1.7, 0.0)
+	_effects_root.add_child(label)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(label, "position:y", label.position.y + 1.0, 1.6)
+	tween.tween_property(label, "modulate:a", 0.0, 1.6)
+	tween.chain().tween_callback(func():
+		if is_instance_valid(label):
+			label.queue_free()
+	)
+
+func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, size := 0.12, lifetime := 0.55, texture := "", priority := 2) -> void:
+	if _effects_root == null:
+		return
+	# FX-08：远处只留身份信息、本帧预算耗尽就丢装饰簇，均计入 fx_dropped。
+	if not _fx_allowed(priority, pos):
+		return
 	particle_bursts += 1
-	var slot: Dictionary = take_particle_slot(_hit_particles_pool, _hit_particles_active)
+	# FX-09：强度滑杆只缩颗数；技能主环与飘字不走这里，所以读技能不受影响。
+	amount = FxIntensity.scale_particles(amount, _fx_intensity())
+	var slot: Dictionary = take_particle_slot(_hit_particles_pool, _hit_particles_active, priority)
 	if slot.is_empty():
 		return
 	var p: GPUParticles3D = slot.get("node")
@@ -5804,6 +6143,7 @@ func _spawn_particles(pos: Vector3, color: Color, amount := 14, speed := 3.5, si
 	# 否则会把正在使用中的节点又塞回池里，造成同一节点被借两次。
 	var generation := int(p.get_meta("generation", 0)) + 1
 	p.set_meta("generation", generation)
+	p.set_meta("fx_priority", priority)
 	p.position = pos
 	p.amount = amount
 	p.lifetime = lifetime
@@ -6038,10 +6378,10 @@ func _spawn_lance(from: Vector3, to: Vector3, color: Color, radius: float, durat
 	)
 	lance.set_meta("tween", tween)
 
-func _explosion(pos: Vector3, color: Color, amount: int) -> void:
-	_spawn_particles(pos, color, amount, 6.0, 0.16, 0.7)
-	_spawn_particles(pos, Color(1.0, 0.85, 0.55), int(amount * 0.5), 4.0, 0.1, 0.5)
-	_spawn_ring(Vector3(pos.x, 0.12, pos.z), color, 0.6, 4.5, 0.55)
+func _explosion(pos: Vector3, color: Color, amount: int, priority := 1) -> void:
+	_spawn_particles(pos, color, amount, 6.0, 0.16, 0.7, "", priority)
+	_spawn_particles(pos, Color(1.0, 0.85, 0.55), int(amount * 0.5), 4.0, 0.1, 0.5, "", priority)
+	_spawn_ring(Vector3(pos.x, 0.12, pos.z), color, 0.6, 4.5, 0.55, 0.65, false, priority)
 
 # 英雄特效色：谱系色只认这几个英雄。static 是为了让纯函数
 # hero_attack_fx_plan() 也能取到同一份颜色（测试要断言「不同英雄颜色不同」）。
@@ -6061,10 +6401,10 @@ static func _hero_vfx_color(hero_type: String) -> Color:
 
 func _build_ambient_particles() -> void:
 	var particles := GPUParticles3D.new()
-	# 36 个光点在 1600×900 下几乎看不到；120 个才像"空气里有浮尘"。
-	# 移动端保守到 60，仍是单批次，不增加 draw call 层级。
-	particles.amount = 60 if OS.has_feature("mobile") else 120
-	particles.lifetime = 14.0
+	# SCENE-03 目标：桌面 400 / 移动端 200（旧版 120/60 在地图尺度下仍像「没有空气」）。
+	# 仍是单批次 + 小四边形，粒子数量翻三倍也只是 GPU 顶点压力，不增加 draw call 层级。
+	particles.amount = 200 if OS.has_feature("mobile") else 400
+	particles.lifetime = 16.0
 	particles.visibility_aabb = AABB(Vector3(-70, -2, -70), Vector3(140, 18, 140))
 	var process := ParticleProcessMaterial.new()
 	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
@@ -6074,7 +6414,17 @@ func _build_ambient_particles() -> void:
 	process.initial_velocity_min = 0.08
 	process.initial_velocity_max = 0.35
 	process.gravity = Vector3(0, 0.015, 0)
-	process.color = Color(1.0, 0.88, 0.6, 0.45)
+	# 单批次覆盖全图，无法按区域拆色；用一条「青 → 绿 → 金」的生命期渐变，
+	# 视觉上同时出现河道、野区、基地三种浮尘色，而不是清一色暖白。
+	process.color = Color.WHITE
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(0.35, 0.9, 0.95, 0.0))
+	ramp.set_color(1, Color(1.0, 0.88, 0.6, 0.0))
+	ramp.add_point(0.3, Color(0.5, 0.88, 0.62, 0.42))
+	ramp.add_point(0.7, Color(1.0, 0.85, 0.55, 0.42))
+	var ramp_texture := GradientTexture1D.new()
+	ramp_texture.gradient = ramp
+	process.color_ramp = ramp_texture
 	particles.process_material = process
 	var quad := QuadMesh.new()
 	quad.size = Vector2(0.05, 0.05)

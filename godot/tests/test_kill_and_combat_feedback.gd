@@ -3,6 +3,39 @@ extends "res://tests/test_base.gd"
 const CombatAnnouncer = preload("res://sim/combat_announcer.gd")
 const HitStopManager = preload("res://scripts/view/hit_stop_manager.gd")
 const MatchSim = preload("res://sim/match_sim.gd")
+const Arena = preload("res://scripts/game/arena.gd")
+
+# ---------------------------------------------------------------- FX-07 击杀慢动作
+
+func test_kill_slow_mo_dips_then_recovers() -> void:
+	var arena: Node3D = Arena.new()
+	var saved := GameSettings.fx_intensity
+	GameSettings.fx_intensity = 1.0
+	arena._trigger_kill_slow_mo()
+	near(arena._cinematic_scale, Arena.KILL_SLOW_SCALE, 0.01, "击杀必须把模拟时间压到慢动作档")
+	# 慢动作只持续一小段，之后必须回到 1.0（否则整局都在慢放）。
+	arena._tick_cinematic(Arena.KILL_SLOW_SECONDS + 0.01)
+	near(arena._cinematic_scale, 1.0, 0.001, "慢动作必须自动恢复")
+	GameSettings.fx_intensity = saved
+	arena.free()
+
+func test_kill_slow_mo_respects_intensity_and_client_role() -> void:
+	var arena: Node3D = Arena.new()
+	var saved := GameSettings.fx_intensity
+	GameSettings.fx_intensity = 0.0
+	arena._trigger_kill_slow_mo()
+	near(arena._cinematic_scale, 1.0, 0.001, "特效强度 0 时不做慢动作")
+	GameSettings.fx_intensity = 1.0
+	arena.authoritative = false
+	arena._trigger_kill_slow_mo()
+	near(arena._cinematic_scale, 1.0, 0.001, "客机不做本地慢动作（避免与服务端脱节）")
+	arena.authoritative = true
+	GameSettings.fx_intensity = 0.5
+	arena._trigger_kill_slow_mo()
+	check(arena._cinematic_scale > Arena.KILL_SLOW_SCALE and arena._cinematic_scale < 1.0,
+		"强度 0.5 时慢动作幅度应介于慢放档与 1.0 之间：%f" % arena._cinematic_scale)
+	GameSettings.fx_intensity = saved
+	arena.free()
 
 func test_first_blood_and_multi_kill_detection() -> void:
 	var announcer := CombatAnnouncer.new()

@@ -1,22 +1,13 @@
 extends RefCounted
 
-# 只读的地图情报查询：把「点了地图上的哪个位置」翻译成可展示的区域与附近单位。
-# 纯数学 + 快照读取，不依赖任何节点，可在无头测试里直接验证。
+# 只读的地图语义查询：把世界坐标翻译成可展示的区域。
+# 纯数学，不依赖任何节点，可在无头测试里直接验证。
+# 近期情报面板的统计接口（inspect）随面板一起移除；区域分类与最近兵线
+# 仍被表现层（arena 的植被避让）与地图契约测试共用。
 
 const MapData = preload("res://sim/map_data.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 
-const INSPECT_RADIUS := 16.0
-const MAX_UNITS := 4
-
-const TYPE_LABEL := {
-	"hero": "英雄",
-	"minion": "小兵",
-	"tower": "防御塔",
-	"guard": "双子塔",
-	"base": "主堡",
-	"monster": "野怪",
-}
 const LANE_LABEL := {
 	"mid": "中路",
 	"top": "上路",
@@ -119,62 +110,3 @@ static func nearest_lane(point: Vector2) -> Dictionary:
 			if distance < float(best.distance):
 				best = {"lane": lane, "distance": distance}
 	return best
-
-# snapshot 为只读快照；统计口径与 HUD 一致：
-# 死亡单位不算，发起者自己不算，只保留半径内单位并按距离由近到远排序。
-static func inspect(
-	snapshot: Dictionary,
-	point: Vector2,
-	local_owner: String,
-	_local_team := "blue",
-	radius := INSPECT_RADIUS
-) -> Dictionary:
-	var region := region_at(point)
-	var units: Array = []
-	var counts := {"blue": 0, "red": 0}
-	var hero_found := false
-	var hero_distance := -1.0
-	for entity in snapshot.get("entities", []):
-		if not bool(entity.get("alive", false)):
-			continue
-		var kind := str(entity.get("type", ""))
-		if not TYPE_LABEL.has(kind):
-			continue
-		var entity_pos := Vector2(float(entity.get("x", 0.0)), float(entity.get("y", 0.0)))
-		if kind == "hero" and str(entity.get("owner_id", "")) == local_owner:
-			hero_found = true
-			hero_distance = point.distance_to(entity_pos)
-			continue
-		var distance := point.distance_to(entity_pos)
-		if distance > radius:
-			continue
-		var team := str(entity.get("team", "blue"))
-		counts[team] = int(counts.get(team, 0)) + 1
-		units.append({
-			"id": int(entity.get("id", -1)),
-			"kind": kind,
-			"team": team,
-			"label": _label(entity, kind),
-			"level": int(entity.get("level", 0)),
-			"hp": float(entity.get("hp", 0.0)),
-			"max_hp": maxf(1.0, float(entity.get("max_hp", 0.0))),
-			"distance": distance,
-		})
-	units.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return float(a.distance) < float(b.distance)
-	)
-	return {
-		"point": point,
-		"region": region,
-		"radius": radius,
-		"units": units.slice(0, MAX_UNITS),
-		"total": units.size(),
-		"counts": counts,
-		"hero_found": hero_found,
-		"hero_distance": hero_distance,
-	}
-
-static func _label(entity: Dictionary, kind: String) -> String:
-	if kind == "hero":
-		return str(entity.get("name", "英雄"))
-	return str(TYPE_LABEL.get(kind, "单位"))

@@ -63,9 +63,6 @@ const OTHER_BAR_SIZE := Vector2(1.24, 0.14)
 # 与真实受击范围一致，普攻距离才不会读成「隔空打」。
 const TYRANT_HEIGHT := 3.8
 const OVERLORD_HEIGHT := 4.2
-# 首领血条比普通野怪宽 1.55 倍（≈ 英雄血条宽度），4 米高的身板上
-# 1.1 米宽的细条会小到读不出剩余血量。
-const OBJECTIVE_BAR_WIDTH := 1.55
 
 const UAL1 := preload("res://assets/animations/ual1.glb")
 const UAL2 := preload("res://assets/animations/ual2.glb")
@@ -86,6 +83,9 @@ const HERO_SETUPS := {
 		"idle": "Sword_Idle",
 		"outfit_tint": Color(0.33, 0.52, 0.28),
 		"tint_amount": 0.1,
+		# HERO-02：头发与服装同色系，避免「绿衣配一头原色灰发」的拼装感。
+		"hair_tint": Color(0.36, 0.34, 0.22),
+		"hair_tint_amount": 0.35,
 	},
 	"mage": {
 		"body": preload("res://assets/characters/hero_mage.glb"),
@@ -102,6 +102,8 @@ const HERO_SETUPS := {
 		"idle": "Spell_Simple_Idle",
 		"outfit_tint": Color(0.34, 0.3, 0.78),
 		"tint_amount": 0.5,
+		"hair_tint": Color(0.62, 0.56, 0.78),
+		"hair_tint_amount": 0.3,
 	},
 	"tank": {
 		"body": preload("res://assets/characters/hero_warrior.glb"),
@@ -118,6 +120,8 @@ const HERO_SETUPS := {
 		"idle": "Sword_Idle",
 		"outfit_tint": Color(0.6, 0.36, 0.2),
 		"tint_amount": 0.45,
+		"hair_tint": Color(0.42, 0.28, 0.18),
+		"hair_tint_amount": 0.35,
 	},
 	"archer": {
 		"body": preload("res://assets/characters/hero_mage.glb"),
@@ -134,6 +138,8 @@ const HERO_SETUPS := {
 		"idle": "Spell_Simple_Idle",
 		"outfit_tint": Color(0.16, 0.5, 0.5),
 		"tint_amount": 0.45,
+		"hair_tint": Color(0.72, 0.42, 0.24),
+		"hair_tint_amount": 0.3,
 	},
 	"assassin": {
 		"body": preload("res://assets/characters/hero_mage.glb"),
@@ -150,6 +156,8 @@ const HERO_SETUPS := {
 		"idle": "Sword_Idle",
 		"outfit_tint": Color(0.32, 0.15, 0.44),
 		"tint_amount": 0.6,
+		"hair_tint": Color(0.34, 0.18, 0.36),
+		"hair_tint_amount": 0.4,
 	},
 }
 
@@ -182,12 +190,14 @@ const ATTACK_LUNGE_DISTANCE := 0.16
 const MONSTER_LUNGE_SCALE := 2.2
 const MONSTER_LUNGE_MAX := 0.62
 
+# 普攻动作：五个人必须长得不一样 —— 换英雄不能只是换颜色。
+# 剑士横斩 / 法师施法 / 重装竖劈 / 弓手单臂速射 / 刺客直刺。
 const ANIM_ATTACK := {
 	"blade": "Sword_Regular_A",
 	"mage": "Spell_Simple_Shoot",
 	"tank": "Sword_Regular_B",
-	"archer": "Spell_Simple_Shoot",
-	"assassin": "Sword_Regular_A",
+	"archer": "Pistol_Shoot",
+	"assassin": "Punch_Cross",
 }
 const ANIM_Q := {
 	"blade": "Sword_Regular_C",
@@ -264,6 +274,10 @@ var flash_mesh: MeshInstance3D = null
 var shield_bubble: MeshInstance3D = null
 var buff_aura: MeshInstance3D = null
 var slow_ring: MeshInstance3D = null
+# FX-11 状态可视：加速风线（只有移动时才亮）与免控金色护体。
+# 两者都复用 _make_status_ring，避免又引入一套几何/材质。
+var haste_ring: MeshInstance3D = null
+var immune_aura: MeshInstance3D = null
 # 硬控状态环（项 4，链路 5）：眩晕/击飞/沉默/定身各有各的环，
 # 玩家必须一眼看出"对方是被打晕了"还是"被封了技能"——这两种的应对完全不同。
 # 复用 _make_status_ring，不再另造一套几何。
@@ -476,6 +490,10 @@ func _build_hero() -> void:
 		if slot == "outfit":
 			var tint_color: Color = setup_data.get("outfit_tint", Color.WHITE)
 			ModelUtils.tint(model, tint_color, float(setup_data.get("tint_amount", 0.0)))
+		elif slot == "hair":
+			# HERO-02：头发跟服装同色系。只染发色，不动发型/贴图。
+			var hair_color: Color = setup_data.get("hair_tint", Color.WHITE)
+			ModelUtils.tint(model, hair_color, float(setup_data.get("hair_tint_amount", 0.0)))
 		ModelUtils.tint(model, team_tint, team_tint_amount)
 		_attach_retargeted_player(model)
 	var measured_height := ModelUtils.relative_aabb(model_root).size.y
@@ -922,6 +940,20 @@ func _build_status_fx(height: float, radius: float) -> void:
 	slow_ring.visible = false
 	add_child(slow_ring)
 
+	# 加速风线：青白色细环，只在移动时点亮，和减速环（蓝）区分开。
+	haste_ring = _make_status_ring(maxf(radius * 0.78, 0.40), 0.038, Color(0.55, 1.0, 0.92, 0.6))
+	haste_ring.name = "HasteRing"
+	haste_ring.position.y = 0.09
+	haste_ring.visible = false
+	add_child(haste_ring)
+
+	# 免控护体：更宽的金色环，位置略高，避免和 BUFF/减速环叠在一起看不清。
+	immune_aura = _make_status_ring(maxf(radius * 1.18, 0.58), 0.05, Color(1.0, 0.9, 0.5, 0.75))
+	immune_aura.name = "ImmuneAura"
+	immune_aura.position.y = 0.12
+	immune_aura.visible = false
+	add_child(immune_aura)
+
 	# 硬控环：每种控一个环，颜色与控制含义对应。
 	# 高度分层：眩晕最内、沉默最外，避免多个控同时存在时完全重叠成一团。
 	for entry in CC_RING_SPECS:
@@ -977,6 +1009,10 @@ func _update_status_fx(data: Dictionary) -> void:
 			buff_aura.visible = false
 		if slow_ring:
 			slow_ring.visible = false
+		if haste_ring:
+			haste_ring.visible = false
+		if immune_aura:
+			immune_aura.visible = false
 		for entry in CC_RING_SPECS:
 			var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
 			if cc_ring != null:
@@ -1008,6 +1044,11 @@ func _update_status_fx(data: Dictionary) -> void:
 		buff_aura.visible = key != ""
 	if slow_ring:
 		slow_ring.visible = float(data.get("slow_timer", 0.0)) > 0.0
+	if haste_ring:
+		# 站着不动时不画风线：否则「加速」会变成常驻光圈，没加速也像加了速。
+		haste_ring.visible = float(data.get("haste_timer", 0.0)) > 0.0 and bool(data.get("moving", false))
+	if immune_aura:
+		immune_aura.visible = float(data.get("cc_immune_timer", 0.0)) > 0.0
 	# 硬控环（项 4）：按各控的剩余时间点亮。
 	# 用计时而不是只用 cc_status：cc_status 只给"最重的那一个"，
 	# 同时中两种控时另一个也会亮，玩家才能看到完整状态。
@@ -1513,6 +1554,10 @@ func _update_dead_state(alive: bool) -> void:
 			buff_aura.visible = false
 		if slow_ring:
 			slow_ring.visible = false
+		if haste_ring:
+			haste_ring.visible = false
+		if immune_aura:
+			immune_aura.visible = false
 		# 硬控环同样要清：复活后若还留着眩晕环，玩家会以为"复活了还是被控着"。
 		for entry in CC_RING_SPECS:
 			var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
@@ -1550,6 +1595,10 @@ func _update_dead_state(alive: bool) -> void:
 			buff_aura.visible = false
 		if slow_ring:
 			slow_ring.visible = false
+		if haste_ring:
+			haste_ring.visible = false
+		if immune_aura:
+			immune_aura.visible = false
 		_shown_hp = 0.0
 		if bar_material:
 			bar_material.set_shader_parameter("ratio", 0.0)
@@ -1655,6 +1704,11 @@ func play_attack_reaction(strength := 1.0) -> void:
 	_attack_lunge_timer = ATTACK_LUNGE_SECONDS
 
 func process_visual(delta: float) -> void:
+	# 状态环转动：静止的环看起来像贴图污点，转动才像「正在生效」。
+	if haste_ring != null and haste_ring.visible:
+		haste_ring.rotation.y += delta * 9.0
+	if immune_aura != null and immune_aura.visible:
+		immune_aura.rotation.y -= delta * 2.4
 	_update_hit_reaction(delta)
 	if bush_eye != null and bush_eye.visible:
 		# 轻微呼吸 + 透明度起伏：静止的眼睛会被当成贴图污点。

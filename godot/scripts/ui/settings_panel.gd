@@ -25,8 +25,8 @@ func _ready() -> void:
 	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
 	panel.offset_left = -260.0
 	panel.offset_right = 260.0
-	panel.offset_top = -250.0
-	panel.offset_bottom = 250.0
+	panel.offset_top = -285.0
+	panel.offset_bottom = 285.0
 	panel.add_theme_stylebox_override(
 		"panel",
 		GameTheme.style(GameTheme.PANEL, Color(0.72, 0.56, 0.28, 0.95), 2, 14)
@@ -52,6 +52,10 @@ func _ready() -> void:
 	box.add_child(_slider_row("音效", GameSettings.sfx_volume, func(value: float):
 		GameSettings.sfx_volume = value
 		GameSettings.apply_audio()
+	))
+	# FX-09：只缩放装饰粒子与震屏，技能主环/飘字不受影响，所以调低也能读技能。
+	box.add_child(_slider_row("特效强度", GameSettings.fx_intensity, func(value: float):
+		GameSettings.fx_intensity = clampf(value, 0.0, 1.0)
 	))
 
 	box.add_child(_quality_row())

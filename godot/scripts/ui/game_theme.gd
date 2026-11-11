@@ -208,6 +208,54 @@ static func ornate_panel() -> StyleBoxTexture:
 	box.content_margin_bottom = 14.0
 	return box
 
+# 小地图 / HUD 小面板：同一张金框，但把 9-slice 边和内容内缩都压到 16/8，
+# 否则 24px 边会把 200px 的小地图正面吃掉一圈。
+static func minimap_frame() -> StyleBoxTexture:
+	var box := ornate_panel()
+	box.texture_margin_left = 16.0
+	box.texture_margin_right = 16.0
+	box.texture_margin_top = 16.0
+	box.texture_margin_bottom = 16.0
+	box.content_margin_left = 8.0
+	box.content_margin_right = 8.0
+	box.content_margin_top = 8.0
+	box.content_margin_bottom = 8.0
+	return box
+
+# 大厅队伍面板：金框按队伍色相重染，蓝/红各一套边。
+# 不做两张新图：把金色（色相约 0.12）平移到目标色相，保留明暗与雕花，
+# 于是「边框颜色」直接承担队伍语义，而不是额外加一条色条。
+static var _team_frames: Dictionary = {}
+
+static func team_panel(team: String) -> StyleBoxTexture:
+	var key := "blue" if team == "blue" else "red"
+	if _team_frames.has(key):
+		return _team_frames[key]
+	var box := ornate_panel()
+	# 外层面板自己已经有 MarginContainer，内容内缩归零，避免双层留白。
+	box.content_margin_left = 0.0
+	box.content_margin_right = 0.0
+	box.content_margin_top = 0.0
+	box.content_margin_bottom = 0.0
+	if box.texture != null:
+		var img := box.texture.get_image()
+		if img != null and not img.is_empty():
+			if img.is_compressed():
+				img.decompress()
+			img.convert(Image.FORMAT_RGBA8)
+			var target_hue := 0.58 if key == "blue" else 0.995
+			for y in img.get_height():
+				for x in img.get_width():
+					var color := img.get_pixel(x, y)
+					if color.a <= 0.01:
+						continue
+					# 保留 12% 的原色相差异，让雕花的高光/阴影还有冷暖层次。
+					var hue := target_hue + (color.h - 0.118) * 0.12
+					img.set_pixel(x, y, Color.from_hsv(fposmod(hue, 1.0), color.s, color.v, color.a))
+			box.texture = ImageTexture.create_from_image(img)
+	_team_frames[key] = box
+	return box
+
 static func portrait_path(hero_type: String) -> String:
 	return "res://assets/ui/portraits/%s.png" % hero_type
 

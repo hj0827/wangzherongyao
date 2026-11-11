@@ -1,6 +1,6 @@
 extends RefCounted
 
-# 纯逻辑目标仲裁：sim 直接调用，UI 侧的 TargetingSystem 只是转发同一份规则，
+# 纯逻辑目标仲裁：sim 与 UI 都直接调用这一份规则，
 # 避免「界面按补刀键、模拟仍按最近目标」的双实现漂移。
 
 const MAX_LOCK_DISTANCE := 14.0
