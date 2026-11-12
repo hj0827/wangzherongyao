@@ -7,13 +7,15 @@ signal ready_for_battle
 
 const MatchSim = preload("res://sim/match_sim.gd")
 const MapData = preload("res://sim/map_data.gd")
-const MapIntel = preload("res://sim/map_intel.gd")
+const MapGeometry = preload("res://scripts/game/map_geometry.gd")
 const PingRules = preload("res://sim/ping_rules.gd")
 const FxIntensity = preload("res://scripts/game/fx_intensity.gd")
+const EventRouter = preload("res://scripts/game/event_router.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
 const ModelUtils = preload("res://scripts/game/model_utils.gd")
 const TowerVisual = preload("res://scripts/game/tower_visual.gd")
+const CrystalVisual = preload("res://scripts/game/crystal_visual.gd")
 const TerrainBuilder = preload("res://scripts/game/terrain_builder.gd")
 const ArenaLook = preload("res://scripts/game/arena_look.gd")
 const OcclusionFade = preload("res://scripts/game/occlusion_fade.gd")
@@ -26,6 +28,9 @@ const InputAssist = preload("res://scripts/game/input_assist.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
 const MapView = preload("res://scripts/game/map_view.gd")
 const LaneRoad = preload("res://scripts/game/lane_road.gd")
+const BridgeBuilder = preload("res://scripts/game/bridge_builder.gd")
+const RiverBuilder = preload("res://scripts/game/river_builder.gd")
+const LaneEdges = preload("res://scripts/game/lane_edges.gd")
 const BushFeedback = preload("res://scripts/game/bush_feedback.gd")
 const ChannelFeedback = preload("res://scripts/game/channel_feedback.gd")
 const ChannelFx = preload("res://scripts/game/channel_fx.gd")
@@ -44,35 +49,15 @@ const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 const CAMP_SIGIL_SHADER := "res://shaders/camp_sigil.gdshader"
 
 const ENV_DIR := "res://assets/environment/"
-# 桥体尺寸。三路各一座：中路在河心（地图中心），上下路各在自己 L 形的拐角处跨河。
-# 桥面是**兵线路径截出来的一段连续带**，不是一块旋转 45° 的直板 ——
-# 边路的跨河点正好压在上路的圆角上，直板会把桥端斜着切进路面，护栏从路中间断开。
-const BRIDGE_WIDTH := 10.6
-const BRIDGE_SPAN_MID := 26.0
-const BRIDGE_SPAN_EDGE := 20.0
-# 桥面高出路面 2cm：路面最上层 0.055，桥面 0.075。压低会被路面盖住，
-# 抬高就会在桥头出现一道台阶。
-const BRIDGE_DECK_Y := 0.075
-# 桥头接坡：把桥面从 10.6m 收到路肩 9.75m，高度压到 0.05（低于路面 0.055 的一半），
-# 接坡尾端直接沉进路面，接缝只有一条材质线，没有台阶。
-const BRIDGE_APPROACH := 1.6
-const BRIDGE_APPROACH_Y := 0.05
-# 护栏：0.42m 高的矮栏，沿路缘弯过去；两端各一根门柱收口。
-# 偏移 4.6 贴着桥面外沿（半宽 5.3）留 0.7m 走边，同时避开路面石墩（4.31）。
-const BRIDGE_RAIL_OFFSET := 4.6
-const BRIDGE_RAIL_WIDTH := 0.34
-const BRIDGE_RAIL_HEIGHT := 0.42
-const BRIDGE_RAIL_STEP := 1.7
-const BRIDGE_RAIL_INSET := 0.9
-const BRIDGE_POST_SIZE := 0.56
-const BRIDGE_POST_HEIGHT := 0.95
-const BRIDGE_POST_CAP := 0.74
-const BRIDGE_POST_CAP_HEIGHT := 0.16
-# 桥墩顶面必须低于桥面：旧版顶面在 0.4m，俯视就是桥面上多了几个圆饼。
-const BRIDGE_PIER_HEIGHT := 2.2
-const BRIDGE_PIER_TOP := 0.0
-# 桥侧裙板落到水面（-0.42）以下，斜俯视时桥缘才不会露出水缝。
-const BRIDGE_SKIRT_BOTTOM := -0.65
+# 桥体几何参数的真身住在 bridge_builder.gd（C17 拆分）。这里保留同名常量：
+# arena 自己也还要用（中路桥长 / 路缘石让位窗口 / 广场高度），
+# 测试也按 Arena.BRIDGE_* 读。
+const BRIDGE_WIDTH = BridgeBuilder.BRIDGE_WIDTH
+const BRIDGE_SPAN_MID = BridgeBuilder.BRIDGE_SPAN_MID
+const BRIDGE_SPAN_EDGE = BridgeBuilder.BRIDGE_SPAN_EDGE
+const BRIDGE_DECK_Y = BridgeBuilder.BRIDGE_DECK_Y
+const BRIDGE_APPROACH = BridgeBuilder.BRIDGE_APPROACH
+const BRIDGE_SKIRT_BOTTOM = BridgeBuilder.BRIDGE_SKIRT_BOTTOM
 const TICK := 1.0 / 30.0
 const BASE_FOV := 42.0
 # 焦段过渡速率（度/秒）。进出草丛只差约 3.4°，0.15s 左右走完。
@@ -289,6 +274,13 @@ var _ping_cooldown := 0.0
 var _signal_target := Vector2.ZERO
 var _signal_target_valid := false
 const PING_INPUT_COOLDOWN := 1.2
+# 双击战场（项 11.1 手势入口）：300ms 内两次落点相距 48px 以内算双击，
+# 直接把「最近一次选中的信号」发到双击点，不再弹轮盘。
+const DOUBLE_TAP_SECONDS := 0.3
+const DOUBLE_TAP_SLOP := 48.0
+var _last_ping_kind := "attack"
+var _last_tap_ms := -10000
+var _last_tap_pos := Vector2.ZERO
 var _paused := false
 # 开发者调试（F3）。时间倍率只作用于主机模拟，表现层仍按真实时间走。
 var _debug_panel = null
@@ -921,6 +913,8 @@ func _handle_touch_event(event: InputEvent) -> bool:
 			if _touch_points.size() >= 2:
 				_pinch_distance = _touch_pair_distance()
 			else:
+				if _try_double_tap_ping(touch.position):
+					return true
 				_set_touch_aim(touch.position)
 		else:
 			_touch_points.erase(touch.index)
@@ -949,6 +943,25 @@ func _touch_pair_distance() -> float:
 	var first: Vector2 = points[0]
 	var second: Vector2 = points[1]
 	return first.distance_to(second)
+
+# 双击判定 + 发送：命中则发当前选中的信号并返回 true（调用方不再改瞄准点）。
+# 时间戳无论是否命中都刷新，三连击时第二下已经发过，第三下不会又配对。
+func _try_double_tap_ping(screen_pos: Vector2) -> bool:
+	var now := Time.get_ticks_msec()
+	var paired := _is_double_tap(now, screen_pos)
+	_last_tap_ms = now
+	_last_tap_pos = screen_pos
+	if not paired:
+		return false
+	_last_tap_ms = -10000
+	if not _project_ground(screen_pos):
+		return false
+	_queue_ping(_last_ping_kind, _mouse_ground)
+	return true
+
+func _is_double_tap(now_ms: int, screen_pos: Vector2) -> bool:
+	return now_ms - _last_tap_ms <= int(DOUBLE_TAP_SECONDS * 1000.0) \
+		and screen_pos.distance_to(_last_tap_pos) <= DOUBLE_TAP_SLOP
 
 func _set_touch_aim(screen_pos: Vector2) -> void:
 	if camera == null:
@@ -1704,8 +1717,15 @@ func _resolve_signal_point() -> Vector2:
 		return Vector2(float(local.get("x", 0.0)), float(local.get("y", 0.0)))
 	return Vector2.ZERO
 
-func _on_ping_wheel_opened() -> void:
-	_signal_target = _resolve_signal_point()
+# target 由手势入口（长按小地图）给出；Vector2.INF 表示没指定，按原有准星/英雄解析。
+func _on_ping_wheel_opened(target := Vector2.INF) -> void:
+	if target.is_finite():
+		_signal_target = Vector2(
+			clampf(target.x, -MapData.BOUNDS, MapData.BOUNDS),
+			clampf(target.y, -MapData.BOUNDS, MapData.BOUNDS)
+		)
+	else:
+		_signal_target = _resolve_signal_point()
 	_signal_target_valid = true
 
 # 触屏手动加点（B7）：只是把 intent 塞进下一条输入，点数校验仍在 sim 侧。
@@ -1714,6 +1734,7 @@ func _on_upgrade_requested(slot: String) -> void:
 		_queued_upgrade = slot
 
 func _on_ping_requested(kind: String) -> void:
+	_last_ping_kind = kind
 	if not _signal_target_valid:
 		_signal_target = _resolve_signal_point()
 		_signal_target_valid = true
@@ -2214,7 +2235,7 @@ func _build_lanes() -> void:
 			var ribbon := _lane_ribbon(path, float(half_widths[layer]) * 2.0, float(heights[layer]), materials[layer])
 			ribbon.name = "lane_%s_%s" % [str(lane), str(LaneRoad.LAYER_NAMES[layer])]
 			_props_root.add_child(ribbon)
-	_build_lane_edges()
+	LaneEdges.build(_props_root, _wall_stone_material())
 
 	var plaza_material := StandardMaterial3D.new()
 	plaza_material.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
@@ -2253,66 +2274,6 @@ func _lane_materials() -> Array:
 		materials.append(material)
 	return materials
 
-# 路缘石：一条路上每 5.5m 一对，贴着路缘落地。
-# 用 MultiMesh：三路加起来一百多个石墩，逐个 MeshInstance3D 就是一百多个 draw call。
-func _build_lane_edges() -> void:
-	var stones: Array = []
-	var width := LaneRoad.surface_half_width() * 2.0
-	for lane in MapData.LANE_ORDER:
-		var path: Array = MapView.lane_path(lane)
-		var windows := _bridge_arc_windows(str(lane), path)
-		for stone in LaneRoad.edge_stones(path, width):
-			# 桥上有自己的护栏。路缘石继续铺过去会和护栏叠成两条边，
-			# 俯视看就是桥面镶了一圈牙 —— 桥段的路缘石必须让位。
-			if _inside_bridge_window(float(stone.get("arc", 0.0)), windows):
-				continue
-			stones.append(stone)
-	if stones.is_empty():
-		return
-	# 路缘石也走石壁材质：原来直接用赭黄砂岩贴图 + 高亮 albedo，
-	# 一排 2 米长的暖褐色石块俯视看过去就是「一圈木栅栏」，和环境里的石壁对不上。
-	var stone := _wall_stone_material()
-	var box := BoxMesh.new()
-	box.size = Vector3(2.05, 0.20, 0.42)
-	var instance := MultiMeshInstance3D.new()
-	instance.name = "road_edges"
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.mesh = box
-	multimesh.instance_count = stones.size()
-	for index in stones.size():
-		var stone_data: Dictionary = stones[index]
-		var pos: Vector2 = stone_data.pos
-		var basis := Basis(Vector3.UP, float(stone_data.get("yaw", 0.0)))
-		multimesh.set_instance_transform(index, Transform3D(basis, Vector3(pos.x, 0.08, pos.y)))
-	instance.multimesh = multimesh
-	instance.material_override = stone
-	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_props_root.add_child(instance)
-
-# 路缘石要给谁让位：中路的桥面（桥有自己的护栏）。
-# 边路 2026-10-28 起没有桥了 —— 角落改由广场铺石，广场里的路缘石在
-# _build_lane_edges 里按 inside_corner_plaza 单独剔除。
-# 以前这里也给边路跨河点开窗口，拆桥之后那个窗口会把广场外 5 米的路缘石一起剃掉，
-# 留下一条没有石沿的路。
-func _bridge_arc_windows(lane: String, path: Array) -> Array:
-	var entries: Array = []
-	if lane == "mid":
-		entries.append({"center": Vector2.ZERO, "half": BRIDGE_SPAN_MID * 0.5})
-	var windows: Array = []
-	var total := LaneRoad.path_length(path)
-	for entry in entries:
-		var center := LaneRoad.nearest_arc(path, entry.center)
-		var half := float(entry.half) + BRIDGE_APPROACH + 0.5
-		windows.append(Vector2(maxf(center - half, 0.0), minf(center + half, total)))
-	return windows
-
-func _inside_bridge_window(arc: float, windows: Array) -> bool:
-	for window in windows:
-		if arc >= window.x and arc <= window.y:
-			return true
-	return false
-
 func _lane_ribbon(path: Array, width: float, height: float, material: Material) -> MeshInstance3D:
 	var data := LaneRoad.ribbon(path, width, height)
 	var points: PackedVector3Array = data.points
@@ -2330,82 +2291,7 @@ func _lane_ribbon(path: Array, width: float, height: float, material: Material) 
 	return instance
 
 func _build_river() -> void:
-	# 河床由地形承担（TerrainBuilder 把河道下陷到 -1.45），这里只放水面。
-	# 以前在河道两侧贴了一条 22m 宽的 cliff 贴图当「岸」，
-	# 结果是一块棕色地毯压在草地上、把地形坡完全盖住 —— 直接去掉。
-	var river := MeshInstance3D.new()
-	river.name = "River"
-	var plane := PlaneMesh.new()
-	# 河道长 98 米（两端到 ±49m），在端头河岸下自然收口，不切入边路
-	plane.size = Vector2(98.0, 17.4)
-	river.mesh = plane
-	# 长边要贴着河道中心线（y = x）：局部 +X 经 -45° 旋转后指向 (1,0,1)。
-	river.rotation.y = -PI * 0.25
-	river.position.y = -0.42
-	var shader := Shader.new()
-	shader.code = """
-shader_type spatial;
-render_mode blend_mix, cull_disabled, depth_draw_opaque, specular_schlick_ggx;
-
-uniform vec4 deep_color : source_color = vec4(0.06, 0.22, 0.26, 1.0);
-uniform vec4 shallow_color : source_color = vec4(0.20, 0.44, 0.42, 1.0);
-uniform float river_half = 9.0;
-__OUTSIDE_UNIFORMS__
-
-varying vec3 wpos;
-
-void vertex() {
-	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-}
-
-void fragment() {
-	// 到河道中心线的距离决定深浅：河心深蓝、岸边浅青
-	float d = abs(wpos.x - wpos.z) * 0.70710678;
-	float t = clamp(d / river_half, 0.0, 1.0);
-
-	// 两层不同频率、不同方向的水波，避免规则条纹
-	float w1 = sin(wpos.x * 1.15 + TIME * 0.85) * cos(wpos.z * 0.95 - TIME * 0.62);
-	float w2 = sin((wpos.x - wpos.z) * 2.1 - TIME * 1.35);
-	float w3 = sin(wpos.x * 3.6 - wpos.z * 2.9 + TIME * 1.8);
-	float ripple = w1 * 0.55 + w2 * 0.33 + w3 * 0.12;
-
-	vec3 col = mix(deep_color.rgb, shallow_color.rgb, t * 0.72 + ripple * 0.04);
-
-	// 岸边浅滩泡沫：只在水陆交界一条窄带
-	float foam = smoothstep(0.93, 1.0, t + ripple * 0.03);
-	col = mix(col, vec3(0.74, 0.82, 0.80), foam * 0.4);
-
-	// 墙外那段河跟着地形一起退成远景：地形暗了水面不暗，
-	// 会在墙外留一条亮青色的河，比不压暗更扎眼。
-__OUTSIDE_APPLY__
-
-	ALBEDO = col;
-	// 提高不透明度：河床在阴影里是暗的，透出来会把整条河压成墨绿，
-	// 同一个水色在不同角度看深浅差一大截。宁可少一点"见底"，也要颜色稳定。
-	ALPHA = mix(0.97, 0.88, t);
-	ROUGHNESS = 0.13;
-	SPECULAR = 0.42;
-	METALLIC = 0.0;
-	// 用波纹扰动法线做假高光，GL Compatibility 下没有 SSR，这是最划算的一招
-	NORMAL = normalize(vec3(ripple * 0.06, 1.0, ripple * 0.045));
-}
-"""
-	var material := ShaderMaterial.new()
-	shader.code = ArenaLook.apply_outside_fade(shader.code)
-	material.shader = shader
-	material.set_shader_parameter("river_half", MapData.RIVER_HALF_WIDTH)
-	# 必须从 GDScript 传 Color：直接写 shader 里的 uniform 默认值会被当成线性色，
-	# 输出时再转 sRGB 就整体提亮 —— 深蓝河水会渲染成亮青绿。
-	# 原来的 (0.018, 0.095, 0.135) 在斜俯视全景里几乎是一片黑 —— 河道读成了一条深灰柏油路，
-	# 和小地图上那条亮青色的河完全对不上。实测渲染像素只有 (20,50,55)，
-	# 所以按比例提到 (45~60, 130~150, 140~160) 这一档，和小地图同色系。
-	material.set_shader_parameter("deep_color", Color(0.110, 0.400, 0.470))
-	material.set_shader_parameter("shallow_color", Color(0.260, 0.600, 0.600))
-	# 和地形共用同一份墙外渐隐参数：水面伸到墙外的那一段必须一起退后。
-	ArenaLook.bind_outside_fade(material, MapData.BOUNDS)
-	river.material_override = material
-	river.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_props_root.add_child(river)
+	RiverBuilder.build(_props_root)
 
 	# 2026-10-31 玩家反馈（附截图）：「不需要这个桥，只需要路即可」。
 	# 边路角落不再铺设桥梁或广场，路面在平地上直接贯通（包含路缘石）。
@@ -2427,7 +2313,7 @@ func _build_corner_plazas() -> void:
 	var plazas: Array = MapLayout.corner_plazas()
 	if plazas.is_empty():
 		return
-	var material := _bridge_deck_material()
+	var material := BridgeBuilder.make_deck_material()
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	material.uv1_scale = Vector3(1, 1, 1)
 	for index in plazas.size():
@@ -2501,228 +2387,7 @@ func _plaza_skirt_mesh(low: Vector2, high: Vector2) -> ArrayMesh:
 	return st.commit()
 
 func _build_bridge(label: String, center: Vector2, span: float) -> void:
-	# 桥面沿**看得见的那条兵线**走：边路的跨河点正好压在上路的圆角上，
-	# 旧版三座桥都是同一块旋转 -45° 的直板 —— 桥端斜着切穿路面、护栏从路中间断开、
-	# 桥角戳进草地。截一段兵线路径做连续带之后，桥端垂直于路面，接缝才读得通。
-	var path: Array = LaneRoad.slice_around(MapView.lane_path(label), center, span * 0.5)
-	if path.size() < 2:
-		return
-	var deck_material := _bridge_deck_material()
-	var rail_material := _bridge_rail_material()
-
-	var deck := MeshInstance3D.new()
-	# 名字即接口：测试靠 Bridge* 数桥、验「跨河点真的落在桥面上」。
-	deck.name = "Bridge" if label == "mid" else "Bridge_" + label
-	deck.mesh = _bridge_deck_mesh(path)
-	deck.material_override = deck_material
-	ModelUtils.enable_shadows(deck, true)
-	_props_root.add_child(deck)
-
-	_build_bridge_skirt(label, path, deck_material)
-	_build_bridge_approaches(label, path, deck_material)
-	_build_bridge_rails(label, path, rail_material)
-	_build_bridge_piers(label, path, rail_material)
-
-func _bridge_deck_material() -> StandardMaterial3D:
-	# 与石壁同一套 cliff AO：桥面和野区墙必须是同一种石头。
-	var material := StandardMaterial3D.new()
-	material.albedo_texture = load("res://assets/textures/cliff_side_AO.jpg")
-	material.albedo_color = Color(0.48, 0.49, 0.50)
-	material.normal_enabled = true
-	material.normal_texture = load("res://assets/textures/cliff_side_nor_gl.jpg")
-	material.normal_scale = 1.3
-	material.roughness = 0.95
-	# 连续带的 UV：横向 0..1 铺满桥宽，纵向按弧长（LaneRoad.UV_PER_METER）。
-	# 这里按「接近方形」补比例，否则 AO 贴图会被拉成一条条。
-	material.uv1_scale = Vector3(4.0, 3.0, 1.0)
-	return material
-
-func _bridge_rail_material() -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.albedo_texture = load("res://assets/textures/cliff_side_AO.jpg")
-	material.albedo_color = Color(0.56, 0.57, 0.58)
-	material.normal_enabled = true
-	material.normal_texture = load("res://assets/textures/cliff_side_nor_gl.jpg")
-	material.normal_scale = 1.1
-	material.roughness = 1.0
-	material.uv1_scale = Vector3(2, 2, 2)
-	return material
-
-func _bridge_deck_mesh(path: Array) -> ArrayMesh:
-	var data := LaneRoad.ribbon(path, BRIDGE_WIDTH, BRIDGE_DECK_Y)
-	var points: PackedVector3Array = data.points
-	var uvs: PackedVector2Array = data.uvs
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for index in points.size():
-		st.set_normal(Vector3.UP)
-		st.set_uv(uvs[index])
-		st.add_vertex(points[index])
-	return st.commit()
-
-# 桥侧裙板：桥面是一条没有厚度的连续带，斜俯视能直接从边缘看进水缝里，
-# 读成「一块飘在河上的石板」。两侧沿桥缘落一道到水面以下的石壁，桥才有截面。
-func _build_bridge_skirt(label: String, path: Array, material: Material) -> void:
-	var skirt := MeshInstance3D.new()
-	skirt.name = "bridge_skirt_" + label
-	skirt.mesh = _bridge_skirt_mesh(path)
-	skirt.material_override = material
-	ModelUtils.enable_shadows(skirt, true)
-	_props_root.add_child(skirt)
-
-func _bridge_skirt_mesh(path: Array) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var half := BRIDGE_WIDTH * 0.5
-	for side in [-1.0, 1.0]:
-		var edge: Array = LaneRoad.offset_path(path, side * half)
-		for index in edge.size() - 1:
-			var a: Vector2 = edge[index]
-			var b: Vector2 = edge[index + 1]
-			var segment := a.distance_to(b)
-			if segment < 0.0001:
-				continue
-			var direction := (b - a) / segment
-			# 左缘的外法线是 (-dy, dx)，右缘反过来。
-			var outward: Vector2 = Vector2(-direction.y, direction.x) * float(side)
-			var normal := Vector3(outward.x, 0.0, outward.y)
-			var quad := [
-				Vector3(a.x, BRIDGE_DECK_Y, a.y),
-				Vector3(b.x, BRIDGE_DECK_Y, b.y),
-				Vector3(a.x, BRIDGE_SKIRT_BOTTOM, a.y),
-				Vector3(b.x, BRIDGE_SKIRT_BOTTOM, b.y),
-			]
-			var quad_uv := [Vector2(0, 1), Vector2(1, 1), Vector2(0, 0), Vector2(1, 0)]
-			# 与 lane_road.ribbon 同一套绕序：桥外侧看到的面，右手定则法线朝桥内。左右缘相反。
-			var order := [0, 1, 2, 1, 3, 2] if side > 0.0 else [0, 2, 1, 1, 2, 3]
-			for corner in order:
-				st.set_normal(normal)
-				st.set_uv(Vector2(quad_uv[corner].x * segment * LaneRoad.UV_PER_METER, quad_uv[corner].y))
-				st.add_vertex(quad[corner])
-	return st.commit()
-
-# 桥头接坡：桥面 10.6 宽收成路肩 9.75 宽，高度从 0.075 压到 0.05（沉进路面）。
-# 没有这一块，桥面就是在路上被刀切出来的一块板。
-func _build_bridge_approaches(label: String, path: Array, material: Material) -> void:
-	var deck_half := BRIDGE_WIDTH * 0.5
-	var road_half := float(LaneRoad.layer_half_widths()[0])
-	for end in 2:
-		var index := 0 if end == 0 else path.size() - 1
-		var neighbor := 1 if end == 0 else path.size() - 2
-		var center: Vector2 = path[index]
-		var direction := (center - (path[neighbor] as Vector2)).normalized()
-		var normal := Vector2(-direction.y, direction.x)
-		var outer := center + direction * BRIDGE_APPROACH
-		var ramp := MeshInstance3D.new()
-		ramp.name = "ramp_%s_%d" % [label, end]
-		ramp.mesh = _ramp_mesh(
-			center + normal * deck_half,
-			center - normal * deck_half,
-			outer + normal * road_half,
-			outer - normal * road_half
-		)
-		ramp.material_override = material
-		ramp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		_props_root.add_child(ramp)
-
-func _ramp_mesh(inner_left: Vector2, inner_right: Vector2, outer_left: Vector2, outer_right: Vector2) -> ArrayMesh:
-	var a_l := Vector3(inner_left.x, BRIDGE_DECK_Y, inner_left.y)
-	var a_r := Vector3(inner_right.x, BRIDGE_DECK_Y, inner_right.y)
-	var b_l := Vector3(outer_left.x, BRIDGE_APPROACH_Y, outer_left.y)
-	var b_r := Vector3(outer_right.x, BRIDGE_APPROACH_Y, outer_right.y)
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# 与 lane_road.ribbon 同一绕序：相机在上方，几何法线朝下 = 正面。
-	# 但着色法线必须朝上 —— 用几何法线（朝下）会被当成背光面，整块接坡烤成黑的。
-	for triangle in [[a_l, a_r, b_l], [a_r, b_r, b_l]]:
-		var uv := 0.0
-		for vertex in triangle:
-			st.set_normal(Vector3.UP)
-			st.set_uv(Vector2(uv, 0.0))
-			st.add_vertex(vertex)
-			uv += 1.0
-	return st.commit()
-
-# 护栏：沿路缘弯过去的一排矮栏，两端各一根门柱 + 石帽收口。
-# 全部塞进一个 MultiMesh：三座桥一百多段，逐个 MeshInstance3D 就是一百多个 draw call。
-func _build_bridge_rails(label: String, path: Array, material: Material) -> void:
-	var transforms: Array[Transform3D] = []
-	for side in [-1.0, 1.0]:
-		var rail_path := LaneRoad.offset_path(path, side * BRIDGE_RAIL_OFFSET)
-		var total := LaneRoad.path_length(rail_path)
-		var start := BRIDGE_RAIL_INSET
-		var finish := total - BRIDGE_RAIL_INSET
-		if finish - start < 1.0:
-			continue
-		var steps := maxi(int(ceil((finish - start) / BRIDGE_RAIL_STEP)), 1)
-		var step := (finish - start) / float(steps)
-		for index in steps:
-			var station := LaneRoad.sample(rail_path, start + step * (float(index) + 0.5))
-			transforms.append(_box_transform(
-				station.pos, station.dir,
-				Vector3(BRIDGE_RAIL_WIDTH, BRIDGE_RAIL_HEIGHT, step + 0.06),
-				BRIDGE_DECK_Y + BRIDGE_RAIL_HEIGHT * 0.5
-			))
-		for arc in [start, finish]:
-			var station := LaneRoad.sample(rail_path, arc)
-			transforms.append(_box_transform(
-				station.pos, station.dir,
-				Vector3(BRIDGE_POST_SIZE, BRIDGE_POST_HEIGHT, BRIDGE_POST_SIZE),
-				BRIDGE_DECK_Y + BRIDGE_POST_HEIGHT * 0.5
-			))
-			transforms.append(_box_transform(
-				station.pos, station.dir,
-				Vector3(BRIDGE_POST_CAP, BRIDGE_POST_CAP_HEIGHT, BRIDGE_POST_CAP),
-				BRIDGE_DECK_Y + BRIDGE_POST_HEIGHT + BRIDGE_POST_CAP_HEIGHT * 0.5
-			))
-	if transforms.is_empty():
-		return
-	var box := BoxMesh.new()
-	box.size = Vector3.ONE
-	var instance := MultiMeshInstance3D.new()
-	instance.name = "bridge_rails_" + label
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.mesh = box
-	multimesh.instance_count = transforms.size()
-	for index in transforms.size():
-		multimesh.set_instance_transform(index, transforms[index])
-	instance.multimesh = multimesh
-	# headless 的 dummy 渲染器读不回 MultiMesh 实例变换，测试只能靠这份记录量护栏走向。
-	instance.set_meta("rail_transforms", transforms)
-	instance.material_override = material
-	ModelUtils.enable_shadows(instance, true)
-	_props_root.add_child(instance)
-
-# 单位盒 + 朝向 dir 的长轴（局部 +Z）。缩放写进基里，MultiMesh 才能共用一个盒子。
-func _box_transform(pos: Vector2, heading: Vector2, size: Vector3, center_y: float) -> Transform3D:
-	var yaw := atan2(heading.x, heading.y)
-	var basis := Basis(Vector3.UP, yaw) * Basis.from_scale(size)
-	return Transform3D(basis, Vector3(pos.x, center_y, pos.y))
-
-func _build_bridge_piers(label: String, path: Array, material: Material) -> void:
-	# 桥墩只做水下的支撑：顶面压到桥面以下，俯视时才不会在桥面上多出几个圆饼。
-	var total := LaneRoad.path_length(path)
-	var center := total * 0.5
-	var index := 0
-	for along in [-1.0, 1.0]:
-		var station := LaneRoad.sample(path, center + along * total * 0.23)
-		var normal := Vector2(-station.dir.y, station.dir.x)
-		for side in [-1.0, 1.0]:
-			var pos: Vector2 = station.pos + normal * 3.8 * side
-			var pier := MeshInstance3D.new()
-			pier.name = "bridge_pier_%s_%d" % [label, index]
-			var cylinder := CylinderMesh.new()
-			cylinder.top_radius = 0.52
-			cylinder.bottom_radius = 0.66
-			cylinder.height = BRIDGE_PIER_HEIGHT
-			cylinder.radial_segments = 12
-			pier.mesh = cylinder
-			pier.material_override = material
-			pier.position = Vector3(pos.x, BRIDGE_PIER_TOP - BRIDGE_PIER_HEIGHT * 0.5, pos.y)
-			ModelUtils.enable_shadows(pier, true)
-			_props_root.add_child(pier)
-			index += 1
+	BridgeBuilder.build(_props_root, label, center, span)
 
 # 石壁材质只建一次。理由有两个：观感必须全图一致（一处石头一处木板是最刺眼的不一致），
 # 以及几十段墙各建一个 ShaderMaterial 会让每个材质都要单独编译一次。
@@ -3029,9 +2694,9 @@ func _build_river_reeds() -> void:
 			var pos: Vector2 = center + normal * float(side) * distance
 			if pos.length() < 13.0:
 				continue
-			if _lane_distance(pos) < 4.2:
+			if MapGeometry.lane_distance(pos) < 4.2:
 				continue
-			if not _feature_clear(pos, 0.7):
+			if not MapGeometry.feature_clear(pos, 0.7):
 				continue
 			points.append(pos)
 	if points.is_empty():
@@ -3045,7 +2710,7 @@ func _build_river_reeds() -> void:
 		var point: Vector2 = points[i]
 		var scale := rng.randf_range(1.2, 2.0)
 		var basis := Basis(Vector3.UP, rng.randf_range(0.0, TAU)).scaled(Vector3(scale, scale * rng.randf_range(2.4, 3.6), scale))
-		multimesh.set_instance_transform(i, Transform3D(basis, Vector3(point.x, maxf(_terrain_height(point.x, point.y), 0.0) - 0.02, point.y)))
+		multimesh.set_instance_transform(i, Transform3D(basis, Vector3(point.x, maxf(MapGeometry.terrain_height(point.x, point.y, _terrain), 0.0) - 0.02, point.y)))
 	var node := MultiMeshInstance3D.new()
 	node.name = "river_reeds"
 	node.multimesh = multimesh
@@ -3147,7 +2812,7 @@ func _pick_base_prop_positions(base: Vector2, radius: float, wanted: int, min_la
 	for i in 12:
 		var angle := TAU * float(i) / 12.0
 		var pos := base + Vector2(cos(angle), sin(angle)) * radius
-		candidates.append({"pos": pos, "lane": _lane_distance(pos)})
+		candidates.append({"pos": pos, "lane": MapGeometry.lane_distance(pos)})
 	candidates.sort_custom(func(a, b): return float(a.lane) > float(b.lane))
 	var picked: Array[Vector2] = []
 	for entry in candidates:
@@ -3267,9 +2932,9 @@ func _find_jungle_prop_pos(center: Vector2, radius: float) -> Vector2:
 	for i in 12:
 		var angle := TAU * float(i) / 12.0 + 0.2
 		var pos := center + Vector2(cos(angle), sin(angle)) * radius
-		if _lane_distance(pos) < 5.2:
+		if MapGeometry.lane_distance(pos) < 5.2:
 			continue
-		if not _feature_clear(pos, 0.6):
+		if not MapGeometry.feature_clear(pos, 0.6):
 			continue
 		return pos
 	return Vector2.INF
@@ -3293,7 +2958,7 @@ func _build_wall_tufts() -> void:
 		var point: Vector2 = points[i]
 		var scale := rng.randf_range(0.62, 1.15)
 		var basis := Basis(Vector3.UP, rng.randf_range(0.0, TAU)).scaled(Vector3(scale, scale * rng.randf_range(0.8, 1.2), scale))
-		multimesh.set_instance_transform(i, Transform3D(basis, Vector3(point.x, _terrain_height(point.x, point.y) - 0.02, point.y)))
+		multimesh.set_instance_transform(i, Transform3D(basis, Vector3(point.x, MapGeometry.terrain_height(point.x, point.y, _terrain) - 0.02, point.y)))
 	var node := MultiMeshInstance3D.new()
 	# 名字不能以 wall_ 开头：test_wall_look 把所有 wall_* 当作石构件统计材质，
 	# 草簇混进去会误报"石壁有两份材质"。wallfoot_ 不属于石构件前缀。
@@ -3797,13 +3462,6 @@ func _add_map_totem(pos: Vector2, height: float, color: Color) -> void:
 	gem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_props_root.add_child(gem)
 
-# 布景取地形高度。地形是可玩区外才抬升的，所以可玩区里恒为 0，
-# 布景摆放不会因为地形改动而漂移。
-func _terrain_height(x: float, z: float) -> float:
-	if _terrain == null:
-		return 0.0
-	return float(_terrain.height_at(x, z))
-
 # --- 草簇散布 ---
 # 只长在草地上：路面、河道、基地广场和草丛（玩法区域）都要排除，
 # 否则会出现「草长在路中间」「草盖住草丛」这种一眼假的情况。
@@ -3811,26 +3469,6 @@ var _grass_bushes: Array = []
 # 用噪声控制草甸密度：均匀撒满会像一层绿色毛刺，
 # 有疏有密才像自然长出来的草地。
 var _grass_noise := FastNoiseLite.new()
-
-func _can_grow_grass(point: Vector2) -> bool:
-	if _grass_noise.get_noise_2d(point.x, point.y) < -0.18:
-		return false
-	if _lane_distance(point) < 4.6:
-		return false
-	if _river_distance(point) < 12.5:
-		return false
-	if _base_distance(point) < 11.5:
-		return false
-	# 地表草也要避开贴地圆盘：草丛是按草根撒的，草根长在石盘上就是
-	# 「绿点从法阵里冒出来」。留 0.3 米让草丛边缘自然收口，不要一圈秃边。
-	if MapLayout.on_ground_mark(point, 0.3):
-		return false
-	for bush in _grass_bushes:
-		# 留在草丛外沿 0.45m 处的草可以长进来，让叶簇和地表草自然衔接；
-		# 全部排除会留出一圈生硬的秃边。
-		if point.distance_to(bush.pos) < float(bush.radius) - 0.45:
-			return false
-	return true
 
 func _build_grass_tufts() -> void:
 	var rng := RandomNumberGenerator.new()
@@ -3842,7 +3480,9 @@ func _build_grass_tufts() -> void:
 	# 手机端把草簇从 12000 降到 6000：草是半透明小片的 fill-rate 大头，
 	# 镜头移动时满屏草叶的 overdraw 会直接吃掉帧率；密度减半后远看仍是草甸。
 	var tuft_count := 6000 if OS.has_feature("mobile") else 12000
-	var tufts := GrassField.scatter(tuft_count, _can_grow_grass, _terrain_height, rng)
+	var tufts := GrassField.scatter(tuft_count,
+		MapGeometry.can_grow_grass.bind(_grass_noise, _grass_bushes),
+		MapGeometry.terrain_height.bind(_terrain), rng)
 	_props_root.add_child(tufts)
 
 func _build_scenery() -> void:
@@ -3861,15 +3501,15 @@ func _build_scenery() -> void:
 		var angle := rng.randf_range(0.0, TAU)
 		var radius := rng.randf_range(18.0, 62.0)
 		var pos := Vector2(cos(angle), sin(angle)) * radius
-		if _lane_distance(pos) < 7.0 or _base_distance(pos) < 18.0:
+		if MapGeometry.lane_distance(pos) < 7.0 or MapGeometry.base_distance(pos) < 18.0:
 			continue
-		if not _feature_clear(pos, 1.5):
+		if not MapGeometry.feature_clear(pos, 1.5):
 			continue
-		if _river_distance(pos) > 16.0 and i % 2 == 0:
+		if MapGeometry.river_distance(pos) > 16.0 and i % 2 == 0:
 			continue
 		var height := rng.randf_range(1.2, 2.8)
 		var rock := ModelUtils.fit_scene(rock_group if i % 3 == 0 else rock_single, height, height * 2.2)
-		rock.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 0.25, pos.y)
+		rock.position = Vector3(pos.x, MapGeometry.terrain_height(pos.x, pos.y, _terrain) - 0.25, pos.y)
 		rock.rotation.y = rng.randf_range(0.0, TAU)
 		ModelUtils.enable_shadows(rock, false)
 		_props_root.add_child(rock)
@@ -3880,11 +3520,11 @@ func _build_scenery() -> void:
 		var angle := TAU * float(i) / 12.0 + 0.16
 		var radius := rng.randf_range(86.0, 104.0)
 		var pos := Vector2(cos(angle), sin(angle)) * radius
-		if _base_distance(pos) < 44.0:
+		if MapGeometry.base_distance(pos) < 44.0:
 			continue
 		var mountain := ModelUtils.fit_scene(mountains[i % 2], rng.randf_range(22.0, 34.0), rng.randf_range(40.0, 58.0))
 		# 山脚埋进地形 2m：模型底边是平的，不埋就会在坡上悬空
-		mountain.position = Vector3(pos.x, _terrain_height(pos.x, pos.y) - 2.0, pos.y)
+		mountain.position = Vector3(pos.x, MapGeometry.terrain_height(pos.x, pos.y, _terrain) - 2.0, pos.y)
 		mountain.rotation.y = rng.randf_range(0.0, TAU)
 		# 原始山体是纯白的低模，和草地拼在一起像贴纸。往岩石青灰拉，
 		# 再用远景雾把它压向天空色，才有「远处的山」的层次。
@@ -3895,47 +3535,6 @@ func _build_scenery() -> void:
 		_backdrop_mountains.append({"node": mountain, "box": ModelUtils.relative_aabb(mountain)})
 		if i % 4 == 3:
 			await _next_frame()
-
-func _lane_distance(point: Vector2) -> float:
-	# 最近兵线距离只有 MapIntel 一份实现：以前这里手抄过一遍同样的折线投影，
-	# 两边改路径时必然会漂移，植被就会长进路面或远离路面。
-	return float(MapIntel.nearest_lane(point).get("distance", INF))
-
-func _base_distance(point: Vector2) -> float:
-	return minf(point.distance_to(MapData.BLUE_BASE), point.distance_to(MapData.RED_BASE))
-
-func _river_distance(point: Vector2) -> float:
-	# 与 TerrainBuilder.river_distance / MapIntel 同源：河道中心线是 x - y = 0。
-	return absf(point.x - point.y) * 0.70710678
-
-# 墙体/草丛/营地/首领坑/传送阵/角落广场/边界墙周围留白，避免随机植被长进可交互区域。
-func _feature_clear(point: Vector2, margin: float) -> bool:
-	if MapLayout.near_boundary(point, 2.5 + margin):
-		return false
-	# 角落广场是整块石面：树长在石板上比长在阵盘上更离谱。
-	# 广场外沿本来就吃掉了边界留白，这里按内沿外扩 margin 判。
-	if MapLayout.inside_corner_plaza(point, margin):
-		return false
-	var marks := MapView.map_marks()
-	for wall in marks.walls:
-		if _segment_distance(point, wall.a, wall.b) < 1.5 + margin:
-			return false
-	for bush in marks.bushes:
-		if point.distance_to(bush.pos) < float(bush.radius) + margin:
-			return false
-	# 贴地圆盘（营地 / 首领坑 / 传送阵）的占位只有 MapLayout.on_ground_mark 一份。
-	# 曾经在这里手抄过一遍半径，传送阵是后加的、清单没跟上，树就长到了阵盘正中。
-	if MapLayout.on_ground_mark(point, margin):
-		return false
-	return true
-
-func _segment_distance(point: Vector2, a: Vector2, b: Vector2) -> float:
-	var ab := b - a
-	var length_sq := ab.length_squared()
-	if length_sq < 0.0001:
-		return point.distance_to(a)
-	var t := clampf((point - a).dot(ab) / length_sq, 0.0, 1.0)
-	return point.distance_to(a + ab * t)
 
 func _sync_units(snapshot: Dictionary, delta: float) -> void:
 	if snapshot.is_empty():
@@ -4143,9 +3742,15 @@ func _sync_structures(snapshot: Dictionary, initial: bool, delta := 0.0) -> void
 		var tower_max_hp := maxf(1.0, float(entity.get("max_hp", 1.0)))
 		var tower_ratio := clampf(tower_hp / tower_max_hp, 0.0, 1.0)
 		_apply_tower_damage(record, tower_ratio)
-		var spin: Node3D = record.get("spin")
-		if spin:
-			spin.rotation.y = float(Time.get_ticks_msec()) * 0.0006
+		var crystal_state: Dictionary = record.get("crystal_visual", {})
+		if crystal_state.is_empty():
+			var spin: Node3D = record.get("spin")
+			if spin:
+				spin.rotation.y = float(Time.get_ticks_msec()) * 0.0006
+		else:
+			# 主堡的每帧动画（晶簇浮转 / 碎片轨道 / 金环差速 / 法阵刻线）全在 CrystalVisual，
+			# 这里再写一次 spin 会和它抢同一个 transform。
+			CrystalVisual.apply_state(crystal_state, delta)
 		var shield: Node3D = record.get("shield")
 		if shield:
 			shield.visible = MapView.structure_locked(entity)
@@ -4153,6 +3758,9 @@ func _sync_structures(snapshot: Dictionary, initial: bool, delta := 0.0) -> void
 			var crystal_shield: Node3D = record.get("crystal_shield")
 			if crystal_shield:
 				crystal_shield.visible = float(entity.get("shield", 0.0)) > 0.0
+			if not crystal_state.is_empty():
+				# 护盾量决定「壳有多厚 + 法阵多一道亮环」；显隐仍只看 0/正数。
+				CrystalVisual.apply_shield(crystal_state, float(entity.get("shield", 0.0)), float(entity.get("shield_max", 0.0)))
 			# 水晶让路：英雄（就是相机焦点）靠近时，把挡视线的柱身与宝石淡出去，
 			# 否则英雄进了泉水在屏幕上只剩一顶帽子。没有本地英雄时保持实心。
 			if not viewer.is_empty():
@@ -4236,6 +3844,15 @@ func _apply_tower_fire(record: Dictionary, delta: float) -> void:
 # 低血残破：石料压暗 + 裂纹显隐 + 核心变弱。
 # 强度由 TowerVisual.damage_tone() 给，表现层不再自己写一条曲线。
 func _apply_tower_damage(record: Dictionary, ratio: float) -> void:
+	var crystal: Dictionary = record.get("crystal_visual", {})
+	if not crystal.is_empty():
+		# 主堡用自己的残破曲线（阈值与塔一致），并且只改 CrystalVisual 持有的材质。
+		var crystal_tone := CrystalVisual.damage_tone(ratio)
+		if is_equal_approx(crystal_tone, float(record.get("damage_tone", -1.0))):
+			return
+		record["damage_tone"] = crystal_tone
+		CrystalVisual.apply_damage(crystal, ratio)
+		return
 	var tone := TowerVisual.damage_tone(ratio)
 	if is_equal_approx(tone, float(record.get("damage_tone", -1.0))):
 		return
@@ -4438,13 +4055,12 @@ static func _attack_fx_plan_shape(event: Dictionary) -> Dictionary:
 			})
 		"super":
 			# 超级兵：更宽的横扫。和近战兵的区别必须在**弧度**上，只放大球体会读成「胖一点的兵」。
-			return _unit_attack_plan("arc", 0.14, 0.95, 0.85, 0.14, {
+			return _unit_attack_plan("arc", 0.14, 0.95, 0.85, 0.1, {
 				"arc_deg": 104.0, "impact": 4, "dust": "smoke", "texture": "spark",
 			})
 	# 近战兵：一片刀光 + 脚下扬尘。旧版是一颗飞过去的小球（近战兵打近战兵也是），
 	# 兵线对拼时满屏小球，读不出「谁在砍谁」。
-	# 时长 0.12：0.07 秒在 30fps 下只有两帧，刀光还没张开就消失了（画廊实拍确认）。
-	return _unit_attack_plan("arc", 0.09, 0.75, 0.8, 0.12, {
+	return _unit_attack_plan("arc", 0.09, 0.75, 0.8, 0.07, {
 		"arc_deg": 84.0, "impact": 2, "dust": "smoke", "texture": "spark",
 	})
 
@@ -4453,7 +4069,7 @@ static func _attack_fx_plan_shape(event: Dictionary) -> Dictionary:
 # 首领（暴君/主宰）单独一档：更长的震屏 + 地裂残留，和普通野点差一个量级。
 static func _monster_attack_plan(event: Dictionary) -> Dictionary:
 	if bool(event.get("objective", false)):
-		return _unit_attack_plan("slam", 0.34, 1.05, 0.9, 0.22, {
+		return _unit_attack_plan("slam", 0.34, 1.05, 0.9, 0.2, {
 			"color": GOLD,
 			"impact": 14, "shake": 0.18, "dust": "smoke", "decal": "shock",
 			"texture": "shock", "reach_pad": 0.9, "reach_max": 5.4,
@@ -4461,37 +4077,37 @@ static func _monster_attack_plan(event: Dictionary) -> Dictionary:
 	var buff := str(event.get("buff_type", ""))
 	if buff == "blue" or buff == "red":
 		# BUFF 石像：整块砸下来，比小野点重一档；配色区分红蓝，形状不再细分（同一种怪）。
-		return _unit_attack_plan("slam", 0.24, 0.95, 0.85, 0.2, {
+		return _unit_attack_plan("slam", 0.24, 0.95, 0.85, 0.16, {
 			"color": Color(0.45, 0.76, 1.0) if buff == "blue" else Color(1.0, 0.46, 0.3),
 			"impact": 8, "shake": 0.06, "dust": "smoke", "decal": "rune", "texture": "shock",
 		})
 	match str(event.get("monster_type", "wolf")):
 		"boar":
 			# 三猪：低头上挑，单爪宽弧 + 扬土。它没有狼的"两只爪子"，所以弧数必须是 1。
-			return _unit_attack_plan("arc", 0.16, 0.7, 0.7, 0.15, {
+			return _unit_attack_plan("arc", 0.16, 0.7, 0.7, 0.12, {
 				"color": Color(0.96, 0.78, 0.5),
 				"arc_deg": 108.0, "impact": 5, "dust": "smoke", "texture": "spark",
 			})
 		"lizard":
 			# 蜥蜴：低伏突咬，短而窄的一口，几乎不扬尘（贴地冲，不起土）。
-			return _unit_attack_plan("arc", 0.15, 0.62, 0.62, 0.13, {
+			return _unit_attack_plan("arc", 0.15, 0.62, 0.62, 0.1, {
 				"color": Color(0.66, 0.9, 0.58),
 				"arc_deg": 76.0, "impact": 4, "texture": "slash",
 			})
 		"bird":
 			# 红鸟：俯冲两下连啄，弧数 2、节奏更短。
-			return _unit_attack_plan("arc", 0.14, 0.82, 0.82, 0.12, {
+			return _unit_attack_plan("arc", 0.14, 0.82, 0.82, 0.09, {
 				"color": Color(1.0, 0.74, 0.46),
 				"arc_deg": 120.0, "arc_count": 2, "impact": 3, "texture": "spark",
 			})
 		"spirit":
 			# 河道之灵：不是爪光，是一圈水花 —— 它是水系生物，画成爪痕会被读成野狼。
-			return _unit_attack_plan("splash", 0.2, 0.75, 0.55, 0.22, {
+			return _unit_attack_plan("splash", 0.2, 0.75, 0.55, 0.18, {
 				"color": Color(0.52, 0.9, 1.0),
 				"impact": 4, "decal": "glow", "texture": "glow",
 			})
 	# 狼（兜底）：双爪交错。两片弧比一片更粗的弧更像「一次扑咬」。
-	return _unit_attack_plan("arc", 0.16, 0.72, 0.72, 0.14, {
+	return _unit_attack_plan("arc", 0.16, 0.72, 0.72, 0.11, {
 		"color": Color(0.86, 0.9, 0.98),
 		"arc_deg": 92.0, "arc_count": 2, "impact": 3, "texture": "spark",
 	})
@@ -4571,6 +4187,8 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	var ring_radius: float
 	var spin_node: Node3D = null
 	var crystal_shield: Node3D = null
+	# 主堡专属：模型/材质/状态引用整包交给 CrystalVisual，Arena 不再逐件持有。
+	var crystal_visual: Dictionary = {}
 	var core_node: MeshInstance3D = null
 	var halo_node: MeshInstance3D = null
 	var glow_node: MeshInstance3D = null
@@ -4583,188 +4201,24 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 	# 建筑死亡时要隐藏的活体部件；残骸单独建，死亡时显示。
 	var destroy_hide: Array = []
 	if entity_type == "base":
-		var stone := StandardMaterial3D.new()
-		stone.albedo_texture = load("res://assets/textures/cliff_side_Diffuse.jpg")
-		stone.albedo_color = Color(0.62, 0.6, 0.54)
-		stone.roughness = 1.0
-		stone.uv1_scale = Vector3(3, 3, 3)
-		var base_group := Node3D.new()
-		var dais := MeshInstance3D.new()
-		var dais_mesh := CylinderMesh.new()
-		dais_mesh.top_radius = 4.4
-		dais_mesh.bottom_radius = 4.8
-		dais_mesh.height = 0.35
-		dais_mesh.radial_segments = 32
-		dais.mesh = dais_mesh
-		dais.material_override = stone
-		dais.position.y = 0.18
-		dais.name = "dais"
-		base_group.add_child(dais)
-		var pedestal := MeshInstance3D.new()
-		var pedestal_mesh := CylinderMesh.new()
-		pedestal_mesh.top_radius = 1.3
-		pedestal_mesh.bottom_radius = 1.8
-		pedestal_mesh.height = 1.2
-		pedestal_mesh.radial_segments = 8
-		pedestal.mesh = pedestal_mesh
-		# 柱身要能单独淡出，不能和 dais 共用材质 —— 共用的话英雄一靠近，
-		# 连贴地圆盘一起变透明，玩家就找不到水晶在哪了。
-		pedestal.material_override = stone.duplicate()
-		pedestal.position.y = 0.95
-		base_group.add_child(pedestal)
-		pedestal.name = "pedestal"
-		crystal_fade_parts.append(pedestal)
-		spin_node = Node3D.new()
-		spin_node.position.y = 3.55
-		var gem := MeshInstance3D.new()
-		var gem_mesh := SphereMesh.new()
-		gem_mesh.radius = 1.05
-		gem_mesh.height = 2.1
-		gem_mesh.radial_segments = 6
-		gem_mesh.rings = 3
-		gem.mesh = gem_mesh
-		gem.scale = Vector3(1.0, 1.55, 1.0)
-		var gem_material := StandardMaterial3D.new()
-		gem_material.albedo_color = team_color
-		gem_material.emission_enabled = true
-		gem_material.emission = team_color
-		# 2.6 会把整颗宝石烧成一块纯白（截图 shots/occ_z21_under.png），
-		# 白团比英雄大一圈，玩家根本分不清哪个是自己。1.5 保留发光但不糊形。
-		gem_material.emission_energy_multiplier = 1.5
-		gem_material.roughness = 0.15
-		gem.material_override = gem_material
-		gem.name = "gem"
-		# 自发光体在地面上投一块多边形实心黑影，俯视下像塌了个坑，还正好压在英雄身上。
-		gem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		spin_node.add_child(gem)
-		crystal_fade_parts.append(gem)
-		var halo := MeshInstance3D.new()
-		var halo_torus := TorusMesh.new()
-		halo_torus.inner_radius = 1.9
-		halo_torus.outer_radius = 2.05
-		halo_torus.rings = 40
-		halo_torus.ring_segments = 6
-		halo.mesh = halo_torus
-		halo.rotation.x = -PI * 0.35
-		var halo_material := StandardMaterial3D.new()
-		halo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		halo_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		halo_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		# 0.5 的加法混合光圈叠在过曝的宝石上，读起来是一整团白雾。
-		halo_material.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.34)
-		halo_material.emission_enabled = true
-		halo_material.emission = team_color
-		halo_material.emission_energy_multiplier = 1.4
-		halo.material_override = halo_material
-		halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		halo.name = "halo"
-		spin_node.add_child(halo)
-		crystal_fade_parts.append(halo)
-		base_group.add_child(spin_node)
-		# 这几件常驻 ALPHA 档，靠 albedo.a 淡进淡出。
-		# 运行时切 transparency 会重建渲染管线，逐帧切就是卡顿 —— 别改成按需切换。
-		for part in crystal_fade_parts:
-			var fade_mat := (part as MeshInstance3D).material_override as StandardMaterial3D
-			if fade_mat != null and fade_mat.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED:
-				fade_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		model = base_group
-		bar_height = 7.4
-		bar_width = 6.0
+		# 主堡的形态（三层台基 / 收分柱座 / 晶簇 / 差速金环 / 轨道碎片 / 双层光柱 /
+		# 贴地法阵 / 双塔护盾 / 裂纹）全部由 CrystalVisual 建，Arena 只给世界坐标、
+		# 阵营色和血量状态。旧版把 9 件零件平铺在这里，每加一层装饰都要动 arena 一次。
+		var crystal := CrystalVisual.build(team_color, team)
+		crystal_visual = crystal
+		model = crystal.node
+		spin_node = crystal.spin
+		crystal_shield = crystal.shield
+		crystal_fade_parts = crystal.fade_parts
+		no_shadow_parts = crystal.no_shadow_parts
+		bar_height = float(crystal.get("bar_height", 8.75))
+		bar_width = float(crystal.get("bar_width", 5.2))
 		# 基地脚下的圈就是泉水范围，和 match_sim 的恢复判定共用同一个半径。
 		ring_radius = MapData.FOUNTAIN_RADIUS
-		var light := OmniLight3D.new()
-		light.light_color = team_color
-		light.light_energy = 1.6
-		light.omni_range = 22.0
-		light.position = Vector3(0, 4.0, 0)
-		light.shadow_enabled = false
-		root.add_child(light)
-		destroy_hide.append(light)
-		var beam := MeshInstance3D.new()
-		var beam_mesh := CylinderMesh.new()
-		beam_mesh.top_radius = 0.5
-		beam_mesh.bottom_radius = 0.15
-		beam_mesh.height = 26.0
-		beam_mesh.radial_segments = 12
-		beam.mesh = beam_mesh
-		var beam_material := StandardMaterial3D.new()
-		beam_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		beam_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		beam_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		beam_material.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.1)
-		beam_material.emission_enabled = true
-		beam_material.emission = team_color
-		beam_material.emission_energy_multiplier = 0.7
-		beam.material_override = beam_material
-		beam.position = Vector3(0, 13.0, 0)
-		beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		root.add_child(beam)
-		destroy_hide.append(beam)
-		# 水晶护盾：双塔存活且基地已暴露时罩住整座水晶，破碎后直接消失。
-		var bubble := MeshInstance3D.new()
-		var bubble_mesh := SphereMesh.new()
-		bubble_mesh.radius = 4.6
-		bubble_mesh.height = 9.2
-		bubble_mesh.radial_segments = 32
-		bubble_mesh.rings = 16
-		bubble.mesh = bubble_mesh
-		var bubble_material := StandardMaterial3D.new()
-		bubble_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		bubble_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		bubble_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		bubble_material.albedo_color = Color(0.56, 0.82, 1.0, 0.14)
-		bubble_material.emission_enabled = true
-		bubble_material.emission = Color(0.5, 0.78, 1.0)
-		bubble_material.emission_energy_multiplier = 0.8
-		bubble.material_override = bubble_material
-		bubble.position.y = 3.0
-		bubble.visible = float(entity.get("shield", 0.0)) > 0.0
-		bubble.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		root.add_child(bubble)
-		crystal_shield = bubble
-		destroy_hide.append(bubble)
-		# 基地广场法阵：贴地旋转符阵 + 三道同心环。原来广场只是一块圆柱贴图，
-		# 俯视像一块木地板；法阵让它一眼读成"泉水晶盘"，而不是普通地面。
-		var sigil_shader: Shader = _sigil_shader
-		if sigil_shader == null:
-			sigil_shader = load(CAMP_SIGIL_SHADER) as Shader
-		if sigil_shader != null:
-			var sigil_material := ShaderMaterial.new()
-			sigil_material.shader = sigil_shader
-			sigil_material.set_shader_parameter("sigil_color", Color(team_color.r, team_color.g, team_color.b, 0.62))
-			sigil_material.set_shader_parameter("active", 1.0)
-			var sigil := MeshInstance3D.new()
-			sigil.name = "base_sigil_" + team
-			var sigil_plane := PlaneMesh.new()
-			sigil_plane.size = Vector2(14.0, 14.0)
-			sigil.mesh = sigil_plane
-			sigil.material_override = sigil_material
-			sigil.position = Vector3(0.0, 0.09, 0.0)
-			sigil.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			root.add_child(sigil)
-			destroy_hide.append(sigil)
-		for i in 3:
-			var plaza_radius: float = [8.0, 6.1, 3.8][i]
-			var plaza_ring := MeshInstance3D.new()
-			plaza_ring.name = "base_ring_%s_%d" % [team, i]
-			var plaza_torus := TorusMesh.new()
-			plaza_torus.inner_radius = plaza_radius - 0.07
-			plaza_torus.outer_radius = plaza_radius + 0.07
-			plaza_torus.rings = 48
-			plaza_torus.ring_segments = 5
-			plaza_ring.mesh = plaza_torus
-			var plaza_mat := StandardMaterial3D.new()
-			plaza_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			plaza_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-			plaza_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-			plaza_mat.albedo_color = Color(team_color.r, team_color.g, team_color.b, 0.28)
-			plaza_mat.emission_enabled = true
-			plaza_mat.emission = team_color
-			plaza_mat.emission_energy_multiplier = 0.8
-			plaza_ring.material_override = plaza_mat
-			plaza_ring.position.y = 0.10
-			plaza_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			root.add_child(plaza_ring)
+		# 符阵/同心环单独登记：死亡时 arena 要直接翻它们自己的 visible（测试也按节点读），
+		# 只靠隐藏父节点会让 `base_sigil_*` 的 visible 仍为 true。
+		destroy_hide.append(crystal.sigil)
+		for plaza_ring in crystal.plaza_rings:
 			destroy_hide.append(plaza_ring)
 	else:
 		# 参考图里的塔：米黄石雕裙摆 + 收分塔柱 + 笼状塔冠 + 发光核心 + 塔脚光池。
@@ -4821,7 +4275,10 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		ring_radius = 2.0 * visual_scale
 		# 核心和光晕都不投阴影：自发光体在地面上留一块实心黑影非常出戏。
 		no_shadow_parts = [core_node, halo_node]
-	ModelUtils.tint(model, team_color, 0.08 if entity_type == "base" else 0.04)
+	if entity_type != "base":
+		# 主堡材质由 CrystalVisual 直接持有（material_override 优先于 surface_override），
+		# tint 只会复制出一批没人用的副本，跳过。
+		ModelUtils.tint(model, team_color, 0.04)
 	ModelUtils.enable_shadows(model, true)
 	for part in no_shadow_parts:
 		(part as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -4969,6 +4426,7 @@ func _create_structure_view(entity: Dictionary) -> Dictionary:
 		"shield": shield,
 		"crystal_shield": crystal_shield,
 		"crystal_fade_parts": crystal_fade_parts,
+		"crystal_visual": crystal_visual,
 		"range_ring": range_ring,
 		"range_mat": range_mat,
 		"range_band": range_band,
@@ -5118,152 +4576,9 @@ func _add_structure_bar(root: Node3D, height: float, width: float, color: Color)
 	return [bar, mat]
 
 func _process_events(events: Array) -> void:
-	# 音效与表现共用同一批事件：模拟侧算一次，主机/客机听到的是同一场战斗。
-	if _audio != null:
-		_audio.handle_events(events, TICK)
-	# 技能表现统一从 SkillFx.requests() 取：Q/E 的 skill、W/R 的 skill_cast、
-	# 召唤师技能的 summoner_cast 在这里归一。以前只认 skill，W/R 放出去毫无表现。
-	for request in SkillFx.requests(events):
-		_spawn_skill_fx(request)
-		# MON-04 技能预警：敌方 AOE 落地位置铺一圈红色危险圈。
-		# 不做"延迟伤害"式的假预警——sim 没有前摇，这里只是把危险范围画清楚，
-		# 让玩家在后续 0.6s 的余爆/残留里知道哪里不能站。
-		if str(request.get("team", "")) != "" and str(request.get("team", "")) != local_team:
-			var kind := str(request.get("kind", ""))
-			if DANGER_SKILL_KINDS.has(kind):
-				var aim: Vector2 = request.get("aim", Vector2.ZERO)
-				var radius := _recipe_radius(request.get("recipe", {}))
-				if radius >= 2.0:
-					_spawn_ring(Vector3(aim.x, 0.07, aim.y), Color(1.0, 0.24, 0.18),
-						radius * 0.97, radius, 0.6, 0.5, false, 1)
-	for event in events:
-		if not (event is Dictionary):
-			continue
-		var banner := MapView.event_banner(event)
-		if not banner.is_empty() and hud != null:
-			var banner_color: Color = banner.get("color", GameTheme.GOLD_LIGHT)
-			if bool(banner.get("announce", false)):
-				hud.announce(str(banner.get("text", "")), banner_color, float(banner.get("duration", 1.6)))
-			hud.add_feed(str(banner.get("feed", "")), banner_color)
-		match str(event.get("type", "")):
-			"projectile_spawned":
-				# 项 3：弹道是**真实飞行的实体**，不是施法瞬间补的一段特效。
-				# 这里只负责把"发射了"变成画面上的一个弹丸；命中时另收 projectile_hit。
-				_handle_projectile_spawned(event)
-			"projectile_hit":
-				_handle_projectile_hit(event)
-			"attack":
-				_handle_hero_attack(event)
-			"hit":
-				_handle_hit_event(event)
-			"heal":
-				# FX-11 治疗飘字：绿色 + 号，位置在治疗者脚下（吸血/回复都走这里）。
-				var heal_pos := Vector3(float(event.get("x", 0.0)), 0.0, float(event.get("y", 0.0)))
-				_spawn_damage_number(heal_pos + Vector3(0, 1.9, 0), float(event.get("amount", 0.0)), Color(0.55, 0.95, 0.62), "+")
-			"death":
-				_handle_death_event(event)
-			"tower_destroyed":
-				var pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
-				_explosion(pos, RED if str(event.get("team", "red")) == "red" else BLUE, 32)
-				_trigger_hit_stop(0.06, 0.22)
-				_start_structure_collapse(event)
-			"guard_destroyed":
-				var guard_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
-				_explosion(guard_pos, RED if str(event.get("team", "red")) == "red" else BLUE, 30)
-				_camera_shake = maxf(_camera_shake, 0.14)
-				_start_structure_collapse(event)
-			"ping_mark":
-				# 项 11.1：只画地面环 + 短时文字，不参与命中停顿/震屏，避免打断对线操作。
-				_spawn_ping_marker(event)
-				if hud != null:
-					hud.show_ping(event)
-			"crystal_shield_broken":
-				var crystal_pos := Vector3(float(event.get("x", 0.0)), 2.0, float(event.get("y", 0.0)))
-				_spawn_ring(crystal_pos, Color(0.55, 0.84, 1.0), 1.0, 8.0, 1.0)
-				_spawn_particles(crystal_pos + Vector3(0, 2.0, 0), Color(0.62, 0.86, 1.0), 30, 6.0)
-				_camera_shake = maxf(_camera_shake, 0.22)
-				_trigger_hit_stop(0.1, 0.3)
-			"teleport":
-				var from_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
-				var to_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
-				_handle_channel_departure(int(event.get("hero", -1)), "teleport", from_pos, to_pos)
-			"teleport_interrupt":
-				var break_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
-				_handle_channel_break(int(event.get("hero", -1)), "teleport", break_pos)
-			"recall":
-				var leave_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
-				var home_pos := Vector3(float(event.get("to_x", 0.0)), 0.2, float(event.get("to_y", 0.0)))
-				_handle_channel_departure(int(event.get("hero", -1)), "recall", leave_pos, home_pos)
-			"recall_interrupt":
-				var cancel_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
-				_handle_channel_break(int(event.get("hero", -1)), "recall", cancel_pos)
-			"river_spirit_killed":
-				var spirit_pos := Vector3(float(event.get("x", 0.0)), 0.5, float(event.get("y", 0.0)))
-				_spawn_ring(spirit_pos, Color(0.46, 0.86, 0.94), 0.6, 4.0, 0.8)
-			"objective_spawn":
-				# 首领刷新是全局事件：两个坑各起一圈地面冲击 + 金色粒子，配合顶部播报。
-				for pit in MapLayout.OBJECTIVE_PITS:
-					var pit_pos := Vector3(float(pit.pos.x), 0.1, float(pit.pos.y))
-					_spawn_ring(pit_pos, Color(0.92, 0.66, 0.28), 1.0, 5.5, 1.0, 0.65)
-					# 2 秒的慢速预警环：在 1 秒冲击环散掉之后继续圈住坑位，
-					# 读成「这里已经有人了」，而不是一闪而过。
-					_spawn_ring(pit_pos, Color(1.0, 0.78, 0.36), 3.0, 5.8, 2.0, 0.28)
-					_spawn_particles(pit_pos + Vector3(0.0, 0.8, 0.0), GOLD, 16, 3.0, 0.1, 0.7)
-				_camera_shake = maxf(_camera_shake, 0.12)
-				_zoom_kick = maxf(_zoom_kick, OBJECTIVE_ZOOM_KICK * _fx_intensity())
-			"objective_killed":
-				var boss_pos := Vector3(float(event.get("x", 0.0)), 1.0, float(event.get("y", 0.0)))
-				_explosion(boss_pos, GOLD, 40)
-				_spawn_ring(Vector3(boss_pos.x, 0.1, boss_pos.z), GOLD, 1.0, 6.0, 0.9)
-				_spawn_decal(Vector2(boss_pos.x, boss_pos.z), GOLD, 5.0, 2.2)
-				_trigger_hit_stop(0.12, 0.35)
-				_camera_shake = maxf(_camera_shake, 0.2)
-			"buff_taken":
-				var buff_pos := Vector3(float(event.get("x", 0.0)), 0.2, float(event.get("y", 0.0)))
-				var buff_color := BLUE if str(event.get("buff", "")) == "blue" else RED
-				_spawn_ring(buff_pos, buff_color, 0.6, 3.0, 0.7)
-				_spawn_particles(buff_pos + Vector3(0, 0.8, 0), buff_color, 16, 3.0)
-			"base_exposed":
-				_camera_shake = maxf(_camera_shake, 0.16)
-			"level_up":
-				var hero: UnitVisual = _views.get(int(event.get("hero", -1)))
-				if hero:
-					_spawn_ring(hero.position, GOLD, 0.3, 2.2, 0.6)
-					_spawn_particles(hero.position + Vector3(0, 1.0, 0), GOLD, 20, 4.0)
-			"wave":
-				var wave := int(event.get("wave", 1))
-				if wave == 1 or wave % 3 == 0:
-					hud.announce("第 %d 波兵线出发" % wave, Color(0.93, 0.82, 0.6), 1.4)
-				hud.add_feed("第 %d 波兵线出发" % wave, GameTheme.MUTED)
-			"minion_attack":
-				_handle_minion_attack(event)
-			"monster_attack":
-				_handle_monster_attack(event)
-			"structure_attack":
-				_handle_structure_attack(event)
-			"respawn":
-				var pos := Vector3(float(event.get("x", 0.0)), 0.1, float(event.get("y", 0.0)))
-				_spawn_ring(pos, GOLD, 0.4, 2.0, 0.6)
-			"match_end":
-				var match_winner := str(event.get("winner", ""))
-				# 败方基地：水晶碎成光屑 + 一圈扩散到广场边缘的冲击环。
-				# match_end 只带 winner，败方基地由 winner 反推，不新增协议字段。
-				var loser_base: Vector2 = MapData.RED_BASE if match_winner == "blue" else MapData.BLUE_BASE
-				var loser_color := RED if match_winner == "blue" else BLUE
-				_explosion(Vector3(loser_base.x, 1.6, loser_base.y), loser_color, 80)
-				_spawn_ring(Vector3(loser_base.x, 0.12, loser_base.y), loser_color, 1.0, 12.0, 1.2, 0.8)
-				_camera_shake = maxf(_camera_shake, 0.3)
-				if hud != null:
-					hud.announce("主堡陷落", GameTheme.GOLD_LIGHT, 2.0)
-				_trigger_hit_stop(0.16, 0.45)
-				# 结算曲按本地队伍判：赢了上行号角，输了下行钟声。
-				# 这两个是一次性音（不循环），所以不走 play_cue 的声道池。
-				if _audio != null:
-					var winner := str(event.get("winner", ""))
-					if winner == local_team:
-						_audio.play_music(AudioDirector.MUSIC_VICTORY)
-					else:
-						_audio.play_music(AudioDirector.MUSIC_DEFEAT)
+	# 事件类型 → 表现层处理的分发住在 event_router.gd（C17 拆分）。
+	# host 传入 self：音频导演 / HUD / 视图表 / 镜头状态仍由 arena 持有。
+	EventRouter.process(self, events)
 
 # 引导完成（回城落地 / 传送抵达）：起点法阵炸开、终点成形、模型直接落位。
 # 必须显式 snap_to：位置跳变不足 14 米时（从自家野区回城就是这种）插值会让人滑过整片野区。
@@ -5639,40 +4954,8 @@ func _handle_structure_attack(event: Dictionary) -> void:
 	_spawn_particles(to, color.lerp(Color(1.0, 0.95, 0.8), 0.45), 6, 2.6, 0.09, 0.32)
 
 func _handle_hit_event(event: Dictionary) -> void:
-	var pos := Vector3(float(event.get("x", 0.0)), 0.0, float(event.get("y", 0.0)))
-	var amount := float(event.get("amount", 0.0))
-	var target_id := int(event.get("target", -1))
-	var target_type := str(event.get("target_type", ""))
-	var color := Color(1.0, 0.92, 0.72) if amount >= 150.0 else Color(0.95, 0.96, 1.0)
-	_spawn_damage_number(pos + Vector3(0, 1.7 if target_type == "hero" else 1.0, 0), amount, color)
-	# FX-11 护盾吸收：蓝色「盾 N」飘在伤害数字上方。全额被盾吃掉时 amount=0，
-	# 这时更要显示吸收量，否则玩家会觉得这一下完全没打中。
-	var absorbed := float(event.get("absorbed", 0.0))
-	if absorbed > 0.5:
-		_spawn_damage_number(
-			pos + Vector3(0, 2.05 if target_type == "hero" else 1.35, 0),
-			absorbed,
-			Color(0.58, 0.84, 1.0),
-			"盾 "
-		)
-	# 受击反馈对所有单位生效：英雄/小兵/野怪被命中时都要缩身 + 闪白，
-	# 否则打野和清兵只剩飘字，模型毫无反应。
-	var view: UnitVisual = _views.get(target_id)
-	if view:
-		view.play_hit()
-	# 出手者反馈：野怪/小兵没有独立的 attack 事件，用 hit 的来源 id 补一次前倾。
-	var source_id := int(event.get("source", -1))
-	var source_type := str(event.get("source_type", ""))
-	if (source_type == "monster" or source_type == "minion") and source_id >= 0:
-		var attacker: UnitVisual = _views.get(source_id)
-		if attacker:
-			attacker.play_attack_reaction()
-	if target_type == "hero":
-		_spawn_particles(pos + Vector3(0, 1.0, 0), Color(1.0, 0.72, 0.4), 10, 3.0)
-		if target_id == _local_entity_id:
-			_camera_shake = maxf(_camera_shake, 0.12)
-	else:
-		_spawn_particles(pos + Vector3(0, 0.55, 0), Color(0.9, 0.72, 0.4), 4, 1.8, 0.05, 0.3)
+	# 受击表现已搬到 event_router.gd（C17）；这里保留入口供既有调用与测试使用。
+	EventRouter.handle_hit_event(self, event)
 
 func _handle_death_event(event: Dictionary) -> void:
 	var pos := Vector3(float(event.get("x", 0.0)), 0.4, float(event.get("y", 0.0)))

@@ -261,6 +261,10 @@ var _announcer := CombatAnnouncer.new()
 # 所以不传 seed 的对局逐位等于历史行为 —— 既有测试的数值断言因此不受影响。
 const DEFAULT_RNG_SEED := 0x2F6E2B1
 var _rng_state := DEFAULT_RNG_SEED
+# 项 C4：逐实体顺序更新时，后动的一方在"进入攻击距离"的那一帧会少走半步，
+# 于是稳定占到兵线仇恨的便宜。这个先手优势由 seed 决定归哪一方 —— 同一 seed
+# 仍然逐位可复现，不同 seed 之间两侧各拿一半，镜像局不再固定偏向一侧。
+var _bot_order_flip := false
 
 func _init(match_config: Dictionary) -> void:
 	config = match_config.duplicate(true)
@@ -271,6 +275,7 @@ func _init(match_config: Dictionary) -> void:
 	_rng_state = raw_seed & 0x7FFFFFFF
 	if _rng_state == 0:
 		_rng_state = DEFAULT_RNG_SEED
+	_bot_order_flip = _rng_state % 2 == 1
 	if mode != "team":
 		mode = "duel"
 	state = {
@@ -1275,9 +1280,18 @@ func _apply_human_inputs(dt: float) -> void:
 func _update_bots(dt: float) -> void:
 	if not bool(state.bot_ai):
 		return
+	var bots: Array = []
 	for entity in state.entities:
-		if entity.type != "hero" or not entity.alive or entity.controller != "bot":
-			continue
+		if entity.type == "hero" and entity.alive and entity.controller == "bot":
+			bots.append(entity)
+	# 公平性（C4）：逐实体顺序更新时，先动的一方每 tick 多压半步 —— 谁先走谁先进入
+	# 对方兵线的仇恨圈，镜像 1v1 会稳定偏向固定一侧（实测翻转遍历奇偶就能把优势方
+	# 从红方换成蓝方，证明偏差来自更新顺序而不是数值）。每 tick 交替方向，再叠加
+	# 由 seed 决定的每局先手，让"先手半个身位"在时间上抵消、在样本间各占一半。
+	var reverse := (int(round(float(state.time) * TICK_RATE)) % 2 == 1) != _bot_order_flip
+	if reverse:
+		bots.reverse()
+	for entity in bots:
 		var recommended := ItemShop.get_quick_buy_recommendation(entity, ItemShop.build_order_for(str(entity.hero_type)))
 		if recommended != "":
 			ItemShop.buy_item(entity, recommended)

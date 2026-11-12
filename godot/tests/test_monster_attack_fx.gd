@@ -298,7 +298,9 @@ func test_every_texture_named_by_the_new_plans_exists() -> void:
 # ---------------------------------------------------------------------------
 
 func test_arena_routes_monster_attacks_and_uses_pools() -> void:
-	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	# 分发在 event_router.gd（C17），生成逻辑仍在 arena：两份源码都要看。
+	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd") \
+		+ FileAccess.get_file_as_string("res://scripts/game/event_router.gd")
 	check(has_live_line(source, '"monster_attack":'), "monster_attack 必须接进 _process_events 的分发")
 	check(has_live_line(source, "_handle_monster_attack(event)"), "要接到 _handle_monster_attack")
 	check(has_live_line(source, "attack_fx_plan("), "野怪与小兵共用同一份纯函数配方")

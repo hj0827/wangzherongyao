@@ -5,6 +5,7 @@ extends "res://tests/test_base.gd"
 
 const Arena = preload("res://scripts/game/arena.gd")
 const MapData = preload("res://sim/map_data.gd")
+const MapGeometry = preload("res://scripts/game/map_geometry.gd")
 
 func _arena_with_props() -> Node3D:
 	var arena: Node3D = Arena.new()
@@ -41,5 +42,5 @@ func test_base_props_sit_outside_the_plaza_and_off_the_lane() -> void:
 		var point := Vector2(root.position.x, root.position.z)
 		var distance := point.distance_to(base)
 		check(distance > 8.0 and distance < 11.0, "%s 要绕在基地广场外沿（%.2f）" % [name, distance])
-		check(arena._lane_distance(point) > 3.9, "%s 不能立在兵线路面里（%.2f）" % [name, arena._lane_distance(point)])
+		check(MapGeometry.lane_distance(point) > 3.9, "%s 不能立在兵线路面里（%.2f）" % [name, MapGeometry.lane_distance(point)])
 	arena.free()

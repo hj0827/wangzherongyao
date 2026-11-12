@@ -46,14 +46,14 @@ func test_terrain_and_river_share_one_snippet() -> void:
 	# 两个 shader 都必须走 apply_outside_fade，而不是各抄一份公式。
 	# 用 has_live_line 而不是 contains：把调用注释掉之后字符串还在，守卫会假绿。
 	var terrain := FileAccess.get_file_as_string("res://scripts/game/terrain_builder.gd")
-	var arena := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	var river := FileAccess.get_file_as_string("res://scripts/game/river_builder.gd")
 	check(has_live_line(terrain, "ArenaLook.apply_outside_fade("), "地形必须用共享的渐隐片段")
-	check(has_live_line(arena, "ArenaLook.apply_outside_fade("), "水面必须用共享的渐隐片段")
+	check(has_live_line(river, "ArenaLook.apply_outside_fade("), "水面必须用共享的渐隐片段")
 	check(has_live_line(terrain, "ArenaLook.bind_outside_fade("), "地形必须绑定共享参数")
-	check(has_live_line(arena, "ArenaLook.bind_outside_fade("), "水面必须绑定共享参数")
+	check(has_live_line(river, "ArenaLook.bind_outside_fade("), "水面必须绑定共享参数")
 	# 公式本身只允许出现在 arena_look.gd 里。
 	check(not has_live_line(terrain, "smoothstep(play_half"), "地形里不能自带一份渐隐公式")
-	check(not has_live_line(arena, "smoothstep(play_half"), "水面里不能自带一份渐隐公式")
+	check(not has_live_line(river, "smoothstep(play_half"), "水面里不能自带一份渐隐公式")
 
 func test_fade_uses_chebyshev_distance_not_euclidean() -> void:
 	# 城墙是方的、clamp_bounds 也是方的。用欧氏距离会让四个角比四条边晚暗一大圈，

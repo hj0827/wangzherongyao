@@ -4,6 +4,7 @@ extends "res://tests/test_base.gd"
 # 沿河道两岸（x = z）铺高草簇，避开兵线、桥心与营地；单批次、不投影。
 
 const Arena = preload("res://scripts/game/arena.gd")
+const MapGeometry = preload("res://scripts/game/map_geometry.gd")
 
 func test_river_reeds_exist_and_sit_on_the_banks() -> void:
 	var arena: Node3D = Arena.new()
@@ -24,6 +25,6 @@ func test_river_reeds_exist_and_sit_on_the_banks() -> void:
 		var p: Vector2 = point
 		var river_d := absf(p.x - p.y) * 0.70710678
 		check(river_d >= 8.5 and river_d <= 13.0, "芦苇要长在岸线附近（%.2f）" % river_d)
-		gt(arena._lane_distance(p), 4.0, "芦苇不能长进兵线路面")
+		gt(MapGeometry.lane_distance(p), 4.0, "芦苇不能长进兵线路面")
 		gt(p.length(), 12.0, "芦苇不能长到桥心/地图中心")
 	arena.free()

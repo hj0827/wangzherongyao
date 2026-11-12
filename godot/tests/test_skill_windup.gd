@@ -75,10 +75,23 @@ func test_ult_spends_resources_at_windup_start_but_damage_lands_after_it() -> vo
 	gt(mp0 - float(blue.mp), 90.0, "起手即扣蓝（大招 100，留一点回复余量）")
 	sim.tick(TICK)
 	near(float(red.hp), hp0, 0.01, "第二帧仍在前摇，不该提前结算")
-	_tick_for(sim, 0.6)
+	# match_sim.tick 每帧开头清空 state.events，所以事件只能取"结算那一帧"，
+	# 不能等 0.6 秒后再统一取 —— 这里逐帧取，命中清空起手态的那一帧即停。
+	var resolved_events: Array = []
+	var resolved := false
+	for i in 30:
+		sim.tick(TICK)
+		resolved_events = sim.consume_events()
+		if str(blue.get("cast_slot", "")) == "":
+			resolved = true
+			break
+	check(resolved, "前摇必须在有限时间内结束")
 	lt(float(red.hp), hp0, "前摇结束后伤害必须落地")
-	eq(str(blue.get("cast_slot", "")), "", "结算后必须清空起手态")
-	eq(_events_of(sim, "skill").size() > 0, true, "结算时必须补发 skill 事件给表现层")
+	var casts := 0
+	for ev in resolved_events:
+		if str(ev.get("type", "")) == "skill_cast":
+			casts += 1
+	eq(casts > 0, true, "结算时必须补发 skill_cast 事件给表现层")
 
 # ---------------------------------------------------------------- 硬控打断
 

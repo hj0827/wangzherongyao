@@ -6,6 +6,8 @@ signal location_clicked(world_position: Vector2)
 signal location_dragged(world_position: Vector2)
 # 松手结算。情报面板只在这里刷新，拖拽途中不刷屏。
 signal drag_finished(world_position: Vector2)
+# 触屏长按（验收 11.1 手势入口）：不松手、也不位移，0.45s 后请求在该点打开信号轮盘。
+signal long_pressed(world_position: Vector2)
 
 const MapData = preload("res://sim/map_data.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
@@ -17,6 +19,10 @@ const PingRules = preload("res://sim/ping_rules.gd")
 
 const MARGIN := 13.0
 const DISPLAY_SIZE := Vector2(206, 206)
+# 长按判定：按住不动 0.45s 算长按；超过 8px 位移立即按拖拽处理，长按作废。
+# 鼠标不参与长按 —— 桌面端按住就是拖拽定位，加长按只会让拖拽中途弹出轮盘。
+const LONG_PRESS_SECONDS := 0.45
+const LONG_PRESS_MAX_DRIFT := 8.0
 
 # 视野圈的分段数。180px 的地图上半径约 25~40px，36 段每段不到 4°，看不出折线；
 # 再往上加只是让每帧多几个顶点，视觉收益为零。
@@ -299,6 +305,12 @@ var _panel_style: StyleBoxFlat
 var _dragging := false
 var _drag_touch := false
 var _drag_local := Vector2.ZERO
+# 长按累加用帧时间而不是墙钟：_process(delta) 可以被测试直接驱动，
+# 无头环境不必 sleep 0.45 秒。
+var _press_elapsed := 0.0
+var _press_origin := Vector2.ZERO
+var _press_drifted := false
+var _long_press_fired := false
 # --- 相机视野框 ---
 # 不画这个框，玩家「点过去」之后无法判断镜头落在地图哪一块。
 # 存的是四个世界角点：透视下地面可视区是梯形，用 AABB 会明显偏离真实视线。
@@ -547,8 +559,17 @@ func _gui_input(event: InputEvent) -> void:
 		if _dragging and _drag_touch:
 			_drag_to((event as InputEventScreenDrag).position)
 
-func _process(_delta: float) -> void:
-	if not _dragging or _drag_touch:
+func _process(delta: float) -> void:
+	if not _dragging:
+		return
+	if _long_press_fired:
+		return
+	if _drag_touch:
+		# 按住不动 0.45s = 长按；位移超阈值后 _press_drifted 置真，这里不再判定，
+		# 手势完全交回既有的 ScreenDrag → 拖拽路径。
+		_press_elapsed += delta
+		if not _press_drifted and _press_elapsed >= LONG_PRESS_SECONDS:
+			_fire_long_press()
 		return
 	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		_end_drag()
@@ -559,15 +580,21 @@ func _begin_drag(local: Vector2, touch_drag: bool) -> void:
 	_dragging = true
 	_drag_touch = touch_drag
 	_drag_local = local
-	set_process(not touch_drag)
+	_press_elapsed = 0.0
+	_press_origin = local
+	_press_drifted = false
+	_long_press_fired = false
+	set_process(true)
 	_emit_location(local, false)
 	if is_inside_tree():
 		accept_event()
 
 func _drag_to(local: Vector2) -> void:
-	if not _dragging:
+	if not _dragging or _long_press_fired:
 		return
 	_drag_local = local
+	if not _press_drifted and local.distance_to(_press_origin) > LONG_PRESS_MAX_DRIFT:
+		_press_drifted = true
 	# 拖拽允许出界：夹到地图边缘继续跟随，比中途断开更像 MOBA 的操作手感。
 	_emit_location(local, true)
 
@@ -576,11 +603,22 @@ func _end_drag() -> void:
 		return
 	_dragging = false
 	_drag_touch = false
+	_long_press_fired = false
+	_press_drifted = false
 	set_process(false)
 	var world := screen_to_world_clamped(_drag_local)
 	drag_finished.emit(world)
 	if is_inside_tree():
 		accept_event()
+
+# 长按只发一次：开轮盘是「打开 UI」，不是持续输入。落点用按下瞬间的位置，
+# 而不是 0.45s 后的位置 —— 这期间没有位移（有位移已取消长按）。
+func _fire_long_press() -> void:
+	_long_press_fired = true
+	var world: Variant = screen_to_world_clamped(_press_origin)
+	if world == null:
+		return
+	long_pressed.emit(world)
 
 func _emit_location(local: Vector2, dragging: bool) -> void:
 	var world: Variant = screen_to_world_clamped(local) if dragging else screen_to_world(local)

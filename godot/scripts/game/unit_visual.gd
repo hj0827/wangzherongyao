@@ -6,6 +6,8 @@ const BushEye = preload("res://scripts/game/bush_eye.gd")
 const MonsterForms = preload("res://scripts/game/monster_forms.gd")
 const HeroModelRegistry = preload("res://scripts/game/hero_model_registry.gd")
 const MonsterKit = preload("res://scripts/game/monster_kit.gd")
+const HeroLook = preload("res://scripts/game/hero_look.gd")
+const HeroCostume = preload("res://scripts/game/hero_costume.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
 const BLUE := Color(0.22, 0.6, 1.0)
@@ -339,6 +341,10 @@ var _bush_eye_time := 0.0
 var team_ring: MeshInstance3D
 var local_ring: MeshInstance3D
 var cast_light: OmniLight3D
+# 专属服饰（披风 / 下摆 / 战旗 / 兜帽…）的摆动记账。
+# 结构见 HeroCostume.build_costume()：{"parts": [件名], "sway": {类别: [{node, phase}]}}。
+var _costume: Dictionary = {}
+var _costume_time := 0.0
 
 func setup(
 	unit_kind: String,
@@ -480,8 +486,6 @@ func _build_hero() -> void:
 	if not _force_shared_hero and HeroModelRegistry.has_custom_model(hero_type):
 		_build_custom_hero(setup_data)
 		return
-	var team_tint := Color(0.92, 0.25, 0.2) if team == "red" else Color(0.35, 0.55, 1.0)
-	var team_tint_amount := 0.24 if team == "red" else 0.05
 	model_root = Node3D.new()
 	model_root.name = "Model"
 	add_child(model_root)
@@ -490,14 +494,6 @@ func _build_hero() -> void:
 		var model: Node3D = scene.instantiate()
 		model.name = str(slot).capitalize()
 		model_root.add_child(model)
-		if slot == "outfit":
-			var tint_color: Color = setup_data.get("outfit_tint", Color.WHITE)
-			ModelUtils.tint(model, tint_color, float(setup_data.get("tint_amount", 0.0)))
-		elif slot == "hair":
-			# HERO-02：头发跟服装同色系。只染发色，不动发型/贴图。
-			var hair_color: Color = setup_data.get("hair_tint", Color.WHITE)
-			ModelUtils.tint(model, hair_color, float(setup_data.get("hair_tint_amount", 0.0)))
-		ModelUtils.tint(model, team_tint, team_tint_amount)
 		_attach_retargeted_player(model)
 	var measured_height := ModelUtils.relative_aabb(model_root).size.y
 	model_root.scale = Vector3.ONE * scale_for_height(measured_height, HERO_HEIGHT)
@@ -505,6 +501,7 @@ func _build_hero() -> void:
 	var body_scale: Vector3 = setup_data.get("body_scale", Vector3.ONE)
 	model_root.scale = Vector3(model_root.scale.x * body_scale.x, model_root.scale.y, model_root.scale.z * body_scale.z)
 	_equip_weapon(setup_data)
+	_apply_hero_look()
 	_capture_model_rest_pose()
 	_add_ring(0.9)
 	if is_local:
@@ -519,6 +516,24 @@ func _build_hero() -> void:
 	# 单位数量多、始终处于镜头附近，阴影 pass 的收益远低于开销；
 	# 建筑与环境保留阴影，单位用脚下队伍环提供接地感。
 	ModelUtils.enable_shadows(self, false)
+
+# 英雄「外观身份」的最后一道工序：专属配色材质 + 专属服饰配件。
+#
+# 为什么不再走 ModelUtils.tint：通用角色包的贴图是米白内衬 + 褐皮甲 + 暗橄榄布料的
+# 杂色，乘一个色相出来是脏绿/脏棕；5 个人一起站就是一片土色。现在改成
+# `shaders/hero_skin.gdshader` 逐像素重上色（保留明暗分层、跳过皮肤与眼睛），
+# 再叠一套挂在骨骼上的专属配件（披风/下摆/战旗/兜帽）。
+#
+# 两条接线约束：
+#   1. 必须在**量完身高、装好武器之后**调用 —— 量身高时模型里不能有配件，
+#      否则 `test_hero_silhouette` 的身高契约会被配件顶破；
+#   2. 材质缓存在 HeroCostume 里，同参数同贴图只建一次，重连/重生不会新建材质。
+func _apply_hero_look() -> void:
+	if model_root == null or not HeroLook.has_look(hero_type):
+		return
+	HeroCostume.apply_skin(model_root, hero_type, team)
+	HeroCostume.highlight_weapon(model_root, hero_type)
+	_costume = HeroCostume.build_costume(model_root, hero_type)
 
 # HERO-04 定制模型：模型自带服装/武器/骨骼/动作，不再拼 body/outfit/hair/weapon。
 # 缺失时完全回退现有共享模型，保证没有资产时游戏照常运行。
@@ -542,6 +557,8 @@ func _build_custom_hero(setup_data: Dictionary) -> void:
 	ModelUtils.tint(model_root, team_tint, 0.06)
 	var measured_height := ModelUtils.relative_aabb(model_root).size.y
 	model_root.scale = Vector3.ONE * scale_for_height(measured_height, HERO_HEIGHT)
+	# 定制模型自带服装与武器：只叠队伍色 + 专属配件，不重上色（会盖掉美术的贴图）。
+	_costume = HeroCostume.build_costume(model_root, hero_type)
 	_capture_model_rest_pose()
 	_add_ring(0.9)
 	if is_local:
@@ -1725,6 +1742,7 @@ func process_visual(delta: float) -> void:
 	if immune_aura != null and immune_aura.visible:
 		immune_aura.rotation.y -= delta * 2.4
 	_update_hit_reaction(delta)
+	_animate_costume(delta)
 	if bush_eye != null and bush_eye.visible:
 		# 轻微呼吸 + 透明度起伏：静止的眼睛会被当成贴图污点。
 		_bush_eye_time += delta
@@ -1750,6 +1768,20 @@ func process_visual(delta: float) -> void:
 	_animate_monster(delta)
 	if local_ring:
 		local_ring.rotation.y += delta * 0.8
+
+# 专属服饰的布料摆动。
+#
+# 配件是挂在骨骼上的静态几何 —— 不做这一步，跑动时披风/下摆会像焊在身上的一块板子。
+# 只写**摆动组的 rotation**（HeroCostumeParts 里那些 "CapePanelN" / "SkirtPanelN"），
+# 不碰配件自身的位置与缩放，所以不会和倒地姿态、命中缩身打架。
+func _animate_costume(delta: float) -> void:
+	if _costume.is_empty() or model_root == null:
+		return
+	_costume_time += delta
+	var sway: Dictionary = _costume.get("sway", {})
+	if sway.is_empty():
+		return
+	HeroCostume.sway(sway, _costume_time, moving and not dead, unit_speed)
 
 # 野怪的程序化动画：只有没有骨骼动作的形态才走这里（狼有自己的 Idle/Walk/Death）。
 func _animate_monster(delta: float) -> void:

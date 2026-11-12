@@ -332,7 +332,9 @@ func test_simulation_layer_has_no_audio_nodes() -> void:
 	eq(offenders, [], "sim/ 里不许出现音频节点")
 
 func test_arena_wires_the_audio_director() -> void:
-	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	# 事件分发在 event_router.gd（C17），音频导演的持有与应用仍在 arena。
+	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd") \
+		+ FileAccess.get_file_as_string("res://scripts/game/event_router.gd")
 	check(source.contains("res://scripts/game/audio_director.gd"), "arena 必须 preload 音频导演")
 	check(source.contains("_audio.handle_events("), "战斗事件必须送进音频导演（否则打起来没声音）")
 	check(source.contains("_audio.play_music("), "进入战斗必须切换 BGM")

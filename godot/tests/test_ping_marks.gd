@@ -10,7 +10,12 @@ extends "res://tests/test_base.gd"
 const MatchSim = preload("res://sim/match_sim.gd")
 const NetProtocol = preload("res://net/net_protocol.gd")
 const PingRules = preload("res://sim/ping_rules.gd")
+const MapData = preload("res://sim/map_data.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
+const Minimap = preload("res://scripts/ui/minimap.gd")
+const Arena = preload("res://scripts/game/arena.gd")
+const AudioPlan = preload("res://scripts/game/audio_plan.gd")
+const AudioCues = preload("res://scripts/game/audio_cues.gd")
 
 func _duel() -> Dictionary:
 	var sim := MatchSim.new({
@@ -142,3 +147,131 @@ func test_hud_builds_ping_entry_and_expires_markers() -> void:
 	hud._process(GameHUD.PING_LIFETIME + 0.1)
 	eq(hud._pings.size(), 0, "超过生命周期后自动过期，不残留图标")
 	hud.free()
+
+# ---------------------------------------------------------------- 快捷语音（项 11.2）
+
+func _ctx() -> Dictionary:
+	return {"local": 1, "x": 0.0, "y": 0.0, "team": "blue", "hp_ratio": 1.0}
+
+func _cue_names(plan: Object, event: Dictionary) -> Array:
+	plan.begin_frame(1.0 / 30.0, _ctx())
+	var out := []
+	for item in plan.cues_for(event, _ctx()):
+		out.append(str(item.get("cue", "")))
+	return out
+
+func test_every_ping_kind_maps_to_its_own_voice_cue() -> void:
+	var cues := []
+	for kind in PingRules.KINDS:
+		var cue := PingRules.cue(kind)
+		check(cue != "", "%s 必须有语音 cue" % kind)
+		check(not cues.has(cue), "%s 的语音 cue 不能与其它信号重复" % kind)
+		cues.append(cue)
+	eq(PingRules.cue("free chat"), "", "非法信号没有语音 cue，避免凭空造名字")
+
+func test_ping_voice_cues_are_synthesizable_and_distinct() -> void:
+	var lengths := []
+	for kind in PingRules.KINDS:
+		var stream: AudioStreamWAV = AudioCues.cue(PingRules.cue(kind))
+		check(stream != null, "%s 的语音必须有合成实现" % kind)
+		if stream == null:
+			continue
+		var peak := 0.0
+		for i in stream.data.size() / 2:
+			peak = maxf(peak, absf(float(stream.data.decode_s16(i * 2)) / 32767.0))
+		gt(peak, 0.05, "%s 的语音必须听得到（峰值过低）" % kind)
+		var seconds := (stream.data.size() / 2) / float(stream.mix_rate)
+		lt(seconds, 1.2, "%s 的语音不能太长，会盖住下一条信号" % kind)
+		lengths.append(seconds)
+	eq(lengths.size(), 4, "四条语音都要能生成")
+	eq(_unique_count(lengths), 4, "四条语音的时长不能完全一样")
+
+func _unique_count(values: Array) -> int:
+	var seen := {}
+	for value in values:
+		seen[value] = true
+	return seen.size()
+
+func test_ping_mark_is_audible_regardless_of_distance() -> void:
+	var plan := AudioPlan.new()
+	# 远点在 40 米外：普通战斗音早已衰减丢弃，但信号是全队广播，必须仍然发声。
+	var event := {"type": "ping_mark", "kind": "help", "x": 999.0, "y": 999.0, "team": "blue"}
+	eq(_cue_names(plan, event), [AudioPlan.CUE_PING_HELP], "队友信号不做距离衰减")
+	var bad := {"type": "ping_mark", "kind": "free chat", "x": 0.0, "y": 0.0, "team": "blue"}
+	eq(_cue_names(plan, bad), [], "非法信号不占声道")
+
+# ---------------------------------------------------------------- 手势入口（项 11.1）
+
+func _minimap_at() -> Minimap:
+	var minimap := Minimap.new()
+	minimap.custom_minimum_size = Minimap.DISPLAY_SIZE
+	minimap.size = Minimap.DISPLAY_SIZE
+	return minimap
+
+func test_minimap_long_press_fires_once_at_press_point() -> void:
+	var minimap := _minimap_at()
+	var fired := []
+	minimap.long_pressed.connect(func(world: Vector2) -> void: fired.append(world))
+	minimap._begin_drag(Vector2(100.0, 100.0), true)
+	minimap._process(Minimap.LONG_PRESS_SECONDS * 0.5)
+	eq(fired.size(), 0, "不到 0.45s 不能弹轮盘")
+	minimap._process(Minimap.LONG_PRESS_SECONDS)
+	eq(fired.size(), 1, "按住不动 0.45s 触发一次")
+	# 落点按「按下点」换算，而不是 0.45s 时指针所在（这期间无位移）。
+	check(fired[0].distance_to(minimap.screen_to_world_clamped(Vector2(100.0, 100.0))) < 0.01,
+		"长按落点 = 按下点")
+	minimap._process(1.0)
+	eq(fired.size(), 1, "长按只触发一次，不连发")
+	minimap.free()
+
+func test_minimap_long_press_cancelled_by_drag_but_drag_still_works() -> void:
+	var minimap := _minimap_at()
+	var fired := []
+	var dragged := []
+	minimap.long_pressed.connect(func(world: Vector2) -> void: fired.append(world))
+	minimap.location_dragged.connect(func(world: Vector2) -> void: dragged.append(world))
+	minimap._begin_drag(Vector2(100.0, 100.0), true)
+	# 位移超过阈值：手势回到原有拖拽路径，长按作废。
+	minimap._drag_to(Vector2(100.0 + Minimap.LONG_PRESS_MAX_DRIFT + 4.0, 100.0))
+	minimap._process(1.0)
+	eq(fired.size(), 0, "位移超过阈值后不再判定长按")
+	eq(dragged.size(), 1, "拖拽定位仍然照常发坐标")
+	minimap._end_drag()
+	minimap.free()
+
+func test_hud_long_press_opens_wheel_with_target() -> void:
+	var hud := GameHUD.new()
+	hud.setup("p1", "blue", "blade", "你", false, false)
+	hud._ready()
+	var targets := []
+	hud.ping_wheel_opened.connect(func(target: Vector2) -> void: targets.append(target))
+	hud._show_ping_panel(true)
+	eq(targets.size(), 1, "按钮/快捷键路径也要通知 arena")
+	eq(targets[0], Vector2.INF, "按钮路径没有指定落点，交给 arena 解析")
+	hud._on_minimap_long_pressed(Vector2(12.0, -34.0))
+	eq(targets.size(), 2, "长按小地图同样打开轮盘")
+	eq(targets[1], Vector2(12.0, -34.0), "长按落点原样带给 arena")
+	check(hud._ping_panel.visible, "长按后轮盘可见")
+	hud.free()
+
+func test_double_tap_window_and_slop() -> void:
+	var arena := Arena.new()
+	arena._last_tap_ms = 1000
+	arena._last_tap_pos = Vector2(200.0, 200.0)
+	check(arena._is_double_tap(1200, Vector2(210.0, 200.0)), "300ms / 48px 内算双击")
+	check(not arena._is_double_tap(1400, Vector2(200.0, 200.0)), "超过 300ms 不算双击")
+	check(not arena._is_double_tap(1200, Vector2(260.0, 200.0)), "超过 48px 不算双击")
+	arena.free()
+
+func test_minimap_long_press_target_is_used_by_arena() -> void:
+	var arena := Arena.new()
+	arena._on_ping_wheel_opened(Vector2(40.0, -30.0))
+	eq(arena._signal_target, Vector2(40.0, -30.0), "长按落点直接作为信号坐标")
+	arena._on_ping_requested("retreat")
+	eq(str(arena._queued_ping.get("kind", "")), "retreat", "选类别后按锁定的落点入队")
+	eq(float(arena._queued_ping.get("x", 0.0)), 40.0, "x 原样入队")
+	eq(float(arena._queued_ping.get("y", 0.0)), -30.0, "y 原样入队")
+	# 越界落点仍然要钳制，手势入口不能成为绕过校验的后门。
+	arena._on_ping_wheel_opened(Vector2(99999.0, -99999.0))
+	eq(arena._signal_target, Vector2(MapData.BOUNDS, -MapData.BOUNDS), "越界落点钳到地图边界")
+	arena.free()

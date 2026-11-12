@@ -47,7 +47,6 @@ const TYPES := [
 	"input",
 	"snapshot",
 	"events",
-	"peer_joined",
 	"leave",
 	"peer_left",
 	"ping",

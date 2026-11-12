@@ -16,7 +16,8 @@ signal pause_requested
 signal map_focus_requested(world: Vector2)
 signal map_focus_released
 # 快捷信号（项 11.1）：轮盘打开时 arena 记下当前指向；选择某一类后由 arena 解析落点。
-signal ping_wheel_opened
+# 长按小地图会带上明确的落点（Vector2.INF = 没有指定，让 arena 用准星/英雄脚下）。
+signal ping_wheel_opened(target: Vector2)
 signal ping_requested(kind: String)
 # 手动加点（项 2 链路 6 / B7）：触屏没有 Ctrl+技能，必须给一个可点的入口。
 signal upgrade_requested(slot: String)
@@ -511,6 +512,7 @@ func _build_minimap() -> void:
 	_minimap.location_clicked.connect(_on_minimap_location_clicked)
 	_minimap.location_dragged.connect(_on_minimap_location_dragged)
 	_minimap.drag_finished.connect(_on_minimap_drag_finished)
+	_minimap.long_pressed.connect(_on_minimap_long_pressed)
 	box.add_child(_minimap)
 	_objective_label = _make_label("防御塔 蓝 0 : 0 红", 13, Color(0.78, 0.72, 0.56))
 	_objective_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -615,12 +617,16 @@ func _build_ping_ui() -> void:
 func _toggle_ping_panel() -> void:
 	_show_ping_panel(_ping_panel != null and not _ping_panel.visible)
 
-func _show_ping_panel(value: bool) -> void:
+# target 只在手势入口（长按小地图）传入；按钮/G 键仍走「让 arena 自己解析准星」。
+func _show_ping_panel(value: bool, target := Vector2.INF) -> void:
 	if _ping_panel == null:
 		return
 	_ping_panel.visible = value
 	if value:
-		ping_wheel_opened.emit()
+		ping_wheel_opened.emit(target)
+
+func _on_minimap_long_pressed(world: Vector2) -> void:
+	_show_ping_panel(true, world)
 
 func _on_ping_choice(kind: String) -> void:
 	_show_ping_panel(false)
