@@ -48,7 +48,7 @@ static func get_available_summoner_spells() -> Array:
 static func get_summoner_spell(spell_id: String) -> Dictionary:
 	return SUMMONER_SPELLS.get(spell_id, SUMMONER_SPELLS["flash"])
 
-static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object) -> bool:
+static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object, paid := false) -> bool:
 	if not bool(hero.get("alive", true)):
 		return false
 	var hero_type: String = str(hero.get("hero_type", "blade"))
@@ -57,24 +57,26 @@ static func cast_skill(hero: Dictionary, slot: String, aim: Vector2, sim: Object
 		return false
 	var skill: Dictionary = hero_def[slot]
 	var cd_key := "skill_%s_cd" % slot
+	# paid=true：资源与 CD 已在起手时结算（match_sim._begin_cast），这里只出效果。
 	# 项 2：大招必须先"学"才能放。skill_r_level 出生 0 = 未学习，
 	# 自动/手动方案都只在英雄 4 级时才把它点到 1，所以这里判等级就等价于判解锁。
 	# 放在扣蓝/进 CD 之前：锁定时绝不能有副作用（否则空按一次就把蓝和 CD 吃掉）。
-	if slot == "r" and HeroDefs.skill_level(hero, "r") <= 0:
-		return false
-	if float(hero.get(cd_key, 0.0)) > 0.0:
-		return false
-	var cost: float = float(skill.get("cost", 0.0))
-	if float(hero.get("mp", 0.0)) < cost:
-		return false
+	if not paid:
+		if slot == "r" and HeroDefs.skill_level(hero, "r") <= 0:
+			return false
+		if float(hero.get(cd_key, 0.0)) > 0.0:
+			return false
+		var cost: float = float(skill.get("cost", 0.0))
+		if float(hero.get("mp", 0.0)) < cost:
+			return false
 
-	hero["mp"] = float(hero.get("mp", 0.0)) - cost
-	# CDR（项 1.3）：冷却 = 基础 × 蓝buff缩放 × (1-CDR)。CDR 上限与钳制都在 sim 侧，
-	# 这里通过 sim 的实例方法取最终系数，规则只有一个真身。
-	if sim != null and sim.has_method("hero_cooldown_scale"):
-		hero[cd_key] = float(skill.get("cooldown", 5.0)) * sim.hero_cooldown_scale(hero)
-	else:
-		hero[cd_key] = float(skill.get("cooldown", 5.0)) * Jungle.cooldown_scale(hero)
+		hero["mp"] = float(hero.get("mp", 0.0)) - cost
+		# CDR（项 1.3）：冷却 = 基础 × 蓝buff缩放 × (1-CDR)。CDR 上限与钳制都在 sim 侧，
+		# 这里通过 sim 的实例方法取最终系数，规则只有一个真身。
+		if sim != null and sim.has_method("hero_cooldown_scale"):
+			hero[cd_key] = float(skill.get("cooldown", 5.0)) * sim.hero_cooldown_scale(hero)
+		else:
+			hero[cd_key] = float(skill.get("cooldown", 5.0)) * Jungle.cooldown_scale(hero)
 
 	# 项 2：W/R 走 skill_system，Q/E 走 match_sim，两条路径必须读同一个 scaled_damage，
 	# 否则"只有一半技能会随等级成长"且不报错。

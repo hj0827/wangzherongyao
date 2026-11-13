@@ -15,6 +15,8 @@ extends RefCounted
 # 热度（heat）：近处交战行为累加，停手后衰减。驱动战斗 BGM 的强度层音量，
 # 所以它统计的是**事件**而不是「真的放出来的声音」——被节流掉的那次交手照样算数。
 
+const PingRules = preload("res://sim/ping_rules.gd")
+
 const CUE_ATTACK_SWING := "attack_swing"
 const CUE_HIT_HERO := "hit_hero"
 const CUE_HIT_MINION := "hit_minion"
@@ -50,6 +52,11 @@ const CUE_TOWER_SHOT := "tower_shot"
 #      同名冷却互相吃掉，听感上是「打野没有节奏」。
 const CUE_MONSTER_SWIPE := "monster_swipe"
 const CUE_MONSTER_SLAM := "monster_slam"
+# 快捷语音（验收 11.2）：四类快捷信号各一条预设语音，由 PingRules.cue() 唯一映射。
+const CUE_PING_MISSING := "ping_missing"
+const CUE_PING_HELP := "ping_help"
+const CUE_PING_ATTACK := "ping_attack"
+const CUE_PING_RETREAT := "ping_retreat"
 
 # 本层能发出的全部 cue。测试会逐条核实「AudioCues 真的合成得出来」，
 # 少一条就是静默失效（事件来了，没声音，不报错）。
@@ -61,6 +68,7 @@ const CUES := [
 	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_OBJECTIVE_ROAR, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
 	CUE_MONSTER_SWIPE, CUE_MONSTER_SLAM,
+	CUE_PING_MISSING, CUE_PING_HELP, CUE_PING_ATTACK, CUE_PING_RETREAT,
 ]
 
 # 贴身半径：这个距离内不衰减。比英雄碰撞半径大得多，但远小于技能射程。
@@ -94,6 +102,10 @@ const COOLDOWN := {
 	"tower_shot": 0.30,
 	"monster_swipe": 0.12,
 	"monster_slam": 0.35,
+	"ping_missing": 0.4,
+	"ping_help": 0.4,
+	"ping_attack": 0.4,
+	"ping_retreat": 0.4,
 	"skill_ult": 0.25,
 	"summoner_spell": 0.20,
 	"low_hp": LOW_HP_COOLDOWN,
@@ -194,6 +206,13 @@ func cues_for(event: Dictionary, ctx: Dictionary) -> Array:
 			# 不是「这是猪还是狼」（后者已经由爪光形状和扬尘表达）。
 			var boss := bool(event.get("objective", false))
 			_push(out, CUE_MONSTER_SLAM if boss else CUE_MONSTER_SWIPE, _distance_gain(event, ctx))
+		"ping_mark":
+			# 项 11.2：快捷信号是**全队广播**，不做距离衰减 —— 边路发的信号，
+			# 打野在另一侧也要听得到。cue id 由 kind 唯一决定（PingRules.cue），
+			# 非法 kind 在协议/模拟两层已被拦下，这里再守一次避免空 cue 占声道。
+			var voice_cue := PingRules.cue(str(event.get("kind", "")))
+			if voice_cue != "":
+				_push(out, voice_cue, 0.0, -2.0)
 		"level_up":
 			if int(event.get("hero", -1)) == local_id:
 				_push(out, CUE_LEVEL_UP, 0.0)

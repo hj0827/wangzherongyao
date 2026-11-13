@@ -20,11 +20,27 @@ func test_all_heroes_keep_the_same_height() -> void:
 		if weapon and weapon.get_parent():
 			# relative_aabb 不看 visible，必须真的把武器移出树才是"净身高"。
 			weapon.get_parent().remove_child(weapon)
+		# 专属服饰（战旗 / 月冠 / 星环 / 兜帽）同理：它们本来就该超出头顶，
+		# 是剪影层的表现，不属于「身体身高」这个血条/镜头契约。
+		_detach_costume(view)
 		var box := ModelUtils.relative_aabb(view.model_root)
 		near(box.size.y, UnitVisual.HERO_HEIGHT, 0.12, "%s 身高必须仍锚在 HERO_HEIGHT" % hero_type)
 		if weapon:
 			weapon.free()
 		view.free()
+
+## 把全部 `HeroCostume_*` 骨骼挂点从模型上摘下（不 free，调用方负责）。
+## 配件挂点必须统一前缀，测试才能整体排除 —— 少一个前缀就会让身高测试
+## 因为「战旗比头高」而误报，这类误报最容易诱导后来者去放宽真正的契约。
+func _detach_costume(view: UnitVisual) -> void:
+	var anchors: Array[Node3D] = []
+	for node in view.model_root.find_children("HeroCostume_*", "BoneAttachment3D", true, false):
+		anchors.append(node as Node3D)
+	for anchor in anchors:
+		if anchor.get_parent():
+			anchor.get_parent().remove_child(anchor)
+	for anchor in anchors:
+		anchor.free()
 
 func test_hero_widths_are_visibly_different() -> void:
 	var widths := {}

@@ -14,6 +14,7 @@ const Vision = preload("res://sim/map/vision.gd")
 const MapView = preload("res://scripts/game/map_view.gd")
 const Minimap = preload("res://scripts/ui/minimap.gd")
 const Arena = preload("res://scripts/game/arena.gd")
+const MapGeometry = preload("res://scripts/game/map_geometry.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
 const NetProtocol = preload("res://net/net_protocol.gd")
 
@@ -185,18 +186,15 @@ func test_vegetation_keeps_a_canopy_clearance_around_every_pad() -> void:
 	# 截图里阵盘正中长着一棵树：避让半径只按阵盘半径 3.0 算，
 	# 而树冠的水平半径就有 2~3.5 米 —— 树干站在盘边 1 米外，树冠照样盖住整个阵。
 	# 契约：布景避让要按**树冠**而不是树干留白，阵盘半径之外再加一圈树冠空间。
-	var arena: Node3D = Arena.new()
-	arena._props_root = Node3D.new()
-	arena.add_child(arena._props_root)
 	gt(float(MapLayout.PAD_CANOPY_CLEARANCE), 2.0, "树冠留白至少 2 米，否则树冠会探进阵里")
 	for pad in MapLayout.TELEPORT_PADS:
 		var point: Vector2 = pad.pos
 		check(
-			not bool(arena.call("_feature_clear", point, 2.0)),
+			not MapGeometry.feature_clear(point, 2.0),
 			"阵盘正中不能长布景：%s" % str(pad.id)
 		)
 		check(
-			not bool(arena.call("_feature_clear", point + Vector2(0.0, MapLayout.PAD_DISC_RADIUS + 2.5), 2.0)),
+			not MapGeometry.feature_clear(point + Vector2(0.0, MapLayout.PAD_DISC_RADIUS + 2.5), 2.0),
 			"阵盘边缘一圈也不该种树（树冠会盖上来）：%s" % str(pad.id)
 		)
 		# 反向对照：远在树冠之外的点至少有一部分是能长东西的 ——
@@ -207,25 +205,23 @@ func test_vegetation_keeps_a_canopy_clearance_around_every_pad() -> void:
 		for i in 36:
 			var angle := TAU * float(i) / 36.0
 			var ring := point + Vector2(cos(angle), sin(angle)) * 30.0
-			if bool(arena.call("_feature_clear", ring, 2.0)):
+			if MapGeometry.feature_clear(ring, 2.0):
 				clear += 1
 		gt(float(clear), 0.0, "阵外远处必须还有能长布景的地方：%s" % str(pad.id))
-	arena.free()
 
 func test_random_props_keep_clear_of_the_pads() -> void:
 	# 阵盘从河心挪到岸上之后立刻暴露的一个问题：岸上是有随机树木 / 石头的，
 	# 而布景的避让清单里只写了墙、草丛、营地、首领坑 —— 没有传送阵。
 	# 结果是第一版截图里正有一棵树长在阵盘正中。
-	var arena: Node3D = Arena.new()
 	for pad in MapLayout.TELEPORT_PADS:
 		check(
-			not arena._feature_clear(pad.pos, 1.0),
+			not MapGeometry.feature_clear(pad.pos, 1.0),
 			"阵心不能长树：%s" % str(pad.id)
 		)
 		# 阵盘边缘也要干净，不然树冠会压进圈里。
 		var rim: Vector2 = pad.pos + Vector2(MapLayout.PAD_DISC_RADIUS * 0.7, 0.0)
 		check(
-			not arena._feature_clear(rim, 1.0),
+			not MapGeometry.feature_clear(rim, 1.0),
 			"阵盘边缘不能长树：%s" % str(pad.id)
 		)
 	# 反例：阵外远处必须有布景自由，否则等于把整片野区的植被都关了。
@@ -237,10 +233,9 @@ func test_random_props_keep_clear_of_the_pads() -> void:
 		var angle := TAU * float(index) / 24.0
 		var probe: Vector2 = MapLayout.TELEPORT_PADS[0].pos \
 			+ Vector2(cos(angle), sin(angle)) * 30.0
-		if arena._feature_clear(probe, 0.0):
+		if MapGeometry.feature_clear(probe, 0.0):
 			clear += 1
 	gt(float(clear), 0.0, "阵外仍然允许布景")
-	arena.free()
 
 func test_teleport_channels_to_partner_and_starts_cooldown() -> void:
 	var sim := _sim()

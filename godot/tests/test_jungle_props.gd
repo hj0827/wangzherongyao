@@ -5,6 +5,7 @@ extends "res://tests/test_base.gd"
 
 const Arena = preload("res://scripts/game/arena.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
+const MapGeometry = preload("res://scripts/game/map_geometry.gd")
 
 func _arena() -> Node3D:
 	var arena: Node3D = Arena.new()
@@ -38,6 +39,6 @@ func test_jungle_props_stay_off_lanes_and_ground_marks() -> void:
 	gt(float(specs.size()), 0.0, "石碑要带逐点元数据")
 	for spec in specs:
 		var point: Vector2 = spec.pos
-		gt(arena._lane_distance(point), 5.0, "野区道具不能压兵线（%.2f）" % arena._lane_distance(point))
+		gt(MapGeometry.lane_distance(point), 5.0, "野区道具不能压兵线（%.2f）" % MapGeometry.lane_distance(point))
 		check(not MapLayout.on_ground_mark(point, 0.1), "野区道具不能压在营地/首领坑贴地盘上")
 	arena.free()

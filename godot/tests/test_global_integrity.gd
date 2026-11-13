@@ -185,6 +185,9 @@ func test_global_1v1_duel_full_lifecycle() -> void:
 		"skill_e": false,
 	})
 	sim.tick(DT)
+	# 项 3.3：Q 有前摇，起手帧只扣蓝/CD，伤害在窗口结束后结算。
+	for i in 10:
+		sim.tick(DT)
 
 	check(float(hero.get("mp", 0.0)) < initial_mp, "Skill Q must spend mana")
 	check(float(hero.get("skill_q_cd", 0.0)) > 0.0, "Skill Q must trigger cooldown")

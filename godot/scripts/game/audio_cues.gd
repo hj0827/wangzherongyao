@@ -155,6 +155,12 @@ const CUE_TOWER_SHOT := "tower_shot"
 # 否则野区会变成一段旋律：打野一秒好几下，有音高的音会互相打架。
 const CUE_MONSTER_SWIPE := "monster_swipe"
 const CUE_MONSTER_SLAM := "monster_slam"
+# 快捷语音（验收 11.2）：四类快捷信号各一条「人声化」短句。
+# 不是真人语音，用两三个共振峰音符拼出「喊话」的语气，听感上足以区分四类。
+const CUE_PING_MISSING := "ping_missing"
+const CUE_PING_HELP := "ping_help"
+const CUE_PING_ATTACK := "ping_attack"
+const CUE_PING_RETREAT := "ping_retreat"
 const CUE_UI_CLICK := "ui_click"
 const CUE_UI_CONFIRM := "ui_confirm"
 const CUE_UI_BACK := "ui_back"
@@ -168,6 +174,7 @@ const NAMES := [
 	CUE_LEVEL_UP, CUE_PURCHASE, CUE_OBJECTIVE_DOWN, CUE_OBJECTIVE_ROAR, CUE_BUFF_TAKEN, CUE_SPIRIT_DOWN,
 	CUE_WAVE_HORN, CUE_BASE_FALL, CUE_RESPAWN, CUE_DENIED, CUE_LOW_HP, CUE_TOWER_SHOT,
 	CUE_MONSTER_SWIPE, CUE_MONSTER_SLAM,
+	CUE_PING_MISSING, CUE_PING_HELP, CUE_PING_ATTACK, CUE_PING_RETREAT,
 	CUE_UI_CLICK, CUE_UI_CONFIRM, CUE_UI_BACK, CUE_UI_ERROR,
 	"enter_bush", "exit_bush",
 	"recall_channel", "recall_done", "recall_break",
@@ -239,6 +246,14 @@ static func cue(cue_name: String) -> AudioStreamWAV:
 			return monster_swipe()
 		CUE_MONSTER_SLAM:
 			return monster_slam()
+		CUE_PING_MISSING:
+			return ping_missing()
+		CUE_PING_HELP:
+			return ping_help()
+		CUE_PING_ATTACK:
+			return ping_attack()
+		CUE_PING_RETREAT:
+			return ping_retreat()
 		CUE_UI_CLICK:
 			return ui_click()
 		CUE_UI_CONFIRM:
@@ -436,6 +451,40 @@ static func base_fall() -> AudioStreamWAV:
 static func respawn() -> AudioStreamWAV:
 	return _cached(CUE_RESPAWN, func() -> AudioStreamWAV:
 		return _synth(0.55, 4307, {"from": 300.0, "to": 900.0, "harm": [1.0, 0.35], "attack": 0.03, "decay": 2.0, "gain": 0.4})
+	)
+
+# ---------------- 快捷语音（验收 11.2） ----------------
+#
+# 四条都是 2~3 个「共振峰音符」，靠音高走向区分语义：
+#   消失 = 下沉的疑问句；支援 = 连续上行（急）；进攻 = 上行五度（肯定）；
+#   撤退 = 长下滑（收兵）。
+# 谐波保留到 3 次，听感接近喊话而不是纯正弦"滴滴"。
+
+static func ping_missing() -> AudioStreamWAV:
+	return _cached(CUE_PING_MISSING, func() -> AudioStreamWAV:
+		return _layer(0.42, 5301, [
+			{"at": 0.0, "dur": 0.16, "spec": {"freq": 760.0, "harm": [1.0, 0.5, 0.28], "attack": 0.01, "decay": 3.4, "gain": 0.3}},
+			{"at": 0.15, "dur": 0.24, "spec": {"from": 640.0, "to": 500.0, "harm": [1.0, 0.5, 0.2], "attack": 0.012, "decay": 2.8, "gain": 0.3}},
+		])
+	)
+
+static func ping_help() -> AudioStreamWAV:
+	return _cached(CUE_PING_HELP, func() -> AudioStreamWAV:
+		return _layer(0.48, 5407, [
+			{"at": 0.0, "dur": 0.1, "spec": {"freq": 620.0, "harm": [1.0, 0.55, 0.3], "attack": 0.006, "decay": 3.2, "gain": 0.28}},
+			{"at": 0.09, "dur": 0.12, "spec": {"freq": 780.0, "harm": [1.0, 0.55, 0.3], "attack": 0.006, "decay": 3.0, "gain": 0.3}},
+			{"at": 0.19, "dur": 0.26, "spec": {"from": 940.0, "to": 1180.0, "harm": [1.0, 0.5, 0.24], "attack": 0.008, "decay": 2.4, "gain": 0.32}},
+		])
+	)
+
+static func ping_attack() -> AudioStreamWAV:
+	return _cached(CUE_PING_ATTACK, func() -> AudioStreamWAV:
+		return _synth(0.36, 5501, {"from": 340.0, "to": 520.0, "harm": [1.0, 0.6, 0.3], "trem": 26.0, "trem_depth": 0.35, "attack": 0.006, "decay": 2.2, "gain": 0.34})
+	)
+
+static func ping_retreat() -> AudioStreamWAV:
+	return _cached(CUE_PING_RETREAT, func() -> AudioStreamWAV:
+		return _synth(0.5, 5603, {"from": 720.0, "to": 330.0, "curve": 1.2, "harm": [1.0, 0.45], "noise": 0.18, "noise_decay": 10.0, "attack": 0.01, "decay": 2.2, "gain": 0.34})
 	)
 
 # ---------------- 战斗内提示 ----------------

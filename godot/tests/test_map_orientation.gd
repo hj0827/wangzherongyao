@@ -15,7 +15,7 @@ const MapData = preload("res://sim/map_data.gd")
 const MapLayout = preload("res://sim/map/map_layout.gd")
 const MapIntel = preload("res://sim/map_intel.gd")
 const TerrainBuilder = preload("res://scripts/game/terrain_builder.gd")
-const Arena = preload("res://scripts/game/arena.gd")
+const MapGeometry = preload("res://scripts/game/map_geometry.gd")
 
 const EPS := 0.01
 
@@ -171,9 +171,7 @@ func test_three_modules_agree_on_the_river_distance() -> void:
 	eq(str(MapIntel.region_at(Vector2(4.0, 4.0)).name), "河道", "河宽之内的点是河道")
 	check(str(MapIntel.region_at(Vector2(30.0, 10.0)).name) != "河道", "河宽之外的点不是河道")
 
-func test_arena_river_distance_helper_matches() -> void:
-	# Arena 自己那份 _river_distance 是私有的，用反射调用，确保它没被漏改。
-	var arena = Arena.new()
-	var got: Variant = arena.call("_river_distance", Vector2(20.0, 2.0))
-	near(float(got), absf(20.0 - 2.0) * 0.70710678, 0.001, "Arena 的河道距离必须同源")
-	arena.free()
+func test_map_geometry_river_distance_helper_matches() -> void:
+	# 河道距离的实现住在 MapGeometry（C17 从 Arena 抽出），确保它没被漏改。
+	var got: float = MapGeometry.river_distance(Vector2(20.0, 2.0))
+	near(got, absf(20.0 - 2.0) * 0.70710678, 0.001, "地图几何的河道距离必须同源")

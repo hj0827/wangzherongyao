@@ -48,3 +48,10 @@ static func color(kind: String) -> Color:
 static func feed_text(kind: String, sender: String) -> String:
 	var who := sender if sender != "" else "队友"
 	return "%s：%s" % [who, label(kind)]
+
+# 验收 11.2：四类信号各配一条合成快捷语音。cue id 由 kind 唯一决定，
+# 不额外上协议字段 —— kind 已在事件白名单里，多带一个 cue 只会多一处漂移点。
+static func cue(kind: String) -> String:
+	if not is_valid(kind):
+		return ""
+	return "ping_" + kind

@@ -6,6 +6,8 @@ const BushEye = preload("res://scripts/game/bush_eye.gd")
 const MonsterForms = preload("res://scripts/game/monster_forms.gd")
 const HeroModelRegistry = preload("res://scripts/game/hero_model_registry.gd")
 const MonsterKit = preload("res://scripts/game/monster_kit.gd")
+const HeroLook = preload("res://scripts/game/hero_look.gd")
+const HeroCostume = preload("res://scripts/game/hero_costume.gd")
 const BAR_SHADER := preload("res://shaders/billboard_bar.gdshader")
 
 const BLUE := Color(0.22, 0.6, 1.0)
@@ -56,6 +58,9 @@ const HERO_BAR_SIZE := Vector2(1.9, 0.26)
 const HERO_MANA_SIZE := Vector2(1.9, 0.13)
 const HERO_MANA_GAP := 0.03
 const OTHER_BAR_SIZE := Vector2(1.24, 0.14)
+# 血条离「身体最高点」的余量（米）。
+# 0.30 是实拍定的：太小会压住头发，太大会让血条飘到离人半米外的半空。
+const BAR_CLEARANCE := 0.30
 # 首领体型：暴君 / 主宰必须比英雄（2.7 m）明显大一圈，否则四个营地共用
 # 两种模型时，首领在俯视下只是一只「血多一点的野怪」。
 # 3.8 / 4.2 = 英雄的 1.41 / 1.56 倍；Orc 模型按高度等比放大后宽约
@@ -78,9 +83,8 @@ const HERO_SETUPS := {
 		"accent": Color(1.0, 0.72, 0.30),
 		"weapon_tint_amount": 0.30,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
-		"weapon_offset": Vector3(0.0, 0.0, 0.0),
+		"weapon_offset": Vector3(0.0, -1.10, 0.0),
 		"weapon_bone": "hand_r",
-		"idle": "Sword_Idle",
 		"outfit_tint": Color(0.33, 0.52, 0.28),
 		"tint_amount": 0.1,
 		# HERO-02：头发与服装同色系，避免「绿衣配一头原色灰发」的拼装感。
@@ -99,7 +103,6 @@ const HERO_SETUPS := {
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
-		"idle": "Spell_Simple_Idle",
 		"outfit_tint": Color(0.34, 0.3, 0.78),
 		"tint_amount": 0.5,
 		"hair_tint": Color(0.62, 0.56, 0.78),
@@ -117,7 +120,6 @@ const HERO_SETUPS := {
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_r",
-		"idle": "Sword_Idle",
 		"outfit_tint": Color(0.6, 0.36, 0.2),
 		"tint_amount": 0.45,
 		"hair_tint": Color(0.42, 0.28, 0.18),
@@ -135,7 +137,6 @@ const HERO_SETUPS := {
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
 		"weapon_offset": Vector3(0.0, 0.0, 0.0),
 		"weapon_bone": "hand_l",
-		"idle": "Spell_Simple_Idle",
 		"outfit_tint": Color(0.16, 0.5, 0.5),
 		"tint_amount": 0.45,
 		"hair_tint": Color(0.72, 0.42, 0.24),
@@ -151,9 +152,8 @@ const HERO_SETUPS := {
 		"accent": Color(0.88, 0.42, 0.72),
 		"weapon_tint_amount": 0.34,
 		"weapon_rotation": Vector3(0.0, 0.0, 0.0),
-		"weapon_offset": Vector3(0.0, 0.0, 0.0),
+		"weapon_offset": Vector3(0.0, -0.29, 0.0),
 		"weapon_bone": "hand_r",
-		"idle": "Sword_Idle",
 		"outfit_tint": Color(0.32, 0.15, 0.44),
 		"tint_amount": 0.6,
 		"hair_tint": Color(0.34, 0.18, 0.36),
@@ -161,7 +161,14 @@ const HERO_SETUPS := {
 	},
 }
 
-const LOOPING_CLIPS := ["Idle", "Jog_Fwd", "Sprint", "Sword_Idle", "Spell_Simple_Idle", "Idle_Shield"]
+# 循环播放的 clip：**每个用于「站桩/走/跑」的 clip 都必须在这里**。
+# 漏一个 → 那个英雄的待机播完就停在最后一帧（不再呼吸/晃），而且不报错。
+# 当前覆盖：通用 Idle / 走 / 跑 + 5 个英雄各自的待机（见 HeroLook.IDLE_POSES）。
+const LOOPING_CLIPS := [
+	"Idle", "Jog_Fwd", "Sprint",
+	"Sword_Idle", "Spell_Simple_Idle", "Idle_Shield",
+	"Idle_FoldArms", "Pistol_Idle", "Crouch_Idle",
+]
 
 # 移动动画在 1.0 倍速下对应的「地面速度」（m/s）。UAL 的动作是原地循环，
 # 本身没有米/秒语义，这个值是观感标定：速度 6.4 的英雄约等于 2 倍速播放，
@@ -278,6 +285,9 @@ var slow_ring: MeshInstance3D = null
 # 两者都复用 _make_status_ring，避免又引入一套几何/材质。
 var haste_ring: MeshInstance3D = null
 var immune_aura: MeshInstance3D = null
+# 技能前摇环（项 3.3）：起手期间亮起的橙色环，让对手"看到起手再交控"。
+# 与硬控环同一套几何，颜色单独一档，避免和眩晕金环混淆。
+var cast_ring: MeshInstance3D = null
 # 硬控状态环（项 4，链路 5）：眩晕/击飞/沉默/定身各有各的环，
 # 玩家必须一眼看出"对方是被打晕了"还是"被封了技能"——这两种的应对完全不同。
 # 复用 _make_status_ring，不再另造一套几何。
@@ -336,6 +346,10 @@ var _bush_eye_time := 0.0
 var team_ring: MeshInstance3D
 var local_ring: MeshInstance3D
 var cast_light: OmniLight3D
+# 专属服饰（披风 / 下摆 / 战旗 / 兜帽…）的摆动记账。
+# 结构见 HeroCostume.build_costume()：{"parts": [件名], "sway": {类别: [{node, phase}]}}。
+var _costume: Dictionary = {}
+var _costume_time := 0.0
 
 func setup(
 	unit_kind: String,
@@ -477,8 +491,6 @@ func _build_hero() -> void:
 	if not _force_shared_hero and HeroModelRegistry.has_custom_model(hero_type):
 		_build_custom_hero(setup_data)
 		return
-	var team_tint := Color(0.92, 0.25, 0.2) if team == "red" else Color(0.35, 0.55, 1.0)
-	var team_tint_amount := 0.24 if team == "red" else 0.05
 	model_root = Node3D.new()
 	model_root.name = "Model"
 	add_child(model_root)
@@ -487,14 +499,6 @@ func _build_hero() -> void:
 		var model: Node3D = scene.instantiate()
 		model.name = str(slot).capitalize()
 		model_root.add_child(model)
-		if slot == "outfit":
-			var tint_color: Color = setup_data.get("outfit_tint", Color.WHITE)
-			ModelUtils.tint(model, tint_color, float(setup_data.get("tint_amount", 0.0)))
-		elif slot == "hair":
-			# HERO-02：头发跟服装同色系。只染发色，不动发型/贴图。
-			var hair_color: Color = setup_data.get("hair_tint", Color.WHITE)
-			ModelUtils.tint(model, hair_color, float(setup_data.get("hair_tint_amount", 0.0)))
-		ModelUtils.tint(model, team_tint, team_tint_amount)
 		_attach_retargeted_player(model)
 	var measured_height := ModelUtils.relative_aabb(model_root).size.y
 	model_root.scale = Vector3.ONE * scale_for_height(measured_height, HERO_HEIGHT)
@@ -502,20 +506,45 @@ func _build_hero() -> void:
 	var body_scale: Vector3 = setup_data.get("body_scale", Vector3.ONE)
 	model_root.scale = Vector3(model_root.scale.x * body_scale.x, model_root.scale.y, model_root.scale.z * body_scale.z)
 	_equip_weapon(setup_data)
+	_apply_hero_look()
 	_capture_model_rest_pose()
 	_add_ring(0.9)
 	if is_local:
 		local_ring = _make_ring(1.15, GOLD, 0.55)
 		local_ring.position.y = 0.02
 		add_child(local_ring)
-	_add_health_bar(HERO_HEIGHT + 0.30)
+	# 血条先按 HERO_HEIGHT 建好（此时待机动画还没播，量身高没有意义），
+	# 真正的高度在 `_settle_bar_height()` 里、待机第一帧播完之后再定。
+	_add_health_bar(HERO_HEIGHT + BAR_CLEARANCE)
 	_build_status_fx(HERO_HEIGHT, 0.62)
-	idle_anim = str(setup_data.get("idle", "Idle"))
+	idle_anim = HeroLook.idle_pose(hero_type)
 	_set_anim(idle_anim, true)
+	_settle_bar_height()
 	process_priority = 10
 	# 单位数量多、始终处于镜头附近，阴影 pass 的收益远低于开销；
 	# 建筑与环境保留阴影，单位用脚下队伍环提供接地感。
 	ModelUtils.enable_shadows(self, false)
+
+# 英雄「外观身份」的最后一道工序：专属配色材质 + 专属服饰配件。
+#
+# 为什么不再走 ModelUtils.tint：通用角色包的贴图是米白内衬 + 褐皮甲 + 暗橄榄布料的
+# 杂色，乘一个色相出来是脏绿/脏棕；5 个人一起站就是一片土色。现在改成
+# `shaders/hero_skin.gdshader` 逐像素重上色（保留明暗分层、跳过皮肤与眼睛），
+# 再叠一套挂在骨骼上的专属配件（披风/下摆/战旗/兜帽）。
+#
+# 两条接线约束：
+#   1. 必须在**量完身高、装好武器之后**调用 —— 量身高时模型里不能有配件，
+#      否则 `test_hero_silhouette` 的身高契约会被配件顶破；
+#   2. 材质缓存在 HeroCostume 里，同参数同贴图只建一次，重连/重生不会新建材质。
+func _apply_hero_look() -> void:
+	if model_root == null or not HeroLook.has_look(hero_type):
+		return
+	HeroCostume.apply_skin(model_root, hero_type, team)
+	# 通用角色包自带的兜帽：按英雄决定保留还是藏（墨鸦立绘是高马尾无帽）。
+	# 必须在 apply_skin **之后**做 —— 先把兜帽染成衣服色，再决定它出不出现。
+	HeroCostume.apply_head_hood(model_root, hero_type)
+	HeroCostume.highlight_weapon(model_root, hero_type)
+	_costume = HeroCostume.build_costume(model_root, hero_type)
 
 # HERO-04 定制模型：模型自带服装/武器/骨骼/动作，不再拼 body/outfit/hair/weapon。
 # 缺失时完全回退现有共享模型，保证没有资产时游戏照常运行。
@@ -539,16 +568,21 @@ func _build_custom_hero(setup_data: Dictionary) -> void:
 	ModelUtils.tint(model_root, team_tint, 0.06)
 	var measured_height := ModelUtils.relative_aabb(model_root).size.y
 	model_root.scale = Vector3.ONE * scale_for_height(measured_height, HERO_HEIGHT)
+	# 定制模型自带服装与武器：只叠队伍色 + 专属配件，不重上色（会盖掉美术的贴图）。
+	_costume = HeroCostume.build_costume(model_root, hero_type)
 	_capture_model_rest_pose()
 	_add_ring(0.9)
 	if is_local:
 		local_ring = _make_ring(1.15, GOLD, 0.55)
 		local_ring.position.y = 0.02
 		add_child(local_ring)
-	_add_health_bar(HERO_HEIGHT + 0.30)
+	# 血条先按 HERO_HEIGHT 建好（此时待机动画还没播，量身高没有意义），
+	# 真正的高度在 `_settle_bar_height()` 里、待机第一帧播完之后再定。
+	_add_health_bar(HERO_HEIGHT + BAR_CLEARANCE)
 	_build_status_fx(HERO_HEIGHT, 0.62)
-	idle_anim = str(setup_data.get("idle", "Idle"))
+	idle_anim = HeroLook.idle_pose(hero_type)
 	_set_anim(idle_anim, true)
+	_settle_bar_height()
 	process_priority = 10
 	ModelUtils.enable_shadows(self, false)
 
@@ -954,6 +988,13 @@ func _build_status_fx(height: float, radius: float) -> void:
 	immune_aura.visible = false
 	add_child(immune_aura)
 
+	# 技能前摇环（项 3.3）：比免控环更靠内，避免和硬控环抢同一圈。
+	cast_ring = _make_status_ring(maxf(radius * 1.0, 0.48), 0.042, Color(1.0, 0.72, 0.28, 0.7))
+	cast_ring.name = "CastRing"
+	cast_ring.position.y = 0.11
+	cast_ring.visible = false
+	add_child(cast_ring)
+
 	# 硬控环：每种控一个环，颜色与控制含义对应。
 	# 高度分层：眩晕最内、沉默最外，避免多个控同时存在时完全重叠成一团。
 	for entry in CC_RING_SPECS:
@@ -1013,6 +1054,8 @@ func _update_status_fx(data: Dictionary) -> void:
 			haste_ring.visible = false
 		if immune_aura:
 			immune_aura.visible = false
+		if cast_ring:
+			cast_ring.visible = false
 		for entry in CC_RING_SPECS:
 			var cc_ring: MeshInstance3D = cc_rings.get(str(entry[0]), null)
 			if cc_ring != null:
@@ -1049,6 +1092,9 @@ func _update_status_fx(data: Dictionary) -> void:
 		haste_ring.visible = float(data.get("haste_timer", 0.0)) > 0.0 and bool(data.get("moving", false))
 	if immune_aura:
 		immune_aura.visible = float(data.get("cc_immune_timer", 0.0)) > 0.0
+	if cast_ring:
+		# 起手环只认 cast_left：cast_slot 非空但前摇已走完的那一帧不该再亮。
+		cast_ring.visible = float(data.get("cast_left", 0.0)) > 0.0
 	# 硬控环（项 4）：按各控的剩余时间点亮。
 	# 用计时而不是只用 cc_status：cc_status 只给"最重的那一个"，
 	# 同时中两种控时另一个也会亮，玩家才能看到完整状态。
@@ -1225,6 +1271,131 @@ func _make_bar(size: Vector2, fill_color: Color, padding: float = 0.032) -> Arra
 	mat.set_shader_parameter("shield_ratio", 0.0)
 	mi.material_override = mat
 	return [mi, mat]
+
+## 等**待机动画播到稳定帧**之后再定血条高度。
+##
+## 为什么不能在 `_add_health_bar()` 里直接量：那时刚 `_set_anim(idle_anim)`，
+## 骨骼还停在装配姿态（≈T-pose 附近，头顶 2.69m）。而墨鸦的 `Crouch_Idle`
+## 稳定后头顶只有 1.78m —— 差 0.9 米，实拍是「血条浮在人头顶一臂高的半空」。
+##
+## 做法：把待机推到一个足够靠后的时刻（0.5 × clip 长度，避开首帧的过渡），
+## 量一次身体顶点，再把血条挪过去。只做一次，不进每帧路径。
+func _settle_bar_height() -> void:
+	if bar_root == null:
+		return
+	_pending_bar_settle = true
+
+## 真正落地：进树后等**引擎求值过一帧骨骼姿态**再量。
+##
+## ★ 这里有个不报错、测试也全绿的坑（本轮实测）：
+##   `AnimationPlayer.advance()` / `seek()` **不会**更新 `Skeleton3D` 的
+##   `get_bone_global_pose()` —— 骨架姿态由渲染前的 AnimationMixer 求值写入，
+##   必须真的进场景树、过至少一帧。实测墨鸦 `Crouch_Idle`：
+##     装配瞬间   Head.y = 1.55（静止姿态）
+##     advance×20 Head.y = 1.55（完全没动）
+##     进树两帧   Head.y = 0.81（真实蹲姿）
+##   差 0.74 米，实拍就是「血条浮在人头顶一臂高的半空」。
+##   所以这个函数挂在 `_process` 里，量到合理值就关掉自己。
+var _pending_bar_settle := false
+var _bar_settle_frames := 0
+
+func _process_bar_settle() -> void:
+	if not _pending_bar_settle or bar_root == null:
+		return
+	_bar_settle_frames += 1
+	# 最多等 6 帧：进树两帧就够，多留几帧给 blend-in。
+	if _bar_settle_frames > 6:
+		_pending_bar_settle = false
+		return
+	if _bar_settle_frames < 2:
+		return
+	var top := _posed_body_top()
+	# 兜底：量到的东西必须是个像人的高度（1.2 ~ 4 米），否则保留默认值。
+	if top < 1.2 or top > 4.0:
+		return
+	bar_root.position.y = top + BAR_CLEARANCE
+	_pending_bar_settle = false
+
+## 当前**姿势**下的身体最高点。
+##
+## 与 `_body_top_height()` 的区别：那个读网格的静态 AABB（不含蒙皮），
+## 所以怎么播动画都是同一个数。要按姿势量就必须读**骨骼**位置：
+## 骨架里 `Head` 骨的世界位置 + 一段固定的头顶余量，就能反映蹲/站/举手的差别。
+##
+## 为什么不用 `MeshInstance3D.get_aabb()`：Godot 的 `get_aabb()` 返回的是
+## **未蒙皮**的网格包围盒，骨骼怎么动它都不变 —— 这正是第一版「五个英雄全是
+## 2.99」的原因（蹲姿的墨鸦和站立的铁壁量出同一个数）。
+func _posed_body_top() -> float:
+	var skeleton := HeroCostume.skeleton_of(model_root)
+	if skeleton == null:
+		return -1.0
+	var head := skeleton.find_bone("Head")
+	if head < 0:
+		return -1.0
+	var rest_top := skeleton.get_bone_global_rest(head).origin.y + HEAD_ABOVE_BONE
+	# 姿态位移：沿父链把「当前局部姿态」累乘出来，再和静止姿态比 y。
+	#
+	# ★ 为什么不用 `get_bone_global_pose()`：它由渲染前的 AnimationMixer 写入，
+	#   在 `--headless` / 测试环境里永远是静止姿态；`set_bone_global_pose()`
+	#   同样不会立刻反映到下一次 get。而 `get_bone_pose()`（局部姿态）是
+	#   AnimationPlayer 直接写进 Skeleton3D 的那份数据，两者在同一帧内是一致的。
+	var posed_y := _bone_posed_y(skeleton, head)
+	var delta := posed_y - skeleton.get_bone_global_rest(head).origin.y
+	return (rest_top + delta) * model_root.scale.y
+
+## 沿父链累乘局部姿态，算出某根骨在骨架空间里的 y。
+func _bone_posed_y(skeleton: Skeleton3D, bone: int) -> float:
+	var chain: Array[int] = []
+	var cursor := bone
+	while cursor >= 0:
+		chain.append(cursor)
+		cursor = skeleton.get_bone_parent(cursor)
+	chain.reverse()
+	var xform := Transform3D.IDENTITY
+	for index in chain:
+		xform = xform * skeleton.get_bone_pose(index)
+	return xform.origin.y
+
+## 头骨原点到发顶的距离（骨架局部坐标，未缩放）。
+## 由 `tools/probe_body_top.gd` 量出：Head 骨 y≈1.60、发顶 y≈1.81 → 0.21。
+const HEAD_ABOVE_BONE := 0.21
+
+## 身体最高点（不含武器与配件）。
+##
+## 为什么必须排除：血条要贴「人的头顶」。剑、战旗、法杖都比人高 ——
+## 算进去的话苍刃的血条会被举起的剑顶到 3.9 米，读成「飘在天上的血条」。
+## 这正是 `test_hero_silhouette` 量身高时的同一口径。
+##
+## ★ 必须在**待机动画播到稳定帧之后**调用（`_measure_body_top` 会推进动画）。
+##   装配那一瞬间的姿势是 T-pose 附近，量出来是 2.69；墨鸦的蹲姿待机实际只有
+##   1.78 —— 差 0.9 米，实拍就是「血条浮在人头顶一臂高的半空」。
+##   这个坑只在有蹲伏/半跪待机的英雄身上暴露，其他四个看不出来。
+func _body_top_height() -> float:
+	if model_root == null:
+		return HERO_HEIGHT
+	var weapon := find_child("WeaponSlot", true, false) as Node3D
+	var weapon_parent: Node = null
+	if weapon != null:
+		weapon_parent = weapon.get_parent()
+		if weapon_parent != null:
+			weapon_parent.remove_child(weapon)
+	var anchors: Array[Node] = []
+	var anchor_parent: Node = null
+	for node in model_root.find_children("*", "BoneAttachment3D", true, false):
+		anchor_parent = node.get_parent()
+		break
+	if anchor_parent != null:
+		for anchor in anchor_parent.find_children("HeroCostume_*", "BoneAttachment3D", true, false):
+			anchors.append(anchor)
+			anchor_parent.remove_child(anchor)
+	var box := ModelUtils.relative_aabb(model_root)
+	var top := box.position.y + box.size.y if box.size.y > 0.001 else HERO_HEIGHT
+	if anchor_parent != null:
+		for anchor in anchors:
+			anchor_parent.add_child(anchor)
+	if weapon_parent != null:
+		weapon_parent.add_child(weapon)
+	return top
 
 func _add_health_bar(height: float, width_scale: float = 1.0) -> void:
 	bar_root = Node3D.new()
@@ -1704,12 +1875,16 @@ func play_attack_reaction(strength := 1.0) -> void:
 	_attack_lunge_timer = ATTACK_LUNGE_SECONDS
 
 func process_visual(delta: float) -> void:
+	# 血条高度的延迟结算（见 _process_bar_settle 的注释：必须在引擎求值过
+	# 骨骼姿态之后才能量，装配那一刻量到的是静止姿态）。
+	_process_bar_settle()
 	# 状态环转动：静止的环看起来像贴图污点，转动才像「正在生效」。
 	if haste_ring != null and haste_ring.visible:
 		haste_ring.rotation.y += delta * 9.0
 	if immune_aura != null and immune_aura.visible:
 		immune_aura.rotation.y -= delta * 2.4
 	_update_hit_reaction(delta)
+	_animate_costume(delta)
 	if bush_eye != null and bush_eye.visible:
 		# 轻微呼吸 + 透明度起伏：静止的眼睛会被当成贴图污点。
 		_bush_eye_time += delta
@@ -1735,6 +1910,20 @@ func process_visual(delta: float) -> void:
 	_animate_monster(delta)
 	if local_ring:
 		local_ring.rotation.y += delta * 0.8
+
+# 专属服饰的布料摆动。
+#
+# 配件是挂在骨骼上的静态几何 —— 不做这一步，跑动时披风/下摆会像焊在身上的一块板子。
+# 只写**摆动组的 rotation**（HeroCostumeParts 里那些 "CapePanelN" / "SkirtPanelN"），
+# 不碰配件自身的位置与缩放，所以不会和倒地姿态、命中缩身打架。
+func _animate_costume(delta: float) -> void:
+	if _costume.is_empty() or model_root == null:
+		return
+	_costume_time += delta
+	var sway: Dictionary = _costume.get("sway", {})
+	if sway.is_empty():
+		return
+	HeroCostume.sway(sway, _costume_time, moving and not dead, unit_speed)
 
 # 野怪的程序化动画：只有没有骨骼动作的形态才走这里（狼有自己的 Idle/Walk/Death）。
 func _animate_monster(delta: float) -> void:

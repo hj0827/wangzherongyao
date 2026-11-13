@@ -169,11 +169,30 @@ const PVE_HERO_DAMAGE_SCALE := 0.62 # 小兵/野怪打英雄的伤害系数，�
 3. `scripts/app/main.gd` → `HERO_ORDER` 加进去（选人界面才显示）
 4. `assets/ui/portraits/<type>.png` 立绘 + `assets/ui/hero_videos/hero_<type>.ogv` 选人视频
 5. `scripts/ui/game_theme.gd` → `portrait_path()` 能拼出路径
-6. `scripts/game/arena.gd` → `_hero_vfx_color()` 加一个配色，否则特效颜色落到默认分支
+6. **`scripts/game/hero_look.gd` → `LOOKS` 加一项**（`palette` + 4 个 `skin_slots`），
+   并在 `scripts/game/hero_costume_parts.gd` 加一个 `_<type>()` builder、
+   在 `HeroLook.COSTUME_PARTS` 登记配件（`key` / `bone` / `note`）。
+   没有这一项时 `HeroLook.has_look()` 返回 false，模型回落到「共享模型 + 旧染色」，
+   **技能特效色和 HUD 技能键色也会一起落到默认金** —— 见第 7 步。
 7. 写 `tests/test_hero_readout.gd` 风格的断言：满级数值、技能 CD、射程
 8. **打包前确认 `export_presets.cfg` 的 `include_filter` 覆盖 `*.ogv`**
 
-漏第 6 步：英雄能玩，但所有技能特效是同一个颜色——不报错。
+**第 6 步为什么必须在第 7 步之前**：`arena._hero_vfx_color()` 与
+`game_hud._create_skill()` 都只读 `HeroLook.glow(hero_type)`（2026-11-12 起
+身份色只有一个来源）。没登记 `LOOKS` 的英雄，模型、技能、HUD 会一起回落默认值 ——
+不再是「只有特效颜色不对」那么局部。
+
+**新增英雄后必须跑**：
+
+```cmd
+godot --headless --path godot --script res://tests/run_tests.gd  # test_hero_look 会抓登记表
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\hero_gallery.gd
+:: 看 hero_sheet.png 第 4 列（21 米实战机位）：近景好看而实战认不出，等于没改
+```
+
+`test_hero_look.gd` 的这几条会直接拦住漏登记：`test_every_hero_has_a_distinct_palette`、
+`test_costume_registry_is_complete_and_on_real_bones`、
+`test_registered_parts_are_actually_built`、`test_hero_colour_has_a_single_source`。
 
 ---
 

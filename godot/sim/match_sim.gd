@@ -261,6 +261,10 @@ var _announcer := CombatAnnouncer.new()
 # 所以不传 seed 的对局逐位等于历史行为 —— 既有测试的数值断言因此不受影响。
 const DEFAULT_RNG_SEED := 0x2F6E2B1
 var _rng_state := DEFAULT_RNG_SEED
+# 项 C4：逐实体顺序更新时，后动的一方在"进入攻击距离"的那一帧会少走半步，
+# 于是稳定占到兵线仇恨的便宜。这个先手优势由 seed 决定归哪一方 —— 同一 seed
+# 仍然逐位可复现，不同 seed 之间两侧各拿一半，镜像局不再固定偏向一侧。
+var _bot_order_flip := false
 
 func _init(match_config: Dictionary) -> void:
 	config = match_config.duplicate(true)
@@ -271,6 +275,7 @@ func _init(match_config: Dictionary) -> void:
 	_rng_state = raw_seed & 0x7FFFFFFF
 	if _rng_state == 0:
 		_rng_state = DEFAULT_RNG_SEED
+	_bot_order_flip = _rng_state % 2 == 1
 	if mode != "team":
 		mode = "duel"
 	state = {
@@ -1004,6 +1009,7 @@ func _tick_channels(entity: Dictionary, input: Dictionary, dt: float) -> bool:
 			})
 	return false
 
+<<<<<<< HEAD
 # --- 技能前摇 / 后摇（项 3.3）----------------------------------------------
 # cast_slot 非空 = 正在起手，cast_left 是剩余前摇；前摇走完后写 cast_recover
 # 作为后摇（禁施法 / 禁普攻，但**不禁移动**——移动惩罚交给 ControlRules 之外的表现层）。
@@ -1032,6 +1038,121 @@ func _tick_casts_for(dt: float, entities: Array) -> void:
 				entity["cast_slot"] = ""
 			continue  # 串联：前摇没走完，后摇不动
 		entity["cast_recover"] = maxf(0.0, recover - dt)
+=======
+# --- 技能前摇 / 后摇（项 3.3，验收 3.3）----------------------------------
+# 时序规则（对标王者"按下进 CD、起手可被控断"）：
+#   1. 起手 tick 即扣蓝、进 CD；前摇结束才结算伤害/控制/位移。
+#   2. 前摇期间吃硬控（stun/knockup/silence）→ 打断：**退蓝、不退 CD**，
+#      并发 skill_interrupt（带 reason），让表现层能收招、客机能看到"这发被打断了"。
+#      退蓝保证被打断还有再试的机会；不退 CD 防止"用前摇骗控"变成零成本。
+#   3. 结算后进入 recover（后摇）：禁施法/禁普攻、不禁移动。
+# 前摇/后摇都读技能表的 windup / recover 字段；缺失或为 0 时保持旧的即时结算，
+# 所以历史技能数据与直接调用 _cast_* 的测试行为不变。
+func _skill_def(hero: Dictionary, slot: String) -> Dictionary:
+	var hero_def: Dictionary = HeroDefs.get_hero(str(hero.get("hero_type", "blade")))
+	var value: Variant = hero_def.get(slot, {})
+	return value if value is Dictionary else {}
+
+func _is_casting(hero: Dictionary) -> bool:
+	return str(hero.get("cast_slot", "")) != ""
+
+func _can_begin_cast(hero: Dictionary, slot: String, aim: Vector2) -> bool:
+	if not bool(hero.get("alive", true)) or _is_casting(hero):
+		return false
+	if float(hero.get("cast_recover", 0.0)) > 0.0:
+		return false
+	var skill := _skill_def(hero, slot)
+	if skill.is_empty():
+		return false
+	if slot == "r" and HeroDefs.skill_level(hero, "r") <= 0:
+		return false
+	if float(hero.get("skill_%s_cd" % slot, 0.0)) > 0.0:
+		return false
+	if float(hero.get("mp", 0.0)) < float(skill.get("cost", 0.0)):
+		return false
+	# 目标型技能先确认有目标，避免"扣蓝进 CD、前摇结束却打空"。
+	# 只有 Q（全部英雄）与 E-slow 需要目标；W/R 的 kind 都是自身/方向型。
+	var need_target := slot == "q" or (slot == "e" and str(skill.get("kind", "")) == "slow")
+	if need_target and _pick_skill_target(hero, aim, float(skill.get("range", 0.0))).is_empty():
+		return false
+	return true
+
+func _begin_cast(hero: Dictionary, slot: String, aim: Vector2) -> bool:
+	if not _can_begin_cast(hero, slot, aim):
+		return false
+	var skill := _skill_def(hero, slot)
+	var windup := maxf(float(skill.get("windup", 0.0)), 0.0)
+	if windup <= 0.0:
+		return _execute_skill(hero, slot, aim, false)
+	# 起手即付代价（规则 1/2）：蓝量与 CD 在这一刻结算，打断只退蓝。
+	hero.mp = float(hero.mp) - float(skill.get("cost", 0.0))
+	hero["skill_%s_cd" % slot] = float(skill.get("cooldown", 5.0)) * hero_cooldown_scale(hero)
+	hero["cast_slot"] = slot
+	hero["cast_left"] = windup
+	hero["cast_aim"] = aim
+	hero["cast_recover"] = 0.0
+	var to_aim: Vector2 = aim - hero.pos
+	if to_aim.length() > 0.6:
+		hero.facing = to_aim.normalized()
+	# 施法打断回城/传送（与 RecallRules/Teleport 自己的"技能输入打断"口径一致）。
+	# 这里显式打断，是因为它们的 _input_breaks_channel 只认 q/e，W/R 会漏。
+	var where: Vector2 = hero.pos
+	if RecallRules.interrupt(hero):
+		_emit("recall_interrupt", {"team": hero.team, "hero": hero.id, "x": float(where.x), "y": float(where.y)})
+	if Teleport.interrupt(hero):
+		_emit("teleport_interrupt", {"team": hero.team, "hero": hero.id, "x": float(where.x), "y": float(where.y)})
+	return true
+
+func _execute_skill(hero: Dictionary, slot: String, aim: Vector2, paid: bool) -> bool:
+	match slot:
+		"q":
+			return _cast_q(hero, aim, paid)
+		"e":
+			return _cast_e(hero, aim, paid)
+		"w", "r":
+			return SkillSystem.cast_skill(hero, slot, aim, self, paid)
+	return false
+
+func _tick_casts(dt: float) -> void:
+	for entity in state.entities:
+		if entity.type != "hero":
+			continue
+		if not _is_casting(entity):
+			entity["cast_recover"] = maxf(0.0, float(entity.get("cast_recover", 0.0)) - dt)
+			continue
+		if not bool(entity.get("alive", true)) or not ControlRules.can_cast(entity):
+			_cancel_cast(entity, "control")
+			continue
+		var left := float(entity.get("cast_left", 0.0)) - dt
+		if left > 0.0:
+			entity["cast_left"] = left
+			continue
+		var slot := str(entity.get("cast_slot", ""))
+		var aim: Vector2 = entity.get("cast_aim", entity.pos)
+		entity["cast_slot"] = ""
+		entity["cast_left"] = 0.0
+		entity["cast_recover"] = maxf(0.0, float(_skill_def(entity, slot).get("recover", 0.0)))
+		_execute_skill(entity, slot, aim, true)
+
+func _cancel_cast(hero: Dictionary, reason: String) -> void:
+	var slot := str(hero.get("cast_slot", ""))
+	if slot == "":
+		return
+	var skill := _skill_def(hero, slot)
+	hero["cast_slot"] = ""
+	hero["cast_left"] = 0.0
+	# 退蓝不退 CD：规则见 _begin_cast 头注释。
+	hero.mp = minf(float(hero.max_mp), float(hero.mp) + float(skill.get("cost", 0.0)))
+	_emit("skill_interrupt", {
+		"slot": slot,
+		"hero": hero.id,
+		"hero_type": hero.hero_type,
+		"team": hero.team,
+		"reason": reason,
+		"x": float(hero.pos.x),
+		"y": float(hero.pos.y),
+	})
+>>>>>>> 643e4f0d468f38b3e32adc4a7b2ac6ef21d4fc4c
 
 func _update_hero_timers(dt: float) -> void:
 	for entity in state.entities:
@@ -1148,7 +1269,10 @@ func _apply_human_inputs(dt: float) -> void:
 			spend_skill_point(entity, upgrade_slot)
 		if move.length() > 1.0:
 			move = move.normalized()
-		if _tick_channels(entity, input, dt):
+		# 前摇期间锁动作（项 3.3）：不移动、不普攻、不重复施法，只允许调整朝向。
+		# 回城/传送在起手时已被 _begin_cast 打断，这里也不再推进引导。
+		var casting := _is_casting(entity)
+		if not casting and _tick_channels(entity, input, dt):
 			continue
 		# 硬控门控（项 4）：行动矩阵的真身在 ControlRules，这里只问"能不能"。
 		# 两条**刻意的例外**，写在这里免得后来者以为是漏判：
@@ -1158,6 +1282,10 @@ func _apply_human_inputs(dt: float) -> void:
 		#      这张牌就废了（它的全部意义就是在被控时使用）。
 		var can_move := ControlRules.can_move(entity)
 		var can_cast := ControlRules.can_cast(entity)
+		if casting:
+			if aim_vector.length() > 0.6:
+				entity.facing = aim_vector.normalized()
+			continue
 		if move.length() > 0.01 and can_move:
 			# 移动时朝向移动方向：点击移动经常是「往身后走」，若还朝着准星就成了倒着走。
 			# 站住时才看向准星；技能与普攻随后各自把 facing 改回目标方向，瞄准手感不变。
@@ -1165,14 +1293,16 @@ func _apply_human_inputs(dt: float) -> void:
 			_move_hero(entity, move, dt)
 		elif aim_vector.length() > 0.6:
 			entity.facing = aim_vector.normalized()
+		# 施法统一走 _begin_cast：有前摇的技能进入起手态，前摇结束才结算；
+		# 缺 windup 字段（或为 0）的技能仍然即时结算，行为与旧版一致。
 		if can_cast and bool(input.get("skill_q", false)):
-			_cast_q(entity, aim)
+			_begin_cast(entity, "q", aim)
 		if can_cast and bool(input.get("skill_w", false)):
-			SkillSystem.cast_skill(entity, "w", aim, self)
+			_begin_cast(entity, "w", aim)
 		if can_cast and bool(input.get("skill_e", false)):
-			_cast_e(entity, aim)
+			_begin_cast(entity, "e", aim)
 		if can_cast and bool(input.get("skill_r", false)):
-			SkillSystem.cast_skill(entity, "r", aim, self)
+			_begin_cast(entity, "r", aim)
 		if bool(input.get("summoner", false)):
 			SkillSystem.cast_summoner_spell(entity, str(entity.get("summoner_spell", "flash")), aim, self)
 		if bool(input.get("attack", false)) and ControlRules.can_attack(entity):
@@ -1181,12 +1311,26 @@ func _apply_human_inputs(dt: float) -> void:
 func _update_bots(dt: float) -> void:
 	if not bool(state.bot_ai):
 		return
+	var bots: Array = []
 	for entity in state.entities:
-		if entity.type != "hero" or not entity.alive or entity.controller != "bot":
-			continue
+		if entity.type == "hero" and entity.alive and entity.controller == "bot":
+			bots.append(entity)
+	# 公平性（C4）：逐实体顺序更新时，先动的一方每 tick 多压半步 —— 谁先走谁先进入
+	# 对方兵线的仇恨圈，镜像 1v1 会稳定偏向固定一侧（实测翻转遍历奇偶就能把优势方
+	# 从红方换成蓝方，证明偏差来自更新顺序而不是数值）。每 tick 交替方向，再叠加
+	# 由 seed 决定的每局先手，让"先手半个身位"在时间上抵消、在样本间各占一半。
+	var reverse := (int(round(float(state.time) * TICK_RATE)) % 2 == 1) != _bot_order_flip
+	if reverse:
+		bots.reverse()
+	for entity in bots:
 		var recommended := ItemShop.get_quick_buy_recommendation(entity, ItemShop.build_order_for(str(entity.hero_type)))
 		if recommended != "":
 			ItemShop.buy_item(entity, recommended)
+		# 前摇期间 bot 同样站定（与人类路径一致）：起手是承诺，不能边跑边砍。
+		# 只保留召唤师技能 —— 净化解控是例外，见下方注释。
+		if _is_casting(entity):
+			_use_bot_summoner(entity, {}, 999.0)
+			continue
 		# 硬控必须对 bot 生效（4.2）：AI 读不到控就等于白控 ——
 		# 玩家把控制交出去，bot 照样走位放技能，那这套硬控只是"给玩家看的动画"。
 		# 购买不受门控（和人类路径一致：买装备不是身体动作）。
@@ -1229,25 +1373,25 @@ func _update_bots(dt: float) -> void:
 			continue
 		if can_cast:
 			if float(entity.skill_q_cd) <= 0.0 and distance <= 9.0:
-				_cast_q(entity, target.pos)
+				_begin_cast(entity, "q", target.pos)
 			var hero_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type))
 			var w_def: Dictionary = hero_def.w
 			if float(entity.skill_w_cd) <= 0.0 and distance <= float(w_def.range) + 1.0 and float(entity.mp) >= float(w_def.cost):
-				SkillSystem.cast_skill(entity, "w", target.pos, self)
+				_begin_cast(entity, "w", target.pos)
 			var r_def: Dictionary = hero_def.r
 			if float(entity.skill_r_cd) <= 0.0 and distance <= float(r_def.range) + float(target.get("radius", 0.0)) and float(entity.mp) >= float(r_def.cost):
-				SkillSystem.cast_skill(entity, "r", target.pos, self)
+				_begin_cast(entity, "r", target.pos)
 		# 召唤师技能不被沉默/眩晕门控：净化必须在被控时能用（同人类路径的理由）。
 		_use_bot_summoner(entity, target, distance)
 		if can_cast and float(entity.skill_e_cd) <= 0.0:
 			var e_def: Dictionary = HeroDefs.get_hero(str(entity.hero_type)).e
 			var kind := str(e_def.kind)
 			if kind == "shield" and float(entity.hp) < float(entity.max_hp) * 0.55:
-				_cast_e(entity, entity.pos + to_target)
+				_begin_cast(entity, "e", entity.pos + to_target)
 			elif kind == "haste" and to_target.length() > 3.5:
-				_cast_e(entity, target.pos)
+				_begin_cast(entity, "e", target.pos)
 			elif kind == "dash" and to_target.length() > 2.5 and to_target.length() < 5.0:
-				_cast_e(entity, target.pos)
+				_begin_cast(entity, "e", target.pos)
 		var reach: float = float(entity.attack_range) + float(target.get("radius", 0.0))
 		if to_target.length() > reach:
 			# 定身/眩晕时不能靠近，但仍允许放技能（上面已按 can_cast 判过）。
@@ -1490,16 +1634,18 @@ func _nearest_enemy(seeker: Dictionary, max_range: float) -> Dictionary:
 			best = entity
 	return best
 
-func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
+func _cast_q(hero: Dictionary, aim: Vector2, paid := false) -> bool:
 	var hero_def: Dictionary = HeroDefs.get_hero(str(hero.hero_type))
 	var skill: Dictionary = hero_def.q
-	if float(hero.skill_q_cd) > 0.0 or float(hero.mp) < float(skill.cost):
+	# paid=true 表示资源与 CD 已在起手时结算（见 _begin_cast），这里只负责出效果。
+	if not paid and (float(hero.skill_q_cd) > 0.0 or float(hero.mp) < float(skill.cost)):
 		return false
 	var target: Dictionary = _pick_skill_target(hero, aim, float(skill.range))
 	if target.is_empty():
 		return false
-	hero.mp = float(hero.mp) - float(skill.cost)
-	hero.skill_q_cd = float(skill.cooldown) * hero_cooldown_scale(hero)
+	if not paid:
+		hero.mp = float(hero.mp) - float(skill.cost)
+		hero.skill_q_cd = float(skill.cooldown) * hero_cooldown_scale(hero)
 	var kind := str(skill.kind)
 	var dtype := str(skill.get("damage_type", "physical"))
 	# 项 2：技能基础伤害走"表值 + damage_grow*(技能等级-1)"，与 W/R 路径同一个函数真身。
@@ -1534,10 +1680,10 @@ func _cast_q(hero: Dictionary, aim: Vector2) -> bool:
 		_damage(target, damage, hero, dtype)
 	return true
 
-func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
+func _cast_e(hero: Dictionary, aim: Vector2, paid := false) -> bool:
 	var hero_def: Dictionary = HeroDefs.get_hero(str(hero.hero_type))
 	var skill: Dictionary = hero_def.e
-	if float(hero.skill_e_cd) > 0.0 or float(hero.mp) < float(skill.cost):
+	if not paid and (float(hero.skill_e_cd) > 0.0 or float(hero.mp) < float(skill.cost)):
 		return false
 	# 疾风步会先改 hero.pos 再发事件：起点必须在这里留一份，
 	# 否则渲染层拿到的 from == 落点，位移拖尾就整段丢了。
@@ -1567,8 +1713,9 @@ func _cast_e(hero: Dictionary, aim: Vector2) -> bool:
 				ControlRules.apply_slow(entity, 2.5)
 				# 项 2：E 的伤害也走等级缩放，与 Q/W/R 同源。
 				_damage(entity, HeroDefs.scaled_damage(hero, "e"), hero, str(skill.get("damage_type", "magic")))
-	hero.mp = float(hero.mp) - float(skill.cost)
-	hero.skill_e_cd = float(skill.cooldown) * hero_cooldown_scale(hero)
+	if not paid:
+		hero.mp = float(hero.mp) - float(skill.cost)
+		hero.skill_e_cd = float(skill.cooldown) * hero_cooldown_scale(hero)
 	_emit("skill", {
 		"slot": "e",
 		"hero": hero.id,
@@ -1613,6 +1760,9 @@ func _pick_skill_target(hero: Dictionary, aim: Vector2, max_range: float) -> Dic
 
 func _try_attack(hero: Dictionary) -> void:
 	if float(hero.attack_cd) > 0.0:
+		return
+	# 后摇期间禁普攻（项 3.3）：技能刚结算的收招窗口不能被普攻立刻盖掉。
+	if float(hero.get("cast_recover", 0.0)) > 0.0:
 		return
 	var mode := str(hero.get("attack_mode", "default"))
 	var locked := int(hero.get("locked_target", -1))
@@ -2463,6 +2613,11 @@ func _snapshot_entity(entity: Dictionary) -> Dictionary:
 		data["skill_w_cd"] = float(entity.get("skill_w_cd", 0.0))
 		data["skill_e_cd"] = float(entity.skill_e_cd)
 		data["skill_r_cd"] = float(entity.get("skill_r_cd", 0.0))
+		# 前摇 / 后摇（项 3.3）：客机要靠 cast_slot + cast_left 画出"对方正在起手"，
+		# 并据此判断"这一发还来得及打断"。缺字段 = 看不到起手，A3 就只在本机生效。
+		data["cast_slot"] = str(entity.get("cast_slot", ""))
+		data["cast_left"] = float(entity.get("cast_left", 0.0))
+		data["cast_recover"] = float(entity.get("cast_recover", 0.0))
 		# 项 2：技能等级与剩余点数进快照，否则客机技能按钮永远显示未学习（不报错）。
 		data["skill_q_level"] = HeroDefs.skill_level(entity, "q")
 		data["skill_w_level"] = HeroDefs.skill_level(entity, "w")

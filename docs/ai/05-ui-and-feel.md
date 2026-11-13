@@ -317,6 +317,390 @@ powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\mo
 
 ---
 
+## 7.0 英雄外观层（2026-11-12）
+
+玩家原话：「利用能使用的工具、mcp、skill 去继续优化英雄的形象，效果，要做得和王者荣耀英雄一样的效果」。
+
+**改前的实际状态**：5 个英雄共用 2 套身体 + 4 套衣服，靠 `ModelUtils.tint(albedo_color)` 染色。
+通用包的贴图是「米白内衬 + 褐皮甲 + 暗橄榄布料」的杂色，乘一个色相之后是脏绿/脏棕/脏紫 ——
+5 个人站成一排是一片土色，谁都不像谁；而且所有人都**光着膀子**（包本身是背心短裤的西式游侠）。
+
+| 文件 | 职责 | 规模 |
+| --- | --- | --- |
+| `scripts/game/hero_look.gd` | 每个英雄的视觉身份：`palette`（主/副/金属/发/点缀光）+ `skin_slots`（4 个槽位的着色参数）+ `COSTUME_PARTS`（配件登记）+ 共用 `SKIN_SLOT` | 300 行 |
+| `scripts/game/hero_costume.gd` | 工具箱：皮肤着色器材质缓存、骨骼挂点（`attach` / `shared_pivot`）、几何缓存与拼装、服饰构建与网格合并、布料摆动 | 1015 行 |
+| `scripts/game/hero_costume_parts.gd` | 5 个英雄的专属服饰几何（底衣 + 披风/下摆/战旗/羽披/斗篷等） | 560 行 |
+| `shaders/hero_skin.gdshader` | 逐像素重上色：明暗分层保留 + 轮廓光 + 自发光 + 队伍色（只压暗部） | 100 行 |
+| `tests/test_hero_look.gd` | 21 条契约：配色独特性、uniform 全绑定、配件真建出来、网格预算、合并不杀摆动、兜帽去留、身份色单一来源 | 380 行 |
+| `tools/hero_gallery.gd` | 画廊：正面 / 侧面 / 头肩特写 / **21 米实战机位**四列 × 5 行对照图 | 230 行 |
+
+**接线只有一处**（全在表现层，sim / 协议一行没动）：`UnitVisual._apply_hero_look()`，
+在 `_build_hero()` 里**量完身高、装好武器之后**调用 —— 顺序错了会让配件顶破身高契约。
+
+### ★ 七条实拍踩出来的口径（别凭直觉改）
+
+1. **模型正面是 +Z，不是 -Z。** 判反一次，披风会盖在胸口、星环会挡在脸上，而且**不报错**。
+   判据：`arena` 里 `facing_y=1` 时 `rotation.y=0`，而 0° 的脸朝 +Z。
+2. **先穿衣服，再挂配件。** 不先包一层主色躯干/袖管/裤管，21 米机位下最抢眼的是
+   大片浅肤色 —— 五个英雄全是「光膀子的白人」，再好看的护肩也救不回来。
+3. **布用 `sheet_mesh`，甲用 `dome`/`band`，羽用 `shard`。** 一整块 `BoxMesh` 披风
+   在任何机位都读成「背着一块板」；盒子做的护肩是砖；薄盒子做的羽毛是木片。
+4. **`BoneAttachment3D` 每帧把自身 transform 整个覆盖。** 在它身上写 `basis` 会被下一帧
+   覆盖（症状：配件第一帧对、动一下就歪）。坐标系必须掰在它的**子节点**上 —— 见 `attach()` 的
+   `Align` 层。另外它只有**在场景树里**才会被骨骼姿态驱动，无头测试里读到的全是单位矩阵。
+5. **通用角色包自带的兜帽会盖住整张脸**（`Male_/Female_Ranger_Head_Hood`，y≈1.47~1.87）。
+   5 张立绘里没有一个人戴兜帽 —— 不处理的话实拍是「五个绿布袋」。由
+   `HeroCostume.KEEP_HEAD_HOOD` 显式决定，现在是空的（全部隐藏），剪影改由各英雄配件承担。
+6. **头发一律深色。** 头发贴图是灰度的（sat 0.02），会**完整接受** `base` 的色相：
+   为了「和披风统一」写成 0.155/0.265/0.18，实拍出来是一顶亮绿头盔。
+   `test_hair_stays_dark_on_every_hero` 卡死 base.v < 0.16。
+7. **肤色是全英雄共用一档，不跟英雄主色走**（`HeroLook.SKIN_SLOT`）。跟主色走会有
+   绿脸/紫脸。亮度 0.62 是实拍调的：0.52 太黑，0.72 又回到「发白的浅橙」。
+
+### 性能与 draw call（必须量，不能猜）
+
+一套配件原始是 30~44 个 `MeshInstance3D`。10 个英雄同屏实测 **614 draw call / 686 mesh**，
+移动端预算（≤400）直接被吃穿。两级合并之后压到 **502 / 580**：
+
+| 手段 | 作用 |
+| --- | --- |
+| `shared_pivot()` | 同一根骨骼只建**一个** `BoneAttachment3D`。袖子/护肩/臂环都挂 `upperarm` 上，各建一个就是 4 次 draw call，但它们的父骨骼与每帧变换完全相同 |
+| `merge_anchor()` | 挂点内按**材质**跨层烘成一份网格。摆动节点（`SWAY_PREFIXES`）各自保留一层并在自己名下就地合并 —— 烘平的话跑动时披风焊死，而且不报错 |
+| 配件预算测试 | 每英雄 ≤30 个配件网格（`test_costume_mesh_count_stays_within_budget`） |
+
+`tools/probe_hero_draw_calls.gd` 是唯一的量化手段（探针，不入库）：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\probe_hero_draw_calls.gd
+:: 打印每人 total/costume/body 网格数，以及 10 人同屏的 draw_calls / objects / primitives
+```
+
+### 身份色只有一个来源
+
+模型配色（`HeroLook`）、技能特效色（`arena._hero_vfx_color()`）、HUD 技能键主色
+（`game_hud._create_skill`）**全部读 `HeroLook.glow(hero_type)`**。
+以前 `arena.gd` 里硬编码一份谱系色，铁壁的模型改成锈橙之后技能还是青色 ——
+一个英雄身上出现两套身份色。`test_hero_colour_has_a_single_source` 守这一条。
+
+### 验证
+
+```cmd
+:: 画廊（必须走隐藏桌面，见 AGENTS.md 环境硬约束）
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\hero_gallery.gd
+:: 产物：godot/shots/hero_sheet.png（4 列 × 5 行）
+::       hero_<type>_front.png（单英雄正面）+ hero_field.png（五人同框实战机位）
+```
+
+**先看第 4 列（21 米实战机位）**：前三是近景，只有它对应玩家 90% 时间的视角。
+近景好看而实战认不出，等于没改。
+
+### 英雄级技能变体（HERO-06）
+
+`SkillFx.recipe(kind)` 只按 kind 分派，而 17 个 kind 里有 **3 个被两个英雄共用**：
+
+| kind | 英雄 A | 英雄 B |
+| --- | --- | --- |
+| `burst` | 星璃 Q 星陨（法术球迟爆） | 墨鸦 W 毒牙（近身毒爆） |
+| `charge` | 铁壁 W 野蛮冲撞（重装冲撞） | 墨鸦 Q 影袭（瞬身突刺） |
+| `leap_slam` | 苍刃 R 裂地崩山（巨剑砸地） | 墨鸦 R 绝影处决（突进处决） |
+
+改前三对**形状完全一样**，只靠英雄色 + 强调色混合区分 —— 团战里「是谁放的」
+和「这是哪个技能」两个问题互相顶掉。
+
+现在 `SkillFx.HERO_VARIANTS` 按 `"<hero_type>|<kind>"` 覆盖，`recipe_for(hero_type, kind)`
+以通用配方为底再叠覆盖（所以结构字段默认继承，不会因为漏写而丢）。
+`requests()` 走的是 `recipe_for`，**渲染层不需要改一行**。
+
+**三条口径（都有测试钉住，见 `tests/test_hero_skill_variants.gd`）**：
+
+1. **只许改外观，不许改结构**。`projectile` / `beam` / `shake` / `hit_stop` 决定
+   「sim 里有没有真实弹道、要不要震屏」，是行为不是外观。改错了就是重复画一颗弹丸。
+   （`trail` 是残影圈数，例外放行并已在测试里注明。）
+2. **每一对必须真的分开**。测试不只断言「轴串不同」，还要求
+   `has_variant` 至少命中一个 —— 否则那对英雄就是「什么都没做」。
+3. **`amount=1` 必须完全取强调色**。这是 `blend_color` 的既有契约，
+   所以色相冲突**不能**在 `blend_color` 里自适应修，只能在变体里覆盖
+   `accent`（`SkillFx.accent_for()` 读）。
+
+**一个实测发现的配色坑**：星璃立绘 `9e85ff` 与墨鸦 `cc6beb` 都是紫系
+（色相差 0.03），而 `burst` 的强调色也是紫 —— 两人放同一个 burst 出来**近乎同色**。
+解法是给墨鸦的三个变体各指定一个 `accent`（青绿 / 冷白 / 洋红），
+最终渲染色拉开到色相差 ≥ 0.10。`test_shared_kind_colours_are_visually_separable`
+用「色相差 ≥ 0.10」而不是「颜色不相等」守这一条 —— 后者对差 3% 也算通过，玩家看不出来。
+
+**验收图**：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\skill_variants_shot.gd
+:: 产物：godot/shots/skill_variants.png（3 行 × 2 列：每行一对共用 kind）
+::       skill_variant_<hero>_<kind>.png（单张）
+```
+
+**背景选错会让你误以为变体没生效**（踩过两次）：
+
+- 中路石板正中央：石板 albedo 接近 0.9，加法混合的特效被高光整个吃掉；
+- 河道水面：水面 shader 本身是亮青色，青系技能（墨鸦 charge 的冷白）完全看不见。
+
+结论：验收技能必须站在**中低亮度背景**上，否则读的是背景不是技能。
+另外机位**必须交给 arena 自己管**（`_update_camera()` 每帧覆盖），
+做法是把本地英雄钉在落点上、让相机跟过去 —— 手工摆相机一定被下一帧冲掉。
+
+### 待机站姿（HERO-07）
+
+改前：5 个英雄只用两套 clip —— 苍刃/铁壁/墨鸦都是 `Sword_Idle`，星璃/翎羽都是
+`Spell_Simple_Idle`。三个人站成一排**姿势一模一样**，只有武器不同。
+
+待机是玩家看得最久的画面（补刀间隙、等 CD、看线上），它比任何技能特效都更能决定
+「这是不是同一个角色」。现在 `HeroLook.IDLE_POSES` 一人一套：
+
+| 英雄 | clip | 依据（立绘气质） |
+| --- | --- | --- |
+| 苍刃 | `Idle_FoldArms` | 立绘是「剑扛肩上、眼神懒」→ 抱臂而立 |
+| 星璃 | `Spell_Simple_Idle` | 施法者垂手待发 |
+| 铁壁 | `Idle_Shield` | 重装持盾站桩 |
+| 翎羽 | `Pistol_Idle` | 射手搭箭未满弦 |
+| 墨鸦 | `Crouch_Idle` | 压低重心的潜行待机 |
+
+**两条硬约束**（`test_idle_clips_exist_loop_and_are_long_enough` 逐条抓）：
+
+1. **clip 必须在 `UnitVisual.LOOPING_CLIPS` 里**。漏了 → 播完停在最后一帧，
+   变成一个「石头人」，而且不报错。这份清单以前是单行 6 个，现在是多行 9 个。
+2. **长度 ≥ 1.0s**。太短会读成抽搐（`Idle_Shield_Break` 1.07s 已接近下限）。
+
+接线：`UnitVisual._build_hero()` 用 `HeroLook.idle_pose(hero_type)`，
+`HERO_SETUPS` 里**不再有 `idle` 键** —— 一个配置只有一个来源。
+
+**验收图**：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\hero_idle_shot.gd
+:: 产物：godot/shots/hero_idle_sheet.png（5 行 × 3 帧：0s / 0.55s / 1.10s）
+```
+
+三帧是必需的：只有一帧证明不了「它在循环呼吸还是停住了」。
+`hero_idle_shot.gd` 手动 `player.advance()` 推进，不依赖真实帧间隔
+（截图写盘会拖慢帧率，三张图会拍到同一姿态）。
+
+### 头顶血条的高度必须跟着身体量（HERO-08）
+
+改前血条写死 `HERO_HEIGHT + 0.30`（3.00）—— 那是「静立姿势」的头顶。
+待机换成抱臂/持盾/拉弓之后武器举过头顶，血条**压在脑袋上**，
+21 米机位下看就是「血条把人头切掉了」（实拍确认）。
+
+现在 `UnitVisual._posed_body_top()` 按**实际骨骼姿态**算头顶：
+
+```gdscript
+头骨静止 y + HEAD_ABOVE_BONE(0.21) + (当前姿态 y − 静止 y)，再乘 model_root.scale.y
+```
+
+再加 `BAR_CLEARANCE = 0.30`。实测五个英雄的落地值：
+
+| 英雄 | 待机 | 血条 y |
+| --- | --- | --- |
+| 苍刃 | `Idle_FoldArms` | 2.81 |
+| 星璃 | `Spell_Simple_Idle` | 2.86 |
+| 铁壁 | `Idle_Shield` | 2.89 |
+| 翎羽 | `Pistol_Idle` | 2.86 |
+| 墨鸦 | `Crouch_Idle` | **1.84** |
+
+墨鸦比其他人低整整 1 米 —— 这正是「按姿势量」和「按固定值量」的差别。
+
+### ★ 三条只在实战机位下才暴露的坑（HERO-08）
+
+这一轮把 `arena_shot.gd` 的整帧裁出来放大，才看到下面三条。**近景画廊全部看不出来**。
+
+**① 血条高度不能在装配时量。**
+`MeshInstance3D.get_aabb()` 返回的是**未蒙皮**的网格包围盒，骨骼怎么动它都不变。
+更隐蔽的是：`AnimationPlayer.advance()` / `seek()` **也不会**更新
+`Skeleton3D.get_bone_global_pose()` —— 骨架姿态由渲染前的 AnimationMixer 求值写入，
+**必须真的进场景树、过至少一帧**。实测墨鸦 `Crouch_Idle`：
+
+| 时刻 | Head 骨 y |
+| --- | --- |
+| 装配瞬间 | 1.55（静止姿态） |
+| `advance()` × 20 次 | 1.55（完全没动） |
+| 进树两帧后 | 0.81（真实蹲姿） |
+
+所以 `_settle_bar_height()` 只置一个 `_pending_bar_settle` 标记，
+真正的测量在 `process_visual()` 里等 2 帧后做一次。
+
+**② 武器的 glb 原点不在握把上。**
+实测（`tools/probe_weapon_grip.gd` 打印沿 Y 的宽度剖面找突变点）：
+
+| 武器 | 原点位置 | 握把段 | 正确 `weapon_offset.y` |
+| --- | --- | --- | --- |
+| `Claymore.glb` | y=0 在**剑尖那头** | 0.00~2.20 | −1.10 |
+| `Dagger.glb` | y=0 在护手处 | 0.00~0.58 | −0.29 |
+| `Scythe` / `Hammer_Double` / `Bow_Wooden2` | 沿 Y 均匀，无明显握把 | — | 0 |
+
+不补偏移时剑会从拳头**末端**伸出去，看起来像「剑插在小臂上」。
+一个容易搞错的细节：`weapon.position` 是节点自身位移，**不受自身 `scale` 影响**，
+所以偏移写**未缩放**的原始值（1.10），不是乘过 `weapon_scale` 的 0.31。
+
+**③ 披风内衬必须比主布片宽。**
+内衬窄于主布片时从背后被完全盖住，实拍是一整块没有层次的纯黑面。
+改成内衬**宽 0.02、短 0.12**（两侧各露一条窄边）+ 一道中缝压条 + 下缘亮边。
+
+### 逐个英雄的实战验收（HERO-08）
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\hero_field_zoom.gd
+:: 产物：godot/shots/hero_field_zoom.png（5 行 × 2 列：整帧缩略 + 英雄 4× 放大）
+::       godot/shots/hero_field_<hero>.png（整帧原图）
+```
+
+**为什么必须逐个英雄**：每个英雄的暴露点不同 —— 苍刃是血条压头 + 剑脱手，
+铁壁是战旗糊成橙色块，墨鸦是蹲姿让血条浮空一臂高。只验一个人等于没验。
+
+工具里有两个坑，都踩过：
+- **换 `hero_type` 后不能只删 `_views` 条目等下一帧重建** —— `_sync_units` 只在
+  「快照里出现新 id」时才创建视图，id 没变就再也不画了（第一版拍出五张空地图）。
+  必须直接调 `arena._create_unit_view(entity)`。
+- **相机要手动推**：`arena.set_process(false)` 之后 `_update_camera()` 不再执行，
+  得自己调一次 `arena._update_camera(0.016, true)`。
+
+### 浅色英雄与「brightness 被稀释」（HERO-09）
+
+翎羽是唯一「米白为主色」的英雄。实测它的战衣渲出来是 **114,128,133**（灰蓝），
+和立绘的米白差了整整一档 —— 换成 `base 0.78 + brightness 1.18` 也**只亮了 7 个单位**。
+
+根因是 `hero_skin.gdshader` 的一处静默失效：
+
+```glsl
+vec3 original = tex.rgb * brightness;              // ← 第一版只有这里乘了
+vec3 lit = mix(original, toned * (0.42 + shade*0.62), recolor);
+```
+
+`recolor` 通常 0.86~0.94，所以 `brightness` 被混到只剩 **6~14%**，
+调它几乎无效。改成 `toned * brightness * (0.42 + shade*0.62)` 之后才真正生效。
+
+`test_brightness_affects_the_recoloured_branch_too` 用源码守卫钉住这一条
+（它挡的是「参数传了但被别的 mix 稀释」这类最隐蔽的失效）。
+
+**浅色材质的判定口径**：`palette.primary.s < 0.18` 视为中性色，上限放宽到 0.85。
+上限不是美学判断，是「别过曝成纯白」的技术线：实测米白 base 0.80 渲出来是
+187/191/192，地面 205 —— 仍是「布」不是「灯」。
+
+### 弓的发光必须单独压（HERO-09）
+
+`Bow_Wooden2.glb` 由三段组成：`White`（弓弦，极细）、`LightWood`（握把）、
+**`DarkWood`（弓臂，占整把弓 90% 的体积）**。
+
+按「整把武器」统一给 `glow 0.75 / rim 0.55` 时，弓臂糊成一整块发光的青白板，
+21 米机位下读成「英雄举着一块玻璃」（实拍确认）。翎羽的 weapon 槽位单独压到
+`glow 0.22 / rim 0.20`，靠木色本身认人。
+
+**通用教训**：`skin_slots.weapon` 是**按整把武器**一套参数。武器里如果有一件
+体积占比极大的部件（弓臂、巨锤头），发光参数要按「最大的那件」定，
+不能按「想让它亮」定。
+
+### 敌我识别：队伍色必须占「暗部 + 轮廓」两处（HERO-10）
+
+改前 `team_amount = 0.16`，只压暗部。实测（`fight_close.png` 里两个苍刃对砍）：
+**红方和蓝方的苍刃身体颜色几乎一样**，只能靠血条和脚下光环分辨。
+5v5 团战里这是致命的 —— 玩家会对着队友挥技能。
+
+新口径（`shaders/hero_skin.gdshader`）：
+
+| 通道 | 参数 | 作用 |
+| --- | --- | --- |
+| 暗部染色 | `team_amount` 0.34（原 0.16） | 衣服主体偏冷/偏暖 |
+| **轮廓光** | `team_rim_color` + `team_rim_strength` 0.42 | 边缘一圈队伍色，人群里看轮廓就能分敌我 |
+
+**为什么必须两处**：暗部染色不占「亮部」的色彩面积，主色仍然认得出是谁；
+但它在 21 米机位下**太弱**。边缘染色正好相反 —— 醒目但不抢主色。
+两者叠加才能同时满足「认得出是谁」和「认得出是哪边」。
+
+**强度上限是实拍定的**：`0.42`。0.72 时整个人像镶了一圈红边、
+读起来像英雄在发光（放大图确认）。低于 0.30 在草地上又认不出。
+
+### 显式限制（写在这里，避免下一个人以为「再做一点就能到王者」）
+
+- **没有定制骨骼**：动作仍从 UAL1/UAL2 两套通用库 retarget，Q/W/E/R 只是 4 个 clip 的映射。
+  真正的「专属动作」需要动画资产，不是代码能补的。见 `docs/英雄定制模型规范-HERO-04.md`。
+- **模型仍是 2 套身体**：脸/骨架/体型无法逐个定制。这一层做的是**配色、材质、服饰、
+  身份色统一**，把「五个人看起来像五个人」做到极限；再往上必须换资产。
+- **配件是程序化基本体**：受 `docs/gap-analysis-vs-honor-of-kings.md` §5.1 的授权约束，
+  不引第三方模型；代价是近景能看出是几何体拼的。
+
+---
+
+玩家反馈原话：「红蓝buff和野怪的形象还是不够好看，要继续优化，可以参考王者荣耀等游戏的野怪设计」。
+改前的实际状态是：**12 个野点全都用同一只 `Wolf.glb`**（只靠头顶名牌区分），暴君/主宰共用同一只
+Kenney 兽人 —— 俯视下野区是一串一模一样的狼。现在每个野点有自己的剪影与配色。
+
+| 文件 | 职责 | 规模 |
+| --- | --- | --- |
+| `scripts/game/monster_kit.gd` | 工具箱：材质/网格静态缓存、基本体拼装、量体对齐（`fit_height`）、形态字典收尾（`finish`） | 330 行 |
+| `scripts/game/monster_forms_jungle.gd` | 蔚蓝石像 / 猩红石像 / 蜥蜴 / 三猪 / 红鸟 | 400 行 |
+| `scripts/game/monster_forms_boss.gd` | 暴君 / 主宰（共用 `_beast` 骨架，靠配色 + 角数 + 甲刺长度分开） | 180 行 |
+| `scripts/game/monster_forms.gd` | 形态派发（`form_key` / `CAMP_FORMS` / `build` / `ring_radius`）+ 程序化动画（`animate`） | 160 行 |
+| `tools/monster_gallery.gd` | 画廊：每种形态单独特写拼成对照图 + 一张实战取景图（入库工具） | 230 行 |
+
+**接线只有三处**（都在表现层，sim / 协议一行没动）：`Arena._create_unit_view()` 把快照里的
+`camp_id / objective_id / monster_type` 三项传给 `UnitVisual.setup()`；`UnitVisual._build_monster()`
+用 `MonsterForms.form_key()` 换出形态键，程序化形态交给 `_build_procedural_monster()`，
+狼走 `_build_wolf_monster()`，河道之灵仍是原来的水球分支。`Arena` 只负责**把快照字段递下去**，
+形态语义收在 `MonsterForms` 里 —— 和 `set_monster_badge()` 的分工一致。
+
+**为什么程序化拼、不再找现成模型**：现成包的 glb 里连 `license` 字段都没有
+（差距文档 §5.1），野怪再引一套资产等于再加一处合规风险；基本体 + 共享材质的显存与包体代价
+接近零；而俯视 20 米机位下玩家读的是**剪影 + 配色**，不是面数。
+
+**四条设计口径**（都是看实拍图改出来的，别凭手感推翻）：
+
+1. **剪影第一**：同一体积拆成两三块各自转几度，比一整块大方块像「石头/甲壳」；发光件要**小而亮**，
+   做大了在 bloom 下糊成一坨白斑（第一版蓝石像的晶体就把整个胸甲吃掉了）。
+2. **配色按 FILMIC 反解**：石头基色要压到 `0.1~0.3` 这一档。写 `0.5` 上去，经过
+   `TONE_MAPPER_FILMIC + exposure 1.05 + 天空环境光` 出来是中灰色，红石像会读成「奶咖色」。
+   这和 §7 血条三色（`HP_SELF/HP_ALLY/HP_ENEMY`）是同一类坑。
+3. **体型与碰撞半径必须同量级**：`Jungle.monster_stats()` 给的 `radius`（小野点 1.5 / buff 2.2 /
+   首领 2.8）就是「被打到的范围」。`fit_height()` 负责把形象对齐到标定身高，`test_monster_forms`
+   再按 AABB 卡住「不能明显超出、也不能缩成小点」。
+4. **獠牙/角一律朝上外翻**：朝前摆会连成一排白板，正面读成「一张嘴」。
+
+**动画不用骨骼**：形象是基本体拼的，没有骨骼可播。`MonsterForms.animate()` 每帧按
+「腿绕髋关节摆 / 翅膀扇 / 尾巴摇 / 肩甲与火星绕体转 / 晶体呼吸」驱动关节节点，
+`moving` 与 `unit_speed` 决定步频与幅度。死亡时（`_update_death_pose`）向前倒 + 下沉，
+复活时 `_restore_model_rest_pose()` 收回 —— **倒地只叠加在静止姿态上**，直接写
+`model_root.scale/rotation` 会覆盖 `fit_height` 的结果，野怪一死就变大浮空。
+
+**性能纪律**：材质与网格都走 `MonsterKit` 的静态缓存（`stone/gem/glow/aura/hide_mat/chitin` +
+`_box_mesh/_sphere_mesh/_cylinder_mesh/_shard_mesh`），同形态重复装配**不新建**材质与网格
+（`test_monster_forms` 有守卫）。首领约 55 个 `MeshInstance3D`，小野点 26~35 个；
+它们共用材质、关闭投影，同屏最多也就是几个野点。
+
+**改形象的操作顺序**（否则你会盯着一张缩成一坨的图瞎调）：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\monster_gallery.gd
+:: 产物：godot/shots/monster_sheet.png（8 宫格特写）、monster_field.png（51° 俯角实战取景）
+```
+
+画廊的**环境与主光直接吃 `ArenaLook`**（`apply_environment` / `apply_sun`），
+所以图上看到的颜色就是游戏里的颜色 —— 自己另写一套光照、尤其是不开 bloom 时，
+「晶体到底亮不亮」根本判断不了。
+
+**遗留**：`assets/characters/Orc.glb` 现在没有生产引用了（旧版首领模型），
+保留为素材；`test_global_integrity` 仍在资产清单里断言它能加载。
+
+血条之外的头顶信息：
+
+| 单位 | 头顶 | 规则 |
+| --- | --- | --- |
+| 英雄 | 名字 + 等级 + 草丛斜划眼 | 眼睛只给**本地英雄**，敌人进草不显示（否则是透视） |
+| 野怪 | 名字 + `蓝BUFF`/`红BUFF`/`首领` 前缀 | 前缀与颜色由 `Arena` 从快照字段传给 `set_monster_badge()`，`UnitVisual` 不猜语义 |
+| 小兵 | 只有血条 | 数量太多，名字会糊成一片 |
+
+营地/首领坑的**地面**信息（`arena._sync_camp_states`）：
+
+- 贴地符阵 `shaders/camp_sigil.gdshader` 随野怪存活状态亮/暗；
+- 野怪死亡后视图会被回收，所以在营地上保留一块 `Label3D` 倒计时牌（`名称 + 剩余秒数`）；
+- 小地图同步画倒计时弧（`Minimap.camp_timer_marks()`），三者共用快照里的 `respawn_timer`。
+- 符阵/倒计时只在营地进入本地视野时显示：快照里没有那只野怪，就不隔墙读计时。
+
+---
+
 ## 7.1 野怪形象（2026-11-10）
 
 玩家反馈原话：「红蓝buff和野怪的形象还是不够好看，要继续优化，可以参考王者荣耀等游戏的野怪设计」。
@@ -663,3 +1047,71 @@ powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\po
 
 改墙石时不要退回「每块一个 MeshInstance」：移动端最先炸的就是 draw call 和 shadow pass。桌面全量画质仍走完整 shader 和 48 米阴影，不要拿移动端帧率反推桌面参数。
 
+---
+
+## 13. 基地水晶美术（2026-11-12 二轮）
+
+> 本节在 2026-11-12 被一次跨会话的文档合并误删，现按 `crystal_visual.gd` 与
+> `test_crystal_*.gd` **重新整理**（源码与测试一直是完整的，没有丢失）。
+> 如果原作者保留了更详细的版本，以那份为准；这里只保证「下一任模型读得到约束」。
+
+主堡原版是「一颗六棱球 + 圆柱台座 + 一道 torus 光圈 + 一根半透明圆柱光柱」，
+21 米机位下能读成「蓝/红发光球」，但离王者的水晶差很远：没有台基层次、
+没有晶簇、没有环绕碎片、没有符文轮，两个阵营只靠球体颜色区分。
+
+### 13.1 文件分工
+
+| 文件 | 职责 |
+| --- | --- |
+| `scripts/game/crystal_visual.gd` | 造型 + 状态表现：五层结构、`build()`、`apply_state()`、`apply_damage()`、`apply_shield()`，以及纯函数 `damage_tone()` / `gem_energy()` / `shield_strength()` |
+| `shaders/crystal_beam.gdshader` | 双层光柱 |
+| `shaders/crystal_sigil.gdshader` | 贴地法阵 |
+| `shaders/crystal_shield.gdshader` | 护盾球壳 |
+| `shaders/crystal_energy.gdshader` | 二轮新增：能量外壳（fresnel 亮边 + 内部流光上涌 + 晶尖呼吸） |
+| `tests/test_crystal_visual.gd` | 造型 / 调色 / 淡化契约 / 残破曲线 / 轨道碎片 |
+| `tests/test_crystal_energy.gd` | 二轮观感层：能量外壳、金环符文、晶尖配色、网格预算 |
+| `tests/test_crystal_occlusion.gd` | 遮挡淡化：哪些部件必须淡、哪些绝不能淡 |
+| `tests/test_high_ground_crystal.gd` | 高地水晶 + 双子塔 + 护盾状态接线 |
+| `tools/crystal_gallery.gd` | 画廊：两座同框 / 蓝顶视 / 蓝近景 / 红近景 / 红护盾 / 蓝残破 / 蓝淡化 |
+
+### 13.2 五层结构（每层在俯视机位下各承担一个可读信号）
+
+1. **台基 `dais`**：三层收分圆台 + 8 块径向石墩 + 8 道弧槽 + 金环压边；
+2. **柱座 `pedestal`**：8 棱收分石柱 + 8 片花瓣托 + 4 条拱券石肋；
+3. **晶簇 `gem`**：一根 4.35 m 主晶 + 3 根贴地副晶，全部是**平面法线**多面体；
+4. **环绕 `rings` / `shards` / `halo`**：三层差速金环 + 6 块轨道碎片 + 一道斜光环；
+5. **光效 `beam` / `sigil` / `shield`**：双层光柱 + 贴地法阵 + 双壁护盾。
+
+### 13.3 三条不能改的契约（测试逐条抓）
+
+1. **`pedestal` / `gem` 必须在 `crystal_fade_parts` 里**，且材质常驻 `TRANSPARENCY_ALPHA`。
+   英雄走进泉水时要把挡视线的部分淡到 `OcclusionFade.MIN_VISIBLE`；
+   **`dais` 是贴地定位线，绝不能跟着淡** —— 淡了英雄就像浮在空中。
+2. **所有每帧动画只改 transform / 材质参数**，不新建节点、不新建材质（硬规则 4）。
+   材质**不做静态缓存**：`OcclusionFade` 会直接改 `albedo_color.a`，静态缓存会被
+   同一进程里的下一局复用，上一局淡到 0.16 的水晶会在新局里一出生就半透明。
+   **网格**仍然缓存（一局只有两座主堡，逐座 new 材质的代价可以忽略）。
+3. **主晶顶部必须高于柱座，晶簇宽度不得超出台基** —— 否则是「一坨浮在台座外面的碎片」。
+   二轮新增部件后，网格数仍卡在 34 以内（`test_crystal_tip_keeps_faction_colour_and_mesh_budget_holds`）。
+
+### 13.4 二轮改了什么（只改观感，不动分层与接线）
+
+首版实拍是「实心蓝塑料宝石 + 三圈黑铁丝 + 灰白井盖底座」：结构和王者对齐了，质感没对齐。
+
+- `gem_energy` 能量外壳：复用 gem 网格再画一遍加法薄壳，**不新建几何**；
+- 晶尖去白帽、棱线降亮：阵营色一直贯到顶端，不再像「红宝石上插了截白蜡」；
+- 金环加粗 + 自发光 + 等距符文：远景从「铁丝」变成「在运转的能量环」；
+- 轨道碎片从水滴改扁晶片：主堡周围应该是碎裂的晶屑，不是六颗雨滴；
+- 光柱去白灯管 + 加上升光屑；护盾保住阵营色；台基黑辐条改金属嵌条；法阵加一层贴地柔光池。
+
+### 13.5 验证
+
+```cmd
+powershell -ExecutionPolicy Bypass -File godot\tools\shot_offscreen.ps1 tools\crystal_gallery.gd
+:: 产物：godot/shots/crystal_bases_field.png / crystal_blue_top.png / crystal_blue_closeup.png
+::       crystal_red_closeup.png / crystal_red_shield.png / crystal_blue_damaged.png / crystal_blue_faded.png
+```
+
+着色器必须真的跑一次渲染再交：`const float TAU = ...` 会重定义 Godot 内置常量，
+后果是**编译失败 → 材质回落纯白**，日志里只有一行 `SHADER ERROR`，headless 测试也全绿。
+`test_crystal_energy` 与 `test_portal_visual` 都按名字逐条拦住内置常量重定义。

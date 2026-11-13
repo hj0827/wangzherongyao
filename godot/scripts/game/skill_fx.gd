@@ -89,8 +89,23 @@ static func accent_color(kind: String) -> Color:
 	return KIND_ACCENTS.get(kind, Color(0.9, 0.92, 1.0))
 
 # 英雄谱系色与技能强调色的混合口径。arena 与测试读同一个函数，避免两处公式漂移。
+#
+# `amount = 1` 表示**完全取强调色**（这是既有契约，被 test_skill_accent_colors 钉住）。
+# 色相撞车的处理不在这里做 —— 见 `HERO_VARIANTS` 的 `accent` 字段。
 static func blend_color(hero_color: Color, kind: String, amount := 0.45) -> Color:
 	return hero_color.lerp(accent_color(kind), clampf(amount, 0.0, 1.0))
+
+## 某个英雄放某个 kind 时的**强调色**。变体可以覆盖它。
+##
+## 为什么需要：立绘上星璃和墨鸦都是紫色系（9e85ff / cc6beb，色相差 0.03），
+## 而 `burst` 的强调色也是紫。两者混出来的颜色几乎一样 —— 团战里同一个 burst
+## 技能分不出是谁放的。给墨鸦的变体单独指定一个偏青的强调色，
+## 就能在不改全局公式的前提下把这一对拆开。
+static func accent_for(hero_type: String, kind: String) -> Color:
+	var override: Dictionary = HERO_VARIANTS.get("%s|%s" % [hero_type, kind], {})
+	if override.has("accent"):
+		return override["accent"]
+	return accent_color(kind)
 
 const SUMMONER_COLORS := {
 	"flash": Color(0.78, 0.92, 1.0),
@@ -351,6 +366,114 @@ static func kind_for(hero_type: String, slot: String) -> String:
 	var skill: Dictionary = def.get(slot, {})
 	return str(skill.get("kind", ""))
 
+# ---------------------------------------------------------------------------
+# 英雄级技能变体（HERO-06）
+# ---------------------------------------------------------------------------
+#
+# 为什么需要这一层：`recipe(kind)` 只按 kind 分派，而 17 个 kind 里有 3 个是
+# **两个英雄共用的**：
+#   - `burst`      → 星璃 Q（星陨·法术）与 墨鸦 W（毒牙·近身毒爆）
+#   - `charge`     → 铁壁 W（野蛮冲撞·重装冲撞）与 墨鸦 Q（影袭·瞬身突刺）
+#   - `leap_slam`  → 苍刃 R（裂地崩山·巨剑砸地）与 墨鸦 R（绝影处决·突进处决）
+# 这三对以前**形状完全一样**，只靠英雄色 + 强调色混合来区分 —— 在 5v5 团战里
+# 「是谁放的」和「这是哪个技能」两个问题会互相顶掉。
+#
+# 做法：给这几对加英雄级覆盖，只改**形状轴与节奏轴**（环的朝向/半径、粒子贴图、
+# 二次爆延迟、残留贴图、光束渐宽），不动结构字段（projectile/trail/beam/shake/hit_stop）——
+# 那些决定「sim 里有没有真实弹道」，画错就是重复画一颗弹丸。
+#
+# 覆盖键是 `"<hero_type>|<kind>"`。没有覆盖的走 `recipe(kind)`，行为完全不变。
+
+const HERO_VARIANTS := {
+	# 墨鸦 W 毒牙：近身毒爆 —— 不是法球飞过去炸，而是**贴地扩散的毒圈**。
+	# 形状：一圈爬升的绿雾 + 一圈低矮的贴地环；节奏：无延迟（毒是瞬间的）。
+	"assassin|burst": {
+		"signature": "毒牙扩散",
+		# 强调色改青绿：星璃的 burst 是紫，两人立绘都是紫系，不改色相就分不开。
+		"accent": Color(0.42, 1.0, 0.58),
+		"rings": [
+			{"at": "self", "from": 0.4, "to": 2.4, "dur": 0.34, "alpha": 0.6, "tilt": false},
+		],
+		"particles": [
+			{"at": "self", "count": 18, "speed": 2.8, "height": 0.3, "life": 0.7, "size": 0.17,
+				"texture": "smoke", "delay": 0.0},
+			{"at": "self", "count": 8, "speed": 1.6, "height": 0.15, "life": 0.5, "size": 0.1,
+				"texture": "spark", "delay": 0.08},
+		],
+		"decal": "smoke",
+		"decal_scale": 1.0,
+	},
+	# 墨鸦 Q 影袭：瞬身突刺 —— 没有重装冲撞的震屏与前冲，是**一条残影线**。
+	# 形状：起点一圈收束环 + 沿途 4 段残影；节奏：极短、无二次爆。
+	"assassin|charge": {
+		"signature": "影袭残线",
+		"accent": Color(0.72, 0.90, 1.0),
+		"rings": [
+			{"at": "self", "from": 0.5, "to": 1.4, "dur": 0.2, "alpha": 0.5, "tilt": true},
+		],
+		"particles": [
+			{"at": "self", "count": 10, "speed": 3.4, "height": 0.5, "life": 0.34, "size": 0.13,
+				"texture": "smoke", "delay": 0.0},
+		],
+		"trail": 4,
+		"decal": "slash",
+		"decal_scale": 0.85,
+	},
+	# 墨鸦 R 绝影处决：突进处决 —— 比苍刃的「跳斩震地」**窄而深**。
+	# 形状：落点一个窄环 + 竖直刀光扇面；节奏：两段但间隔更短（处决是连贯的）。
+	"assassin|leap_slam": {
+		"signature": "绝影处决",
+		"accent": Color(1.0, 0.36, 0.78),
+		"rings": [
+			{"at": "aim", "from": 1.2, "to": 3.6, "dur": 0.4, "alpha": 0.65, "tilt": false},
+			{"at": "aim", "from": 0.5, "to": 1.8, "dur": 0.26, "alpha": 0.55, "tilt": true},
+		],
+		"particles": [
+			{"at": "aim", "count": 22, "speed": 5.2, "height": 1.1, "life": 0.5, "size": 0.15,
+				"texture": "slash", "delay": 0.0},
+			{"at": "aim", "count": 10, "speed": 2.0, "height": 0.4, "life": 0.36, "size": 0.1,
+				"texture": "smoke", "delay": 0.12},
+		],
+		"arc": {"deg": 76.0, "reach": 2.6, "height": 1.15},
+		"decal": "slash",
+		"decal_scale": 1.1,
+	},
+	# 铁壁 W 野蛮冲撞：重装冲撞 —— 比影袭**宽得多、慢得多**，带扬尘与震荡环。
+	# 形状：脚下一大圈冲击环 + 两侧扬尘；节奏：单段但更长。
+	"tank|charge": {
+		"signature": "重装冲撞",
+		"rings": [
+			{"at": "self", "from": 0.8, "to": 3.2, "dur": 0.44, "alpha": 0.6, "tilt": false},
+		],
+		"particles": [
+			{"at": "self", "count": 20, "speed": 3.0, "height": 0.25, "life": 0.68, "size": 0.2,
+				"texture": "smoke", "delay": 0.0},
+			{"at": "self", "count": 10, "speed": 2.0, "height": 0.5, "life": 0.5, "size": 0.14,
+				"texture": "shock", "delay": 0.1},
+		],
+		"trail": 2,
+		"decal": "shock",
+		"decal_scale": 1.3,
+	},
+}
+
+## 取某个英雄放某个 kind 时的配方。**这是渲染层应该用的入口**，
+## `recipe(kind)` 只留给「不知道是谁放的」的场合（例如测试与预警圈）。
+static func recipe_for(hero_type: String, kind: String) -> Dictionary:
+	var override: Dictionary = HERO_VARIANTS.get("%s|%s" % [hero_type, kind], {})
+	if override.is_empty():
+		return recipe(kind)
+	# 以通用配方为底，再叠英雄覆盖 —— 这样覆盖只需要写「和通用不同的键」，
+	# 结构字段（projectile/trail/beam/shake/hit_stop）默认继承，不会因为漏写而丢。
+	var merged := recipe(kind).duplicate(true)
+	for key in override:
+		merged[key] = override[key]
+	return merged
+
+## 这个英雄的某个 kind 是否走了专属变体（测试与文档用）。
+static func has_variant(hero_type: String, kind: String) -> bool:
+	return HERO_VARIANTS.has("%s|%s" % [hero_type, kind])
+
 # 机读指纹：**只看渲染参数**（环朝向 / 粒子贴图与节奏与体量 / 残留 / 刀光弧 / 光束渐宽），
 # 不看 `signature` 名字。两个 kind 只要长得不一样，这里就一定不一样。
 # 测试用它做「17 个 kind 两两去重」——名字撞车、参数撞车都能抓出来。
@@ -405,7 +528,9 @@ static func requests(events: Array) -> Array:
 				"summoner": "",
 				"from": _point(event, "start_x", "start_y", "x", "y"),
 				"aim": _point(event, "aim_x", "aim_y", "x", "y"),
-				"recipe": recipe(kind),
+				# 英雄级变体：同 kind 的两个英雄（如 burst = 星璃Q / 墨鸦W）
+				# 拿到的形状与节奏不同，而不是只换颜色。
+				"recipe": recipe_for(hero_type, kind),
 			})
 		elif type == "summoner_cast":
 			var spell := str(event.get("spell_id", "flash"))

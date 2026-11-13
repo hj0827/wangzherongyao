@@ -200,7 +200,9 @@ func test_net_snapshot_keeps_the_attack_fields() -> void:
 func test_the_attack_branch_actually_draws_it() -> void:
 	# 接线守卫（00-hard-rules 第 9 条）：文件在 + 测试绿 ≠ 功能在跑。
 	# 用 has_live_line 而不是 contains —— 把调用注释掉之后字符串还在，守卫会假绿。
-	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd")
+	# 分发在 event_router.gd（C17），生成逻辑仍在 arena：两份源码都要看。
+	var source := FileAccess.get_file_as_string("res://scripts/game/arena.gd") \
+		+ FileAccess.get_file_as_string("res://scripts/game/event_router.gd")
 	check(has_live_line(source, "_handle_hero_attack(event)"), "attack 事件必须接到 _handle_hero_attack")
 	check(has_live_line(source, "_spawn_slash("), "近战普攻必须真的生成刀光")
 	check(has_live_line(source, "take_particle_slot(_slash_pool"), "刀光必须从池里取（硬规则 4）")

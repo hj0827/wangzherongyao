@@ -130,7 +130,7 @@ func test_map_scenery_ships_no_trees() -> void:
 	check(not source.contains("Resource_Tree_Group.glb"), "地图不再加载阔叶树模型")
 	check(not source.contains("Resource_Tree1.glb"), "地图不再加载单株树模型")
 	var start := source.find("func _build_scenery")
-	var end := source.find("func _lane_distance", start)
+	var end := source.find("func _sync_units", start)
 	check(start >= 0 and end > start, "_build_scenery 要在")
 	if start >= 0 and end > start:
 		var body := source.substr(start, end - start)
