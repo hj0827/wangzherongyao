@@ -76,7 +76,17 @@ void fragment() {
 
 	// 方形 PlaneMesh 的边角淡出，避免看到四角。
 	float edge = 1.0 - smoothstep(0.955, 1.0, r);
+
+	// 贴地柔光池（二轮新增）：首版只有线纹，水晶看着像「贴在草地上」而不是
+	// 「在照亮脚下」。这里借同一张 PlaneMesh 补一层很淡的径向辉光，
+	// 并在台基外沿（r≈0.665，对应半径 4.65m / 圆盘 7m）压一道溶边光环。
+	// 不新增节点：法阵本来就在 arena 的 destroy_hide 名单里，水晶被推平时光池会一起消失。
+	float ground = pow(1.0 - smoothstep(0.18, 0.94, r), 2.2) * 0.075;
+	ground += (1.0 - smoothstep(0.028, 0.075, abs(r - 0.665))) * 0.055;
+	ground *= edge * active * (1.0 - 0.55 * damage);
+
 	vec3 body = mix(sigil_color.rgb, hot_color.rgb, clamp(shield * 0.55 + damage * 0.10, 0.0, 1.0));
 	ALBEDO = body;
-	ALPHA = clamp(mask * active * intensity * breathe * flicker * edge * band_gain * sigil_color.a, 0.0, 1.0);
+	float lit = mask * active * intensity * breathe * flicker * edge * band_gain * sigil_color.a;
+	ALPHA = clamp(lit + ground, 0.0, 1.0);
 }

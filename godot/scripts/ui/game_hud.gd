@@ -24,6 +24,8 @@ signal upgrade_requested(slot: String)
 
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const HeroDefs = preload("res://sim/hero_defs.gd")
+# 技能键的主色 = 英雄身份色，和模型、技能特效同源（见 HeroLook 文件头）。
+const HeroLook = preload("res://scripts/game/hero_look.gd")
 const ControlRules = preload("res://sim/control_rules.gd")
 const SkillSystem = preload("res://sim/skill_system.gd")
 const MatchMenu = preload("res://scripts/game/match_menu.gd")
@@ -1038,19 +1040,33 @@ func _build_bottom_panel() -> void:
 
 	if not touch_mode:
 		# 技能从状态卡里搬出来，单独贴右下角：状态卡只回答「我是谁 / 我还剩多少血」。
-		_skill_q = _create_skill("q", "Q", GameTheme.GOLD)
+		#
+		# 四个键的主色**不再是固定四色**：以前是金/绿/蓝/橙写死，换英雄时技能键
+		# 的颜色不变，模型和按钮对不上。现在统一从英雄身份色派生（Q 用身份色本体，
+		# W/E/R 依次往点缀色的明暗两端走），5 个英雄各有一套，且和技能特效同色。
+		var accent := HeroLook.glow(hero_type) if HeroLook.has_look(hero_type) else GameTheme.GOLD
+		_skill_q = _create_skill("q", "Q", accent)
 		add_child(_skill_q)
 		# 键盘 W 已用于走位，第二技能改绑数字键 1，HUD 直接标注实际键位。
-		_skill_w = _create_skill("w", "1", Color(0.68, 0.86, 0.58))
+		_skill_w = _create_skill("w", "1", _skill_accent(accent, 0.18))
 		add_child(_skill_w)
-		_skill_e = _create_skill("e", "E", Color(0.55, 0.75, 1.0))
+		_skill_e = _create_skill("e", "E", _skill_accent(accent, -0.22))
 		add_child(_skill_e)
-		_skill_r = _create_skill("r", "R", Color(0.95, 0.62, 0.45))
+		_skill_r = _create_skill("r", "R", _skill_accent(accent, 0.34))
 		add_child(_skill_r)
 		_summoner_button = _create_skill("summoner", "F", Color(0.5, 0.86, 0.76), _summoner_name())
 		add_child(_summoner_button)
 	var hero_def: Dictionary = HeroDefs.get_hero(hero_type)
 	_role_label.text = "%s · %s" % [hero_def.role, hero_def.title]
+
+## 从身份色派生同一英雄的其它技能键色：往亮端 / 暗端各推一档。
+## `amount` 为正 = 提亮（靠近点缀光），为负 = 压暗（保留色相）。
+## 这么做的原因：4 个技能键如果都用同一个色，按键之间读不出「这是四个不同技能」；
+## 用四套完全不同的固定色又会和英雄身份脱节。派生是两头都成立的做法。
+static func _skill_accent(base: Color, amount: float) -> Color:
+	if amount >= 0.0:
+		return base.lerp(Color(1.0, 1.0, 1.0), clampf(amount, 0.0, 0.6)).lerp(base, 0.35)
+	return base.darkened(clampf(-amount, 0.0, 0.6))
 
 func _create_skill(slot: String, key: String, accent: Color, display_name := "") -> SkillButton:
 	var button := SkillButton.new()
@@ -1365,13 +1381,14 @@ func _build_touch_controls() -> void:
 	_attack_button.released.connect(func(): attack_changed.emit(false))
 	add_child(_attack_button)
 
-	_skill_q = _create_skill("q", "Q", GameTheme.GOLD)
+	var touch_accent := HeroLook.glow(hero_type) if HeroLook.has_look(hero_type) else GameTheme.GOLD
+	_skill_q = _create_skill("q", "Q", touch_accent)
 	add_child(_skill_q)
-	_skill_w = _create_skill("w", "1", Color(0.68, 0.86, 0.58))
+	_skill_w = _create_skill("w", "1", _skill_accent(touch_accent, 0.18))
 	add_child(_skill_w)
-	_skill_e = _create_skill("e", "E", Color(0.55, 0.75, 1.0))
+	_skill_e = _create_skill("e", "E", _skill_accent(touch_accent, -0.22))
 	add_child(_skill_e)
-	_skill_r = _create_skill("r", "R", Color(0.95, 0.62, 0.45))
+	_skill_r = _create_skill("r", "R", _skill_accent(touch_accent, 0.34))
 	add_child(_skill_r)
 	# 位置不在这里定：弧半径和角间距都跟视口有关（见 TouchLayout.skill_arc_radius），
 	# 由 _apply_layout 每次按当前视口重排。

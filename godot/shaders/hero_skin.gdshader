@@ -35,9 +35,16 @@ uniform float brightness : hint_range(0.2, 3.0) = 1.0;
 uniform vec4 rim_color : source_color = vec4(1.0);
 uniform float rim_strength : hint_range(0.0, 3.0) = 0.0;
 uniform float rim_power : hint_range(0.5, 8.0) = 3.0;
-// 队伍色：只压暗部，且强度很低（0.16 上限）。太高会盖掉英雄主色。
+// 队伍色：压暗部 + 描边缘，双管齐下。
+//
+// 为什么需要两处：实测（fight_close.png 里两个苍刃对砍）只压暗部时，
+// 16% 的染色在 21 米机位下**完全看不出来** —— 红蓝两个苍刃身体颜色几乎一样，
+// 玩家会对着队友挥技能。所以再加一档**轮廓队伍色**：边缘亮边不占身体色彩面积，
+// 主色仍然认得出是谁，但人群里看轮廓就能分敌我。
 uniform vec4 team_tint : source_color = vec4(1.0);
 uniform float team_amount : hint_range(0.0, 1.0) = 0.0;
+uniform vec4 team_rim_color : source_color = vec4(0.0, 0.0, 0.0, 0.0);
+uniform float team_rim_strength : hint_range(0.0, 4.0) = 0.0;
 // 自发光（发丝 / 晶饰 / 纹路）。按贴图亮度加权，避免"整件衣服在发光"。
 uniform vec4 glow_color : source_color = vec4(1.0);
 uniform float glow_strength : hint_range(0.0, 6.0) = 0.0;
@@ -59,7 +66,13 @@ void fragment() {
 	vec3 original = tex.rgb * brightness;
 	// 0.42 + shade*0.62：最亮处 ≈ 1.04、最暗处 ≈ 0.48。第一版写 0.55+shade*0.9
 	// 最亮能到 1.54，在 FILMIC + 1.68 主光下整件衣服直接过曝成粉彩色。
-	vec3 lit = mix(original, toned * (0.42 + shade * 0.62), recolor);
+	//
+	// ★ `brightness` 必须乘在 toned 上，不能只乘 original。
+	//   第一版只写了 `original = tex.rgb * brightness`，而 recolor 通常 0.86~0.94，
+	//   等于 brightness 被稀释到只剩 6~14% —— 调它几乎没有效果。
+	//   浅色英雄（翎羽的米白战衣）正是靠这一档抬回米白：
+	//   实测米白 base 0.62 渲出来只有 114/128/133（灰蓝）。
+	vec3 lit = mix(original, toned * brightness * (0.42 + shade * 0.62), recolor);
 	// 暗部压入队伍色：亮部保留英雄主色，红蓝两队不至于变成两个色块。
 	vec3 dark_mask = vec3(1.0 - shaped);
 	lit = mix(lit, lit * team_tint.rgb, team_amount * dark_mask);
@@ -81,4 +94,8 @@ void fragment() {
 		EMISSION = glow_color.rgb * glow_strength * glow_mask;
 	}
 	EMISSION += rim;
+	// 轮廓队伍色：敌我识别靠这一圈边缘。乘 2.2 次方让它比上面的英雄 rim 更贴边，
+	// 不抢主色；强度由 GDScript 按红/蓝给（0.72）。
+	float team_fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 2.2);
+	EMISSION += team_rim_color.rgb * team_rim_strength * team_fres;
 }

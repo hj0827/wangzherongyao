@@ -27,7 +27,8 @@ float cell_lines(vec2 uv) {
 	q.x += mod(floor(q.y), 2.0) * 0.5;
 	vec2 f = abs(fract(q) - 0.5);
 	float d = min(f.x, f.y);
-	return 1.0 - smoothstep(0.024, 0.062, d);
+	// 收窄线宽：首版 0.024~0.062 在 21 米机位糊成一层均匀磨砂，读不出六边形。
+	return 1.0 - smoothstep(0.018, 0.045, d);
 }
 
 void fragment() {
@@ -37,14 +38,18 @@ void fragment() {
 	float scan = smoothstep(0.94, 1.0, sin(UV.y * 17.0 - TIME * 1.9));
 	float breathe = 0.88 + 0.12 * sin(TIME * 1.5);
 
-	// 0.46 的边缘上限：旧版 0.62 叠在已经过曝的水晶上，整座基地变成一颗粉白玻璃球。
-	float alpha = (0.012 + rim * 0.36 + grid * 0.08 + scan * 0.045) * breathe;
+	// 中心几乎全透、轮廓才亮：首版球心 0.012 + 泛白 edge_color，
+	// 实拍是一颗灰白磨砂罩，把红方水晶整个洗掉色。
+	float alpha = (0.004 + rim * 0.46 + grid * 0.13 + scan * 0.055) * breathe;
+	// 顶部能量汇聚环：护盾不是一顶玻璃罩，能量在顶点收口。
+	alpha += (1.0 - smoothstep(0.02, 0.13, abs(UV.y - 0.93))) * 0.20;
 	alpha *= (0.35 + 0.65 * clamp(strength, 0.0, 1.0));
 	alpha *= 1.0 + pulse * 0.9;
 	// 球底压暗一档：贴地的部分如果也亮，会像一圈发光的围栏。
 	alpha *= smoothstep(0.0, 0.16, UV.y);
 
-	vec3 body = mix(shield_color.rgb, edge_color.rgb, clamp(rim + pulse * 0.5, 0.0, 1.0));
+	// 边缘只掺 20% 白，阵营色在护盾上仍然读得出来。
+	vec3 body = mix(shield_color.rgb, edge_color.rgb, clamp(rim * 0.85 + pulse * 0.5, 0.0, 1.0));
 	ALBEDO = body;
-	ALPHA = clamp(alpha * intensity * shield_color.a, 0.0, 0.55);
+	ALPHA = clamp(alpha * intensity * shield_color.a, 0.0, 0.62);
 }

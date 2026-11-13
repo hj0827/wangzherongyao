@@ -134,7 +134,10 @@ func _count_meshes(root: Node) -> int:
 
 func _run() -> void:
 	await create_timer(0.8).timeout
-	var sheet := Image.create_empty(CELL.x * 3, CELL.y * HEROES.size(), false, Image.FORMAT_RGBA8)
+	# 四列：正面 / 侧面 / 头肩特写 / 21 米实战机位。
+	# 最后一列不能省：前三列都是「拉近看细节」，而玩家 90% 时间看到的是那一格，
+	# 判断「认不认得出这个人」只能靠它。
+	var sheet := Image.create_empty(CELL.x * 4, CELL.y * HEROES.size(), false, Image.FORMAT_RGBA8)
 	for row in HEROES.size():
 		var spec: Dictionary = HEROES[row]
 		var hero_type := str(spec["type"])
@@ -157,6 +160,7 @@ func _run() -> void:
 			if str(entry[0]) == "front":
 				image.save_png(
 					ProjectSettings.globalize_path("res://shots/hero_%s_front.png" % hero_type))
+		images.append(await _field_cell(view))
 		var costume: Dictionary = view._costume
 		print("HERO %-8s 网格=%3d 材质缓存=%d 件=%2d 摆动组=%d 身高=%.2f" % [
 			hero_type, _count_meshes(view.model_root),
@@ -190,20 +194,53 @@ func _run() -> void:
 	quit()
 
 ## 头肩特写：21 米机位下看不清脸，但近景能判断「像不像那个角色」。
-## 取胸以上（y≈1.15~1.85），相机退到 2.2 米、抬高 0.1 米。
+##
+## ★ 中心必须按**身体**包围盒算，不能含武器与配件。
+##   待机姿势换过之后（HERO-07），苍刃抱臂时剑尖举过头顶、铁壁战旗比头还高，
+##   用整棵树算「顶点」会把镜头对到剑尖上 —— 实拍是一张只剩额头的图。
+##   排除口径与 `test_hero_silhouette` 一致：摘掉 WeaponSlot 与 HeroCostume_* 挂点。
 func _frame_bust(view: UnitVisual) -> void:
-	var centre := Vector3(0.0, 1.62, 0.0)
+	var top := _body_top(view)
+	var centre := Vector3(0.0, top - 0.30, 0.0)
 	var yaw := deg_to_rad(-28.0)
-	var distance := 2.15
-	camera.fov = 30.0
-	camera.position = centre + Vector3(sin(yaw) * distance, 0.12, cos(yaw) * distance)
+	var distance := 2.35
+	camera.fov = 34.0
+	camera.position = centre + Vector3(sin(yaw) * distance, 0.08, cos(yaw) * distance)
 	camera.look_at_from_position(camera.position, centre, Vector3.UP)
 
+## 身体最高点（模型坐标，不含武器与配件）。
+func _body_top(view: UnitVisual) -> float:
+	var saved_weapon: Node = null
+	var weapon := view.model_root.find_child("WeaponSlot", true, false)
+	if weapon != null and weapon.get_parent() != null:
+		saved_weapon = weapon
+		saved_weapon.get_parent().remove_child(saved_weapon)
+	var anchors: Array[Node] = []
+	var anchor_parent: Node = null
+	for node in view.model_root.find_children("*", "BoneAttachment3D", true, false):
+		anchor_parent = node.get_parent()
+		break
+	if anchor_parent != null:
+		for anchor in anchor_parent.find_children("HeroCostume_*", "BoneAttachment3D", true, false):
+			anchors.append(anchor)
+			anchor_parent.remove_child(anchor)
+	var box := ModelUtils.relative_aabb(view.model_root)
+	var top := box.position.y + box.size.y
+	if anchor_parent != null:
+		for anchor in anchors:
+			anchor_parent.add_child(anchor)
+	if saved_weapon != null:
+		view.model_root.add_child(saved_weapon)
+	return top
+
 ## 单人在 21 米俯视机位下的一格：用来对照「远看还剩什么」。
+##
+## 取景是**真实实战机位**（zoom 21 / 51° 俯角 / FOV 42），但把中央一半裁出来
+## 再放大 2 倍贴进格子 —— 360×520 的画幅里英雄只有约 50 像素高，不放大在拼图上
+## 根本判读不了「认不认得出」。实际屏占比看 `hero_field.png`（那张是未裁的原帧）。
 func _field_cell(view: UnitVisual) -> Image:
 	var cell := Image.create_empty(CELL.x, CELL.y, false, Image.FORMAT_RGBA8)
 	cell.fill(Color(0.12, 0.14, 0.12))
-	# 用一个临时 SubViewport 不划算：直接把相机推到实战机位再拍整帧，然后裁人物附近。
 	var saved := camera.global_transform
 	camera.fov = FIELD_FOV
 	var target := Vector3(0.0, 0.9, 0.0)
@@ -212,8 +249,11 @@ func _field_cell(view: UnitVisual) -> Image:
 	await create_timer(0.06).timeout
 	await RenderingServer.frame_post_draw
 	var frame: Image = viewport.get_texture().get_image()
-	# 人物在 360×520 画幅里大约占中间 150×260，裁出来贴回格子中心。
-	var crop := frame.get_region(Rect2i(Vector2i(0, 0), CELL))
+	# 只裁掉四边各 15%：保留「周围有多空」这个尺感，同时让人物占满画面中间。
+	# 裁得太狠（1/3）会读成「实战里英雄很大」，和真实观感相反。
+	var inset := Vector2i(int(CELL.x * 0.15), int(CELL.y * 0.15))
+	var crop := frame.get_region(Rect2i(inset, CELL - inset * 2))
+	crop.resize(CELL.x, CELL.y, Image.INTERPOLATE_BILINEAR)
 	cell.blit_rect(crop, Rect2i(Vector2i.ZERO, CELL), Vector2i.ZERO)
 	camera.global_transform = saved
 	camera.fov = FOV

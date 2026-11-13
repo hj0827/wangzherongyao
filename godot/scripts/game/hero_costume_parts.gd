@@ -90,7 +90,7 @@ static func _dress(
 	# 肩头圆盖：通用包在「躯干 ↔ 上臂」之间有一块裸肩三角，
 	# 袖子从 upperarm 骨原点才开始，正好漏掉这一块。
 	for side in ["l", "r"]:
-		var cap := Kit.upright_pivot(skeleton, "upperarm_" + side, "ShoulderCap" + str(side).to_upper())
+		var cap := Kit.shared_pivot(skeleton, "upperarm_" + side)
 		if cap != null:
 			Kit.dome(cap, upper_radius * 1.35, body, Vector3.ZERO, 0.85)
 	# 胯部围裙：盖住通用包的浅色短裤（露肤面积里最刺眼的一块）。
@@ -101,18 +101,19 @@ static func _dress(
 	# 袖子：从肩到肘用主色布，小臂包一层护臂（通用包的裸小臂是最明显的露肤点）。
 	for side in ["l", "r"]:
 		Kit.limb_tube(skeleton, "upperarm_" + side, upper_radius, upper_radius * 0.92,
-			0.20 * sleeve, body, 10, "Sleeve" + str(side).to_upper())
+			0.20 * sleeve, body, 10, "")
 		Kit.limb_tube(skeleton, "lowerarm_" + side, upper_radius * 0.82, upper_radius * 0.70,
-			0.20, trim, 10, "Bracer" + str(side).to_upper())
+			0.20, trim, 10, "")
 	if legs:
 		for side in ["l", "r"]:
-			# 大腿：整个包住（短裤以下露腿是「光膀子感」的主要来源）。
-			Kit.limb_tube(skeleton, "thigh_" + side, leg_radius, leg_radius * 0.90,
-				0.40, body, 10, "Thigh" + str(side).to_upper())
-			# 小腿：只包到踝上，靴子留出来。
-			Kit.limb_tube(skeleton, "calf_" + side, leg_radius * 0.84, leg_radius * 0.62,
-				0.34, body, 10, "Calf" + str(side).to_upper())
-			Kit.limb_band(skeleton, "calf_" + side, leg_radius * 0.86, 0.045, 0.035, trim, 10)
+			# 大腿：从胯骨向下包到膝盖下方（0.46 = 胯到膝 0.39 + 0.07 重叠），
+			# 长度只给 0.39 时膝盖会露出一个肤色横带 —— 21 米机位下是两道亮条。
+			Kit.limb_tube(skeleton, "thigh_" + side, leg_radius, leg_radius * 0.88,
+				0.46, body, 10, "")
+			# 小腿：从膝盖上沿 0.04 米起，包到踝上，靴子留出来。
+			Kit.limb_tube(skeleton, "calf_" + side, leg_radius * 0.90, leg_radius * 0.64,
+				0.40, body, 10, "", 0.04)
+			Kit.limb_band(skeleton, "calf_" + side, leg_radius * 0.92, 0.045, 0.06, trim, 10)
 
 # ---------------------------------------------------------------------------
 # 苍刃 · 战士：墨绿披风 + 右肩圆顶鳞甲（重）/ 左肩薄皮甲（轻）+ 旧金腰带
@@ -128,6 +129,8 @@ static func _blade(skeleton: Skeleton3D, result: Dictionary) -> void:
 	var leather := Kit.plate(Color(0.12, 0.095, 0.07), 0.08)
 
 	# 底衣：墨绿躯干 + 同色袖 + 深色裤 + 旧金护腕/护胫口
+	# 苍刃的「头发」其实是一顶连帽斗篷（hair_buzzed.glb），所以**不再叠兜帽** ——
+	# 再叠一个兜帽会把它顶成一个尖顶布袋，实拍已确认。
 	_dress(skeleton, Kit.cloth(primary.darkened(0.15)), trim,
 		{"arm_radius": 0.070, "leg_radius": 0.118, "torso_top": 0.180,
 		"collar": 0.098, "pelvis_wrap": {"top": 0.172, "bottom": 0.198, "height": 0.22}})
@@ -141,9 +144,16 @@ static func _blade(skeleton: Skeleton3D, result: Dictionary) -> void:
 		# 一起吞掉，读成「英雄下半身是一块黑布」。
 		Kit.part(cape, Kit.sheet_mesh(0.30, 0.46, 0.82, -0.10, 0.016), cloth,
 			Vector3.ZERO, Vector3(7.0, 0.0, 0.0))
-		# 内衬短一截、颜色更深，露出的边缘就是「两层布」。
-		Kit.part(cape, Kit.sheet_mesh(0.24, 0.36, 0.70, -0.06, 0.012), cloth_dark,
-			Vector3(0.0, -0.02, 0.015), Vector3(5.0, 0.0, 0.0))
+		# 内衬比主布片**宽 0.02、短 0.12**：从背后看会从两侧各露出一条窄边，
+		# 这就是「两层布」。以前内衬更窄（0.24 vs 0.30），被主布片整个盖住，
+		# 实拍里披风是一块没有层次的纯黑面。
+		Kit.part(cape, Kit.sheet_mesh(0.34, 0.50, 0.70, -0.06, 0.012), cloth_dark,
+			Vector3(0.0, -0.02, 0.028), Vector3(5.0, 0.0, 0.0))
+		# 中缝：一条从肩到下缘的窄压条，把整块布切成左右两片。
+		# 21 米机位下这是唯一能读出「这是一件衣服」的细节。
+		Kit.part(cape, Kit.box_mesh(Vector3(0.030, 0.80, 0.022)),
+			Kit.cloth(primary.lightened(0.55)),
+			Vector3(0.0, -0.40, 0.020), Vector3(7.0, 0.0, 0.0))
 		# 破边：三片长短不一的垂布，挂在主布片下缘。
 		for i in 3:
 			Kit.part(cape, Kit.sheet_mesh(0.08, 0.10, 0.12 + 0.03 * float(i), -0.03, 0.008),
@@ -338,38 +348,44 @@ static func _tank(skeleton: Skeleton3D, result: Dictionary) -> void:
 			Vector3(-0.115, 0.085, 0.0), Vector3(-10.0, 0.0, -30.0))
 		_record(result, "tank_pauldron_r", shoulder_r)
 
-	# --- 胸口铜盘：立绘里最醒目的圆形兽面 ---
+	# --- 胸口铜盘：立绘里最醒目的圆形兽面。
+	# 只画一片铜盘（圆台压扁），外圈用同色的窄环**合并进同一材质**，
+	# 合并后是 1 个网格；分两种材质就是 2 个 draw call。
 	var chest := Kit.upright_pivot(skeleton, "spine_02", "TankChest")
 	if chest != null:
 		chest.position = Vector3(0.0, 0.03, 0.150)
 		Kit.part(chest, Kit.cylinder_mesh(0.075, 0.025, 16), bronze, Vector3.ZERO, Vector3(90.0, 0.0, 0.0))
-		Kit.part(chest, Kit.torus_mesh(0.068, 0.085, 18), iron_dark, Vector3.ZERO, Vector3(90.0, 0.0, 0.0))
+		Kit.part(chest, Kit.torus_mesh(0.062, 0.090, 18), bronze, Vector3.ZERO, Vector3(90.0, 0.0, 0.0))
 		_record(result, "tank_chest", chest)
 
 	# --- 腰间披巾（两条锈橙）+ 铜环 + 四片甲裙 ---
+	#
+	# 预算口径：铁壁是配件最多的一个（双肩重甲 + 战旗 + 胸盘 + 腰带 + 甲裙），
+	# 不收敛会稳定超预算。两条垂巾合并成**一个**摆动组（它们总是同向摆，
+	# 分成两组只是多一次 draw call），四片甲裙共用**一个**摆动组 + 一个固定组：
+	# 甲裙是硬的，摆幅只有 6°，四片同步并不会露馅。
 	var belt := Kit.upright_pivot(skeleton, "pelvis", "TankSash")
 	if belt != null:
 		belt.position = Vector3(0.0, 0.05, 0.0)
 		Kit.band(belt, 0.126, 0.164, iron_dark, Vector3.ZERO, Vector3.ZERO, 18)
 		Kit.part(belt, Kit.torus_mesh(0.048, 0.066, 14), bronze, Vector3(0.0, 0.0, 0.158), Vector3(90.0, 0.0, 0.0))
+		var strips := Kit.group(belt, "Sash0")
 		for i in 2:
-			var strip := Kit.group(belt, "Sash%d" % i)
-			strip.position = Vector3(-0.070 + 0.14 * float(i), -0.02, 0.135)
-			Kit.part(strip, Kit.sheet_mesh(0.085, 0.115, 0.36, 0.02, 0.012), tabard,
-				Vector3.ZERO, Vector3(0.0, 0.0, (-1.0 if i == 0 else 1.0) * 5.0))
-			_record(result, "tank_sash", strip, "skirt")
+			Kit.part(strips, Kit.sheet_mesh(0.085, 0.115, 0.36, 0.02, 0.012), tabard,
+				Vector3(-0.070 + 0.14 * float(i), -0.02, 0.135),
+				Vector3(0.0, 0.0, (-1.0 if i == 0 else 1.0) * 5.0))
+		_record(result, "tank_sash", strips, "skirt")
+		var tassets := Kit.group(belt, "Tasset0")
 		for i in 4:
 			var angle := TAU * float(i) / 4.0 + PI * 0.25
-			var tasset := Kit.group(belt, "Tasset%d" % i)
-			tasset.position = Vector3(sin(angle) * 0.135, -0.05, cos(angle) * 0.135)
-			tasset.rotation_degrees = Vector3(0.0, rad_to_deg(angle), 0.0)
-			Kit.part(tasset, Kit.sheet_mesh(0.16, 0.19, 0.24, 0.012, 0.006, 4, 2), iron,
+			var plate := Kit.group(tassets, "Plate%d" % i)
+			plate.position = Vector3(sin(angle) * 0.135, -0.05, cos(angle) * 0.135)
+			plate.rotation_degrees = Vector3(0.0, rad_to_deg(angle), 0.0)
+			Kit.part(plate, Kit.sheet_mesh(0.16, 0.19, 0.24, 0.012, 0.006, 4, 2), iron,
 				Vector3(0.0, 0.0, 0.015), Vector3(6.0, 0.0, 0.0))
-			Kit.part(tasset, Kit.sheet_mesh(0.16, 0.18, 0.028, 0.0, 0.0, 4, 1), bronze,
+			Kit.part(plate, Kit.sheet_mesh(0.16, 0.18, 0.028, 0.0, 0.0, 4, 1), bronze,
 				Vector3(0.0, -0.245, 0.045), Vector3(6.0, 0.0, 0.0))
-			_record(result, "tank_tassets", tasset, "skirt")
-
-# ---------------------------------------------------------------------------
+		_record(result, "tank_tassets", tassets, "skirt")# ---------------------------------------------------------------------------
 # 翎羽 · 射手：白羽披肩 + 背后箭袋 + 青碧腰带 + 米白短下摆
 # ---------------------------------------------------------------------------
 
@@ -448,7 +464,8 @@ static func _archer(skeleton: Skeleton3D, result: Dictionary) -> void:
 				Vector3(0.0, 0.0, 6.0 - 6.0 * float(i)), 0.3)
 		_record(result, "archer_sash", bundle, "skirt")
 
-	# --- 头饰：丸子头上的两簇白羽 + 一枚青玉环（+Z 是脸） ---
+	# --- 头饰：丸子头上的两簇白羽（不加正面玉环 —— 环会正好压在脸上，
+	#     实拍是一块白色口罩；要加只能偏到鬓角，见下方 x 偏移） ---
 	var head := Kit.upright_pivot(skeleton, "Head", "ArcherHairpins")
 	if head != null:
 		head.position = Vector3(0.0, 0.08, 0.02)
@@ -457,8 +474,9 @@ static func _archer(skeleton: Skeleton3D, result: Dictionary) -> void:
 				Kit.feather(head, 0.040, 0.11 + 0.035 * float(i), feather,
 					Vector3(side * (0.085 + 0.022 * float(i)), 0.055, -0.015),
 					Vector3(-20.0, 0.0, side * (28.0 + 10.0 * float(i))), 0.3)
-		Kit.band(head, 0.040, 0.054, Kit.glow(secondary.lightened(0.42), 0.4),
-			Vector3(0.0, 0.015, 0.088), Vector3(90.0, 0.0, 0.0), 12)
+			# 青玉环挂在鬓角（x 偏 0.10、z 退到 -0.04），不在正前方。
+			Kit.band(head, 0.028, 0.038, Kit.glow(secondary.lightened(0.42), 0.4),
+				Vector3(side * 0.100, 0.02, -0.030), Vector3(20.0, 0.0, side * 18.0), 10)
 		_record(result, "archer_hairpins", head)
 
 # ---------------------------------------------------------------------------
@@ -485,16 +503,17 @@ static func _assassin(skeleton: Skeleton3D, result: Dictionary) -> void:
 	var head := Kit.upright_pivot(skeleton, "Head", "AssassinHood")
 	if head != null:
 		head.position = Vector3(0.0, 0.02, 0.0)
-		# 球心往背后推 0.05、半径 0.112、压扁 0.85：正面只到 z≈+0.06，
-		# 脸（z≈+0.12）与刘海都留出来。球做大了整张脸会埋进布里。
-		Kit.dome(head, 0.112, cloth_dark, Vector3(0.0, 0.040, -0.050), 0.85)
-		Kit.part(head, Kit.sheet_mesh(0.24, 0.27, 0.24, -0.05, 0.010), cloth_dark,
-			Vector3(0.0, 0.05, -0.02), Vector3(0.0, 0.0, 0.0))
-		Kit.part(head, Kit.shard_mesh(Vector3(0.13, 0.20, 0.045)), purple_dark,
-			Vector3(0.0, 0.00, -0.16), Vector3(-48.0, 0.0, 0.0))
+		# 半径 0.145、球心往背后推 0.055、压扁 0.95：要盖住 hair_buns 的两只丸子头
+		# （它们比头顶还高、还宽），半径 0.112 时兜帽被头发整个吃掉了。
+		# 正面只到 z≈+0.09，脸（z≈+0.13）仍留出来。
+		Kit.dome(head, 0.145, cloth_dark, Vector3(0.0, 0.050, -0.055), 0.95)
+		Kit.part(head, Kit.sheet_mesh(0.26, 0.30, 0.26, -0.05, 0.010), cloth_dark,
+			Vector3(0.0, 0.05, -0.03), Vector3(0.0, 0.0, 0.0))
+		Kit.part(head, Kit.shard_mesh(Vector3(0.13, 0.22, 0.045)), purple_dark,
+			Vector3(0.0, 0.02, -0.19), Vector3(-48.0, 0.0, 0.0))
 		for side in [-1.0, 1.0]:
-			Kit.part(head, Kit.sheet_mesh(0.05, 0.07, 0.18, -0.015, 0.006), cloth_dark,
-				Vector3(side * 0.115, -0.05, 0.005), Vector3(0.0, 0.0, side * -6.0))
+			Kit.part(head, Kit.sheet_mesh(0.05, 0.07, 0.20, -0.015, 0.006), cloth_dark,
+				Vector3(side * 0.125, -0.04, -0.02), Vector3(0.0, 0.0, side * -6.0))
 		_record(result, "assassin_hood", head)
 
 	# --- 单侧紫斗篷：三片长短不一的布，全在左侧（+X）背后，不对称才有刺客味 ---

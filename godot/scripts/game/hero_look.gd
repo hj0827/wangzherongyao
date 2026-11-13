@@ -77,9 +77,14 @@ const LOOKS := {
 				"accent_amount": 0.3, "recolor": 0.94, "contrast": 1.5,
 				"lighting_keep": 0.62, "roughness": 0.87,
 			},
+			# 苍刃的「头发」是 hair_buzzed.glb 的短发，不是兜帽。
+			# 它的贴图是灰度（sat 0.02），会完整接受 base 的色相 —— 所以这里必须
+			# 给**真正接近黑色**的值，不能借着「染绿一点更统一」调亮：
+			# 实拍 albedo 0.155/0.265/0.18 出来是一顶亮绿头盔。
 			"hair": {
-				"base": Color(0.10, 0.09, 0.08), "recolor": 0.95, "contrast": 1.2,
-				"lighting_keep": 0.5, "roughness": 0.55,
+				"base": Color(0.075, 0.070, 0.062), "accent": Color(0.05, 0.045, 0.04),
+				"accent_amount": 0.2, "recolor": 0.9, "contrast": 1.15,
+				"lighting_keep": 0.45, "roughness": 0.6,
 			},
 			# 巨剑：刃口带暖金光，是「这个英雄是橙金色系」在模型上的落点。
 			"weapon": {
@@ -113,8 +118,9 @@ const LOOKS := {
 			"hair": {
 				"base": Color(0.075, 0.065, 0.115), "recolor": 0.95, "contrast": 1.15,
 				"lighting_keep": 0.45, "roughness": 0.4,
-				# 星璃的发丝带一点点星尘冷光，是「她是法师」的最便宜暗示。
-				"glow": Color(0.55, 0.45, 1.0), "glow_strength": 0.35,
+				# 星璃的发丝带一点点星尘冷光 —— 但只给 0.12：0.35 时整颗头在 bloom 下
+				# 是一团发光的紫棉花，脸完全读不出来（实拍已确认）。
+				"glow": Color(0.55, 0.45, 1.0), "glow_strength": 0.12,
 			},
 			"weapon": {
 				"base": Color(0.24, 0.20, 0.42), "accent": Color(0.62, 0.50, 0.20),
@@ -161,33 +167,48 @@ const LOOKS := {
 	# 翎羽 · 射手 —— 立绘：米白内衬 + 青碧色 + 白羽饰，双丸子头，长弓。
 	"archer": {
 		"palette": {
-			"primary": Color(0.62, 0.62, 0.55),
-			"secondary": Color(0.10, 0.36, 0.32),
+			# 立绘是「米白战衣 + 青碧点缀」。实测：把 0.62/0.62/0.55 直接喂给
+			# 着色器，经 FILMIC + 主光后实拍只剩 **114,128,133**（灰蓝），
+			# 和立绘的米白差了整整一档亮度。
+			# 原因是这套 shader 为了压住深色戏服做过亮度收敛（0.42 + shade*0.62），
+			# 浅色材质在这种收敛下会被拉向中间调。
+			# 所以**浅色英雄必须把 base 写得比目标色更亮**，让收敛后落回米白。
+			"primary": Color(0.80, 0.79, 0.72),
+			"secondary": Color(0.10, 0.40, 0.35),
 			"metal": Color(0.36, 0.30, 0.16),
 			"hair": Color(0.10, 0.085, 0.07),
 			"glow": Color(0.45, 0.95, 0.78),
 		},
 		"skin_slots": {
 			"body": {
-				"base": Color(0.55, 0.60, 0.52), "accent": Color(0.11, 0.34, 0.30),
-				"recolor": 0.9, "contrast": 1.28, "lighting_keep": 0.62,
+				"base": Color(0.72, 0.75, 0.66), "accent": Color(0.11, 0.34, 0.30),
+				"recolor": 0.9, "contrast": 1.24, "lighting_keep": 0.62,
 			},
 			"outfit": {
 				# 米白是主色、青碧是副色，跟立绘一致。反过来会变成「蓝绿女枪手」。
-				"base": Color(0.60, 0.61, 0.55), "accent": Color(0.09, 0.33, 0.30),
-				"accent_amount": 0.42, "recolor": 0.94, "contrast": 1.38,
-				"lighting_keep": 0.6, "roughness": 0.86,
+				# brightness 0.93 是为了抵消着色器的亮度收敛（见 palette 的注释）。
+				"base": Color(0.78, 0.78, 0.70), "accent": Color(0.09, 0.33, 0.30),
+				"accent_amount": 0.42, "recolor": 0.94, "contrast": 1.30,
+				"lighting_keep": 0.6, "roughness": 0.86, "brightness": 1.18,
 			},
+			# 头发一律深色：头发染成衣服色会把「披肩/护肩」的轮廓和头糊在一起。
+			# 五个英雄的区别靠衣服 + 配件，不靠发色。
 			"hair": {
-				"base": Color(0.11, 0.09, 0.075), "recolor": 0.95, "contrast": 1.2,
-				"lighting_keep": 0.48, "roughness": 0.5,
+				"base": Color(0.085, 0.075, 0.085), "accent": Color(0.055, 0.048, 0.055),
+				"accent_amount": 0.2, "recolor": 0.92, "contrast": 1.15,
+				"lighting_keep": 0.45, "roughness": 0.45,
 			},
 			"weapon": {
-				"base": Color(0.28, 0.24, 0.20), "accent": Color(0.14, 0.42, 0.36),
-				"accent_amount": 0.3, "recolor": 0.82, "contrast": 1.3,
-				"metallic": 0.2, "roughness": 0.55,
-				"glow": Color(0.45, 0.95, 0.78), "glow_strength": 0.75,
-				"rim": Color(0.5, 0.98, 0.82), "rim_strength": 0.55,
+				# 弓的特殊性：`Bow_Wooden2.glb` 里 `DarkWood`（弓臂）占了整把弓
+				# 90% 的体积，`White`（弓弦）极细。按「整把武器」统一给
+				# glow 0.75 / rim 0.55 的话，弓臂会糊成一整块发光的青白板 ——
+				# 21 米机位下读成「英雄举着一块玻璃」，实拍已确认。
+				# 所以弓的 glow 只给 0.22、rim 给 0.20：靠木色本身认人，不靠发光。
+				"base": Color(0.30, 0.25, 0.19), "accent": Color(0.13, 0.40, 0.34),
+				"accent_amount": 0.42, "recolor": 0.86, "contrast": 1.34,
+				"metallic": 0.12, "roughness": 0.68,
+				"glow": Color(0.45, 0.95, 0.78), "glow_strength": 0.22,
+				"rim": Color(0.5, 0.98, 0.82), "rim_strength": 0.20,
 			},
 		},
 	},
@@ -242,20 +263,48 @@ static func primary(hero_type: String) -> Color:
 static func glow(hero_type: String) -> Color:
 	return palette(hero_type).get("glow", Color.WHITE)
 
+## 某个英雄的待机 clip。没登记时回落到 `Sword_Idle`（和旧行为一致）。
+static func idle_pose(hero_type: String) -> String:
+	return str(IDLE_POSES.get(hero_type, "Sword_Idle"))
+
 ## 某个槽位的着色参数。`slot` ∈ body / outfit / hair / weapon。
 static func slot(hero_type: String, slot_name: String) -> Dictionary:
 	var slots: Dictionary = look(hero_type).get("skin_slots", {})
 	return slot_params(slots.get(slot_name, {}))
 
-## 队伍色：蓝方偏冷、红方偏暖，只压暗部（见 shader 里的 team_tint 口径）。
-## 0.06~0.18 是实拍调出来的：再高帽子/披风就开始读成纯蓝/纯红。
+## 队伍色：蓝方偏冷、红方偏暖。
+##
+## ★ 2026-11-12 改：从「只压暗部 0.16」改成「暗部 + 轮廓光双管齐下」。
+##   实测（`fight_close.png` 里两个苍刃对砍）：16% 的暗部染色在 21 米机位下
+##   **完全看不出来** —— 两个苍刃的身体颜色几乎一样，只能靠血条和脚下光环分辨。
+##   5v5 团战里这是致命的：玩家会对着队友挥技能。
+##
+##   新口径：
+##   - `team_amount` 提到 0.34（暗部染色更明显，但不至于把衣服变成纯蓝/纯红）；
+##   - 另加 `team_rim`：从**边缘**（fresnel）染一档队伍色，红蓝两队在人群里
+##     看轮廓就能分。边缘染色不占身体的色彩面积，所以主色仍然认得出是谁。
+const TEAM_AMOUNT := 0.34
+
 static func team_tint(team: String) -> Color:
 	if team == "red":
-		return Color(1.32, 0.62, 0.56)
-	return Color(0.86, 0.96, 1.28)
+		return Color(1.55, 0.52, 0.44)
+	return Color(0.72, 0.92, 1.55)
+
+## 轮廓队伍色（比暗部染色更亮，用加法混进 EMISSION）。
+static func team_rim(team: String) -> Color:
+	if team == "red":
+		return Color(1.0, 0.22, 0.16)
+	return Color(0.24, 0.46, 1.0)
 
 static func team_amount() -> float:
-	return 0.16
+	return TEAM_AMOUNT
+
+## 轮廓队伍色强度。
+## 0.72 实拍偏重：整个人像镶了一圈红边（`fight_close.png` 放大确认），
+## 比「认不出敌我」好但读起来像发光轮廓。0.42 是两个极端之间的落点：
+## 人群里能一眼分出红蓝，近看又不觉得人在发光。
+static func team_rim_strength() -> float:
+	return 0.42
 
 # ---------------------------------------------------------------------------
 # 服饰规格（纯数据，HeroCostume 消费）
@@ -327,20 +376,44 @@ static func identity_signature(hero_type: String) -> String:
 	var p := palette(hero_type)
 	return "%s|%s|%s" % [str(p.get("primary", Color.BLACK)), str(p.get("secondary", Color.BLACK)), str(p.get("glow", Color.BLACK))]
 
-## 所有英雄共用的一档「皮肤」参数。
+## 每个英雄的待机动作（站姿）。
 ##
+## 改前：5 个英雄只用两套 clip —— 苍刃/铁壁/墨鸦都是 `Sword_Idle`，
+## 星璃/翎羽都是 `Spell_Simple_Idle`。三个人站成一排姿势一模一样，
+## 只有武器不同。待机是玩家看**最久**的画面（补刀间隙、等技能 CD、看他人在线上），
+## 它比任何技能特效都更能决定「这是不是同一个角色」。
+##
+## 挑法（对着立绘的气质，不是随机分配）：
+##   - 苍刃：抱臂而立，剑背在背后（立绘是「剑扛肩上、眼神懒」）→ `Idle_FoldArms`
+##   - 星璃：施法者垂手待发（月球法杖立地）→ `Spell_Simple_Idle`
+##   - 铁壁：重装持盾站桩（立绘是「一手盾一手锤」）→ `Idle_Shield`
+##   - 翎羽：持弓待发（射手立绘是「搭箭未满弦」）→ `Pistol_Idle`
+##   - 墨鸦：压低重心的潜行待机（刺客立绘是「随时要出手」）→ `Crouch_Idle`
+##
+## 约束：必须是 UAL1/UAL2 里**真实存在且长度 ≥ 1.5s** 的 clip，
+## 并写进 `LOOPING_CLIPS`（否则播完就停在最后一帧）。
+## `test_hero_idle_poses_are_distinct` 会核实这一条。
+const IDLE_POSES := {
+	"blade": "Idle_FoldArms",
+	"mage": "Spell_Simple_Idle",
+	"tank": "Idle_Shield",
+	"archer": "Pistol_Idle",
+	"assassin": "Crouch_Idle",
+}
+
+## 所有英雄共用的一档「皮肤」参数。
 ## 为什么必须单独一档：通用角色包的肤色贴图本身是暖橙（hue 0.07、sat 0.52），
 ## 在 FILMIC + 1.68 主光下会顶成一块发白的浅橙 —— 五个英雄都像「光膀子的白人」。
 ## 这里不换色相，只压亮度、提对比、加一点点暖边，让它接得住深色戏服。
 ## 眼睛（T_Eye）不在这一档里，永远保持原贴图。
 const SKIN_SLOT := {
-	"base": Color(0.62, 0.42, 0.31),
-	"accent": Color(0.44, 0.26, 0.19),
+	"base": Color(0.66, 0.46, 0.34),
+	"accent": Color(0.46, 0.28, 0.20),
 	"accent_amount": 0.22,
-	"recolor": 0.6,
+	"recolor": 0.55,
 	"contrast": 1.3,
 	"lighting_keep": 0.9,
-	"brightness": 0.52,
+	"brightness": 0.62,
 	"rim": Color(1.0, 0.84, 0.68),
 	"rim_strength": 0.18,
 	"roughness": 0.66,

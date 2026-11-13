@@ -22,6 +22,8 @@ uniform float flow_speed = 1.35;
 uniform float streak_count = 16.0;
 // 光柱向上淡出的起点：0.62 之后逐渐收掉，避免顶端戳进天空像一根柱子。
 uniform float fade_start : hint_range(0.0, 1.0) = 0.62;
+// 上升光屑的强度。内芯给 0.34、外焰给 0.06，两层都画会糊成一根噪点柱。
+uniform float mote_gain : hint_range(0.0, 1.0) = 0.32;
 
 void fragment() {
 	float vertical = UV.y;
@@ -39,6 +41,17 @@ void fragment() {
 	float pulse = 0.80 + 0.20 * sin(vertical * 8.0 - TIME * 1.7);
 
 	float alpha = ends * body * pulse * (0.42 + 0.58 * streak);
-	ALBEDO = mix(beam_color.rgb, hot_color.rgb, clamp(body * streak * 0.42, 0.0, 1.0));
-	ALPHA = clamp(alpha * intensity * beam_color.a, 0.0, 0.92);
+
+	// 上升的能量屑（二轮新增）：周向 9 列 × 高度 15 行，hash 只点亮约 1/3 格子。
+	// 借光柱自己的圆柱网格画，不新建节点/网格 —— 高频对象走池的硬规则同样适用于此。
+	// 首版光柱是一根干净的渐变白管，看不出「能量在往上涌」。
+	vec2 cell = vec2(UV.x * 9.0, vertical * 15.0 - TIME * 1.15);
+	vec2 id = floor(cell);
+	vec2 f = fract(cell) - 0.5;
+	float hash = fract(sin(dot(id, vec2(12.9898, 78.233))) * 43758.5453);
+	float mote = (1.0 - smoothstep(0.055, 0.19, length(f * vec2(1.0, 0.75)))) * step(0.62, hash);
+	mote *= ends * mote_gain;
+
+	ALBEDO = mix(beam_color.rgb, hot_color.rgb, clamp(body * streak * 0.42 + mote * 0.65, 0.0, 1.0));
+	ALPHA = clamp((alpha * beam_color.a + mote) * intensity, 0.0, 0.92);
 }

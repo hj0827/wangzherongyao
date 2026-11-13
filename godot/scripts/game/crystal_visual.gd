@@ -25,6 +25,16 @@ class_name CrystalVisual
 ##   2. 所有每帧动画只改 transform / 材质参数，**不新建节点、不新建材质**（硬规则 4）。
 ##   3. 主晶顶部必须高于柱座，晶簇宽度不得超出台基 —— 否则是「一坨浮在台座外面的碎片」。
 ##
+## **二轮（2026-11-12 下午）**：首版实拍出来是「实心蓝塑料宝石 + 三圈黑铁丝 + 灰白井盖底座」，
+## 结构和王者荣耀对齐了，质感没对齐。这一轮不动分层与接线，只改观感：
+##   ① `gem_energy` 能量外壳：复用 gem 网格再画一遍加法薄壳，fresnel 亮边 + 内部流光上涌
+##      + 晶尖呼吸；主体材质、淡化契约、残破曲线一个字不改。
+##   ② 晶尖去白帽、棱线降亮：阵营色一直贯到顶端，不再像「红宝石上插了截白蜡」。
+##   ③ 金环加粗 + 自发光 + 等距符文：远景从「铁丝」变成「在运转的能量环」。
+##   ④ 轨道碎片从水滴改扁晶片：主堡周围应该是碎裂的晶屑，不是六颗雨滴。
+##   ⑤ 光柱去白灯管 + 加上升光屑；护盾保住阵营色；台基黑辐条改金属嵌条；
+##      法阵加一层贴地柔光池。
+##
 ## 材质**不做静态缓存**：OcclusionFade 会直接改 `albedo_color.a`，而静态缓存会被
 ## 同一进程里的下一局/下一张测试图复用，上一局淡到 0.16 的水晶会在新局里一出生就半透明。
 ## 一局只有两座主堡、每座建一次，逐座 new 材质的代价可以忽略；**网格**仍然缓存。
@@ -32,6 +42,7 @@ class_name CrystalVisual
 const BEAM_SHADER := preload("res://shaders/crystal_beam.gdshader")
 const SHIELD_SHADER := preload("res://shaders/crystal_shield.gdshader")
 const SIGIL_SHADER := preload("res://shaders/crystal_sigil.gdshader")
+const ENERGY_SHADER := preload("res://shaders/crystal_energy.gdshader")
 
 ## 台基半径。玩法层没有对应碰撞体（主堡本体半径 4.0 在 sim 里），
 ## 视觉上略大一圈才像「水晶长在台子上」，但又不能大到盖住泉水出生点。
@@ -70,7 +81,9 @@ const PALETTES := {
 		"gem_deep": Color(0.012, 0.055, 0.22),
 		"gem_mid": Color(0.05, 0.24, 0.62),
 		"gem_hot": Color(0.40, 0.82, 1.0),
-		"gem_tip": Color(0.84, 0.97, 1.0),
+		# 晶尖不再取近白：0.84/0.97/1.0 经 emission + rim + FILMIC 后在实拍里
+		# 是一截纯白三角帽，阵营色在最该亮的尖端反而丢了。
+		"gem_tip": Color(0.36, 0.84, 1.0),
 		"gem_accent": Color(0.46, 0.32, 0.96),
 	},
 	"red": {
@@ -83,7 +96,7 @@ const PALETTES := {
 		"gem_deep": Color(0.22, 0.006, 0.012),
 		"gem_mid": Color(0.62, 0.035, 0.02),
 		"gem_hot": Color(1.0, 0.20, 0.09),
-		"gem_tip": Color(1.0, 0.58, 0.42),
+		"gem_tip": Color(1.0, 0.40, 0.20),
 		"gem_accent": Color(1.0, 0.52, 0.08),
 	},
 }
@@ -97,12 +110,14 @@ const SHARD_BANDS := [
 	{"radius": 2.42, "y": 4.50, "speed": 0.18, "phase": 2.20, "scale": 0.52},
 ]
 
+## 环管半径。首版 0.022~0.036 在实拍里是三圈深褐色细线（像铁丝），
+## 21 米机位几乎读不到；提到 0.034~0.056 再配自发光，才成「能量环」。
 const RING_SPECS := [
-	{"radius": 2.34, "y": 3.78, "tilt": -0.10, "speed": 0.20, "tube": 0.036},
-	{"radius": 2.66, "y": 4.34, "tilt": 0.22, "speed": -0.14, "tube": 0.030},
+	{"radius": 2.34, "y": 3.78, "tilt": -0.10, "speed": 0.20, "tube": 0.056},
+	{"radius": 2.66, "y": 4.34, "tilt": 0.22, "speed": -0.14, "tube": 0.046},
 	# 第三道环悬在晶尖上方，不穿过晶体：旧版 1.55m 半径正好卡在晶尖，
 	# 俯视下读成「一个呼啦圈套在宝石上」，把最该干净的尖端切碎。
-	{"radius": 1.05, "y": 8.02, "tilt": 0.18, "speed": 0.22, "tube": 0.022},
+	{"radius": 1.05, "y": 8.02, "tilt": 0.18, "speed": 0.22, "tube": 0.034},
 ]
 
 static var _meshes: Dictionary = {}
@@ -208,7 +223,22 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 	fade_parts.append(gem)
 	no_shadow_parts.append(gem)
 
-	var edge_material := _additive_material(team_color.lerp(Color(1.0, 1.0, 1.0), 0.45), 0.56, 1.95)
+	# 能量外壳：**复用 gem 网格**，只放大 1.03 再画一遍加法薄壳。
+	# 它不进 fade_parts（ShaderMaterial 不在 OcclusionFade 的作用面里），
+	# 但 apply_state 会把 gem 的 albedo.a 同步成 fade_alpha，贴脸时一起让路。
+	var energy_material := _energy_material(team_color, palette_data)
+	var gem_energy := MeshInstance3D.new()
+	gem_energy.name = "gem_energy"
+	gem_energy.mesh = gem.mesh
+	gem_energy.material_override = energy_material
+	gem_energy.scale = Vector3.ONE * 1.03
+	gem_energy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	spin.add_child(gem_energy)
+	no_shadow_parts.append(gem_energy)
+
+	# 棱线从「白色描边」降成「微光」：首版 alpha 0.56 / energy 1.95 在实拍里
+	# 把每个切面都勾了一道白边，晶体反而更像低多边形塑料玩具。
+	var edge_material := _additive_material(team_color.lerp(Color(1.0, 1.0, 1.0), 0.28), 0.30, 1.20)
 	var edges := MeshInstance3D.new()
 	edges.name = "gem_edges"
 	edges.mesh = _cached("gem_edges", func() -> ArrayMesh: return _gem_edges_mesh())
@@ -233,7 +263,9 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 
 	# --- ④ 环绕碎片 + 金环 -------------------------------------------------
 	var shards: Array = []
-	var shard_material := _gem_material(team_color)
+	# 碎片比本体亮一档：它们只有 0.5m，21 米机位下用本体的 0.38 emission 会缩成
+	# 六个深色小点。独立材质才能让「晶屑」在剪影外缘读得出来。
+	var shard_material := _shard_material(team_color)
 	# 碎片顶点色写的是阵营宝石梯度，必须按阵营缓存；共用蓝色网格会把红方碎片染成蓝白。
 	var shard_mesh: Mesh = _cached("orbit_shard|" + team, func() -> ArrayMesh: return _orbit_shard_mesh(palette_data))
 	for i in SHARD_COUNT:
@@ -244,7 +276,9 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 		shard.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		shard.set_meta("band", i % SHARD_BANDS.size())
 		var band: Dictionary = SHARD_BANDS[i % SHARD_BANDS.size()]
-		shard.scale = Vector3.ONE * float(band.scale)
+		var s := float(band.scale)
+		# 扁晶片：等比缩放会把刀锋压回一颗水滴，Z 轴必须明显薄于 X/Y。
+		shard.scale = Vector3(s, s * 1.15, s * 0.78)
 		root.add_child(shard)
 		shards.append(shard)
 		fade_parts.append(shard)
@@ -260,9 +294,11 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 		root.add_child(ring_root)
 		var ring_body := MeshInstance3D.new()
 		ring_body.name = "ring_body_%d" % i
-		ring_body.mesh = _ring_mesh(float(spec.radius), float(spec.tube), 64, 6, palette_data)
+		# 悬浮环才带等距符文；广场同心环不传，避免半径 8m 的圈上长一排金疙瘩。
+		var rune_count: int = [10, 12, 6][i]
+		ring_body.mesh = _ring_mesh(float(spec.radius), float(spec.tube), 64, 6, palette_data, rune_count)
 		ring_body.rotation.x = float(spec.tilt)
-		var body_material := _ring_body_material()
+		var body_material := _ring_body_material(team_color, palette_data)
 		ring_body.material_override = body_material
 		ring_body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		ring_root.add_child(ring_body)
@@ -270,7 +306,7 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 		ring_glow.name = "ring_glow_%d" % i
 		ring_glow.mesh = _ring_mesh(float(spec.radius), float(spec.tube) * 1.45, 64, 5, palette_data)
 		ring_glow.rotation.x = float(spec.tilt)
-		var glow_material := _additive_material(team_color, 0.10, 0.95)
+		var glow_material := _additive_material(team_color, 0.20, 1.55)
 		ring_glow.material_override = glow_material
 		ring_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		ring_root.add_child(ring_glow)
@@ -280,8 +316,13 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 		no_shadow_parts.append(ring_glow)
 
 	# --- ⑤ 光柱 / 法阵 / 护盾 ----------------------------------------------
-	var beam_inner_material := _beam_material(team_color, 0.48, Color(0.92, 0.98, 1.0, 1.0), 0.70)
-	var beam_outer_material := _beam_material(team_color, 0.070, team_color.lerp(Color.WHITE, 0.25), 0.58)
+	# 内芯从「近白灯管」退回队伍亮色：0.92/0.98/1.0 过 glow 后是一根纯白硬线，
+	# 红蓝两座基地的光柱长得一模一样，只剩底座分色。
+	# 二轮实拍复盘：0.52 的白化 + blend_add 在浅色地面上仍把柱子烧成白灯管，
+	# 红方尤其读成粉白。压到 0.30 并略降内芯 alpha，靠加宽外焰补远景体积感。
+	var beam_hot := team_color.lerp(Color(1.0, 1.0, 1.0), 0.30)
+	var beam_inner_material := _beam_material(team_color, 0.24, beam_hot, 0.70, 0.34)
+	var beam_outer_material := _beam_material(team_color, 0.095, beam_hot, 0.58, 0.06)
 	var beam_inner := MeshInstance3D.new()
 	beam_inner.name = "beam_inner"
 	beam_inner.mesh = _beam_mesh(0.15, 0.23, 24.0)
@@ -294,8 +335,9 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 	no_shadow_parts.append(beam_inner)
 	var beam_outer := MeshInstance3D.new()
 	beam_outer.name = "beam_outer"
-	# 外焰收窄：0.78m 底半径在近景是一团糊住半个屏幕的雾，0.62 仍然有体积但不抢晶簇。
-	beam_outer.mesh = _beam_mesh(0.38, 0.62, 24.0)
+	# 外焰：0.78m 底半径在近景糊住半个屏幕；0.62 太细，21 米机位下光柱几乎消失。
+	# 0.74 是近景可读 / 远景有光晕的折中，配更饱和的队伍色不会烧成白管。
+	beam_outer.mesh = _beam_mesh(0.44, 0.74, 24.0)
 	beam_outer.material_override = beam_outer_material
 	beam_outer.position.y = GEM_TOP + 11.8
 	beam_outer.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -387,6 +429,8 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 		"spin": spin,
 		"gem": gem,
 		"gem_material": gem_material,
+		"gem_energy": gem_energy,
+		"gem_energy_material": energy_material,
 		"edges": edges,
 		"edge_material": edge_material,
 		"halo": halo,
@@ -416,6 +460,7 @@ static func build(team_color: Color, team := "blue") -> Dictionary:
 		"gem_base_energy": gem_material.emission_energy_multiplier,
 		"shard_base_energy": shard_material.emission_energy_multiplier,
 		"halo_base_alpha": halo_material.albedo_color.a,
+		"edge_base_alpha": edge_material.albedo_color.a,
 		"light_base_energy": light.light_energy,
 		"beam_base_intensity": 1.0,
 		"damage": 0.0,
@@ -476,13 +521,25 @@ static func apply_state(state: Dictionary, delta: float) -> void:
 	if shard_material != null:
 		shard_material.emission_energy_multiplier = gem_energy(float(state.get("shard_base_energy", 1.55)), damage, time + 0.7)
 
+	# 能量外壳：三个状态量全在这里推，shader 不藏 TIME。
+	# fade_alpha 直接读主体 gem 被 OcclusionFade 写过的 albedo.a —— arena 里
+	# apply_state 排在 OcclusionFade.apply 之前，所以是上一帧的值；8 米的平滑
+	# 过渡带里差一帧（16ms）看不出来，但贴脸时壳一定会跟着淡，不会留一圈亮边糊住英雄。
+	var energy_material := state.get("gem_energy_material") as ShaderMaterial
+	if energy_material != null:
+		energy_material.set_shader_parameter("phase", time)
+		energy_material.set_shader_parameter("damage", damage)
+		var gem_for_fade := state.get("gem_material") as StandardMaterial3D
+		var fade := 1.0 if gem_for_fade == null else gem_for_fade.albedo_color.a
+		energy_material.set_shader_parameter("fade_alpha", fade)
+		energy_material.set_shader_parameter("intensity", (1.0 - 0.45 * damage) * (0.94 + 0.06 * sin(time * 1.35)))
 	var halo_material := state.get("halo_material") as StandardMaterial3D
 	if halo_material != null:
 		var base_alpha := float(state.get("halo_base_alpha", 0.28))
 		halo_material.albedo_color.a = base_alpha * (0.82 + 0.18 * sin(time * 1.7))
 	var edge_material := state.get("edge_material") as StandardMaterial3D
 	if edge_material != null:
-		edge_material.albedo_color.a = 0.56 * (0.88 + 0.12 * sin(time * 2.1))
+		edge_material.albedo_color.a = float(state.get("edge_base_alpha", 0.30)) * (0.88 + 0.12 * sin(time * 2.1))
 
 	var light := state.get("light") as OmniLight3D
 	if light != null:
@@ -601,18 +658,25 @@ static func _dais_mesh(p: Dictionary) -> ArrayMesh:
 	]
 	var inner_colors := [mid, mid, dark, light, mid, mid]
 	_revolve(st, inner_profile, inner_colors, 64)
-	# 8 块径向石墩：打破圆盘的完美对称，俯视下有一条「人工砌筑」的节奏。
-	# 压到台面以上 3.5cm 的浅浮雕：旧版 18cm 高的块在俯视下投出一圈硬阴影，
-	# 读成「八块砖浮在台面上」，而不是嵌进石面的拼花。
+	# 8 道径向金属嵌条 + 8 块浅石板拼花。
+	# 首版这里铺的是 0.94×0.56 的深色石墩，俯视实拍是「八块黑板砖」，
+	# 整座台基读成灰白井盖 / 排水格栅 —— 全图最抢眼的负分。
+	# 现在收窄成 0.15m 的铜线，间隔里铺浅石板：放射节奏留着，黑块没了。
+	var gold: Color = p.trim
 	for i in 8:
 		var angle := TAU * (float(i) + 0.5) / 8.0
-		var point := Vector3(cos(angle) * 3.05, DAIS_TOP + 0.035, sin(angle) * 3.05)
-		_add_box(st, point, Vector3(0.94, 0.07, 0.56), -angle, mid, dark)
+		var point := Vector3(cos(angle) * 3.05, DAIS_TOP + 0.028, sin(angle) * 3.05)
+		_add_box(st, point, Vector3(0.94, 0.030, 0.15), -angle, gold.lerp(light, 0.30), gold.lerp(mid, 0.35))
+	for i in 8:
+		var angle := TAU * float(i) / 8.0
+		var point := Vector3(cos(angle) * 3.05, DAIS_TOP + 0.012, sin(angle) * 3.05)
+		_add_box(st, point, Vector3(0.72, 0.016, 0.62), -angle, light.lerp(warm, 0.35), mid)
 	# 8 道凹槽：铺在内圈平台上，读出「台面是拼出来的」。
+	# 颜色从近黑抬到中灰，否则俯视又是一圈黑色短线。
 	for i in 8:
 		var angle := TAU * float(i) / 8.0
 		var point := Vector3(cos(angle) * 2.14, DAIS_TOP + 0.226, sin(angle) * 2.14)
-		_add_box(st, point, Vector3(0.78, 0.012, 0.10), -angle, dark, dark)
+		_add_box(st, point, Vector3(0.78, 0.012, 0.10), -angle, dark.lerp(mid, 0.35), dark.lerp(mid, 0.35))
 	return st.commit()
 
 static func _trim_mesh(p: Dictionary) -> ArrayMesh:
@@ -746,11 +810,35 @@ static func _gem_edges_mesh() -> ArrayMesh:
 	_add_shard_edges(st, Vector3(0.22, -0.34, -1.08), 1.52, 0.38, 5, 0.15, 0.20, 0.18, 0.024, white, false)
 	return st.commit()
 
+## 轨道碎片单位网格：高 1.0、宽 0.48、厚 0.22 的**双尖扁晶片**（八面体刀锋）。
+## 首版用 5 棱 `_add_shard` 生成的是一颗小水滴，实拍里是「六颗蓝色雨滴围着宝石」；
+## 王者水晶周围飞的是碎裂的晶屑，所以改成上下两个尖 + 腰上一圈菱形，
+## 再由实例的非等比 scale 压成薄片。顶点色从根部深色走到尖端亮色。
 static func _orbit_shard_mesh(p: Dictionary) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# 单位碎片：高度 1、半径 0.24。实例通过 scale 缩放，所以 6 块碎片共用这一个网格。
-	_add_shard(st, Vector3.ZERO, 1.0, 0.24, 5, 0.3, 0.0, 0.0, _gem_gradient(p), 1.0)
+	var g := _gem_gradient(p)
+	var deep: Color = g[0]
+	var mid: Color = g[1]
+	var hot: Color = g[2]
+	var tip: Color = g[3]
+	var w := 0.24
+	var d := 0.11
+	var top := Vector3(0.0, 0.62, 0.0)
+	var bottom := Vector3(0.0, -0.38, 0.0)
+	var left := Vector3(-w, 0.04, 0.0)
+	var right := Vector3(w, 0.04, 0.0)
+	var front := Vector3(0.0, 0.0, d)
+	var back := Vector3(0.0, 0.0, -d)
+	# hint 用面中心向量（物体中心在原点），否则平面法线可能朝内、碎片在阳光下全黑。
+	_facet_tri(st, top, front, right, tip, (top + front + right) / 3.0)
+	_facet_tri(st, top, right, back, hot, (top + right + back) / 3.0)
+	_facet_tri(st, top, back, left, hot.lerp(mid, 0.30), (top + back + left) / 3.0)
+	_facet_tri(st, top, left, front, tip.lerp(hot, 0.40), (top + left + front) / 3.0)
+	_facet_tri(st, bottom, right, front, mid, (bottom + right + front) / 3.0)
+	_facet_tri(st, bottom, back, right, deep.lerp(mid, 0.55), (bottom + back + right) / 3.0)
+	_facet_tri(st, bottom, left, back, deep, (bottom + left + back) / 3.0)
+	_facet_tri(st, bottom, front, left, mid.lerp(deep, 0.45), (bottom + front + left) / 3.0)
 	return st.commit()
 
 static func _cracks_mesh(team: String) -> ArrayMesh:
@@ -1001,10 +1089,14 @@ static func _add_box(st: SurfaceTool, center: Vector3, size: Vector3, yaw: float
 		var sy := -1.0 if i & 2 == 0 else 1.0
 		var sz := -1.0 if i & 4 == 0 else 1.0
 		corners.append(center + basis * Vector3(half.x * sx, half.y * sy, half.z * sz))
-	# 面索引顺序：底、顶、-z、+z、-x、+x
+	# corners 位掩码是 (sx, sy, sz)，所以六个面实际是：
+	#   -z、+z、底、顶、-x、+x —— 只有 [2,3,7,6] 的 sy 全为 +1，才是俯视看得见的顶面。
+	# 旧版把 top_color 标在了 +z 竖直侧面上，真正的顶面拿 side_color。
+	# 后果：浅石板拼花在俯视实拍里变成八块深色板砖（井盖感），铜嵌条变成暗褐细线。
+	# 这是几何着色 bug，不是配色问题，调颜色永远修不好。
 	var faces := [
-		[0, 1, 3, 2, false], [4, 6, 7, 5, true], [0, 4, 5, 1, false],
-		[2, 3, 7, 6, false], [0, 2, 6, 4, false], [1, 5, 7, 3, false],
+		[0, 1, 3, 2, false], [4, 6, 7, 5, false], [0, 4, 5, 1, false],
+		[2, 3, 7, 6, true], [0, 2, 6, 4, false], [1, 5, 7, 3, false],
 	]
 	for face in faces:
 		var i0 := int(face[0])
@@ -1244,13 +1336,37 @@ static func _metal_material(transparent: bool) -> StandardMaterial3D:
 		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	return material
 
-## 悬浮金环专用：环体太细，暗面占了大半，纯金属材质在远景里是一圈黑铁丝。
-## 加一层很低的暖色自发光，把轮廓提成「金线」，又不会亮到抢晶体。
-static func _ring_body_material() -> StandardMaterial3D:
+## 悬浮能量环专用：环体暗面占了大半，gl_compatibility 下又没有反射探针，
+## 纯金属材质在远景里就是一圈黑铁丝（首版实拍的最大负分）。
+## 掺 42% 暖金保留「金属构件」的读感，掺 58% 队伍色 + 0.95 自发光让它真的亮起来。
+static func _ring_body_material(team_color: Color, p: Dictionary) -> StandardMaterial3D:
 	var material := _metal_material(false)
 	material.emission_enabled = true
-	material.emission = Color(0.68, 0.48, 0.17)
-	material.emission_energy_multiplier = 0.58
+	var gold: Color = p.get("trim", Color(0.68, 0.48, 0.18))
+	material.emission = team_color.lerp(gold, 0.42)
+	material.emission_energy_multiplier = 0.95
+	return material
+
+## 轨道碎片比本体亮一档：0.5m 的晶屑用 0.38 emission 在 21 米机位下只剩深色小点。
+static func _shard_material(team_color: Color) -> StandardMaterial3D:
+	var material := _gem_material(team_color)
+	material.emission_energy_multiplier = 0.92
+	material.rim = 0.85
+	return material
+
+## 能量外壳。所有状态量都显式给初值，apply_state 逐帧覆盖，不依赖 shader 默认值。
+static func _energy_material(team_color: Color, p: Dictionary) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = ENERGY_SHADER
+	material.set_shader_parameter("energy_color", Color(team_color.r, team_color.g, team_color.b, 1.0))
+	var hot: Color = p.get("gem_hot", Color(0.6, 0.9, 1.0))
+	material.set_shader_parameter("hot_color", hot.lerp(Color(1.0, 1.0, 1.0), 0.35))
+	material.set_shader_parameter("phase", 0.0)
+	material.set_shader_parameter("intensity", 1.0)
+	material.set_shader_parameter("damage", 0.0)
+	material.set_shader_parameter("fade_alpha", 1.0)
+	# 主体 gem 是 2、裂纹是 4：加色壳必须夹在两者之间。
+	material.render_priority = 3
 	return material
 
 static func _gem_material(team_color: Color) -> StandardMaterial3D:
@@ -1316,21 +1432,22 @@ static func _sigil_material(team_color: Color) -> ShaderMaterial:
 	material.set_shader_parameter("band_gain", 0.50)
 	return material
 
-static func _beam_material(team_color: Color, alpha: float, hot_color: Color, fade_start: float) -> ShaderMaterial:
+static func _beam_material(team_color: Color, alpha: float, hot_color: Color, fade_start: float, mote_gain: float) -> ShaderMaterial:
 	var material := ShaderMaterial.new()
 	material.shader = BEAM_SHADER
 	material.set_shader_parameter("beam_color", Color(team_color.r, team_color.g, team_color.b, alpha))
 	material.set_shader_parameter("hot_color", hot_color)
 	material.set_shader_parameter("intensity", 1.0)
 	material.set_shader_parameter("fade_start", fade_start)
+	material.set_shader_parameter("mote_gain", mote_gain)
 	return material
 
 static func _shield_material(team_color: Color) -> ShaderMaterial:
 	var material := ShaderMaterial.new()
 	material.shader = SHIELD_SHADER
 	material.set_shader_parameter("shield_color", Color(team_color.r, team_color.g, team_color.b, 1.0))
-	# 边缘只提亮 45%：0.7 的白会把红方护盾洗成一颗米白肥皂泡，阵营色全丢。
-	material.set_shader_parameter("edge_color", team_color.lerp(Color(1.0, 1.0, 1.0), 0.45))
+	# 边缘只提亮 20%：首版 45% 把红方护盾洗成一颗米白肥皂泡，阵营色全丢。
+	material.set_shader_parameter("edge_color", team_color.lerp(Color(1.0, 1.0, 1.0), 0.20))
 	material.set_shader_parameter("intensity", 1.0)
 	material.set_shader_parameter("strength", 1.0)
 	material.set_shader_parameter("pulse", 0.0)
@@ -1350,8 +1467,8 @@ static func _cached(key: String, factory: Callable) -> Mesh:
 		_meshes[key] = mesh
 	return mesh
 
-static func _ring_mesh(radius: float, tube: float, segments: int, sides: int, p: Dictionary) -> ArrayMesh:
-	var key := "ring|%.3f|%.3f|%d|%d|%s" % [radius, tube, segments, sides, str(p.get("trim", Color.WHITE))]
+static func _ring_mesh(radius: float, tube: float, segments: int, sides: int, p: Dictionary, runes := 0) -> ArrayMesh:
+	var key := "ring|%.3f|%.3f|%d|%d|%s|%d" % [radius, tube, segments, sides, str(p.get("trim", Color.WHITE)), runes]
 	var mesh: ArrayMesh = _meshes.get(key, null)
 	if mesh == null:
 		var st := SurfaceTool.new()
@@ -1359,6 +1476,13 @@ static func _ring_mesh(radius: float, tube: float, segments: int, sides: int, p:
 		var gold: Color = p.get("trim", Color(0.72, 0.58, 0.30))
 		var dark: Color = p.get("trim_dark", Color(0.40, 0.30, 0.14))
 		_add_torus(st, radius, tube, segments, sides, gold, dark)
+		if runes > 0:
+			# 等距符文嵌在环线上：远景是「一圈断续亮刻度」，
+			# 近景能看出环在转（纯色圆环旋转时是看不出转速的）。
+			for i in runes:
+				var a := TAU * float(i) / float(runes)
+				var point := Vector3(cos(a) * radius, 0.0, sin(a) * radius)
+				_add_diamond(st, point, tube * 1.7, tube * 3.2, tube * 1.7, -a, gold.lerp(Color.WHITE, 0.55))
 		mesh = st.commit()
 		_meshes[key] = mesh
 	return mesh

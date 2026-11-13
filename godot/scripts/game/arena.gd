@@ -22,6 +22,8 @@ const OcclusionFade = preload("res://scripts/game/occlusion_fade.gd")
 const GrassField = preload("res://scripts/game/grass_field.gd")
 const BushField = preload("res://scripts/game/bush_field.gd")
 const UnitVisual = preload("res://scripts/game/unit_visual.gd")
+# 英雄身份色的唯一来源：模型配色、技能特效、HUD 图标全部读它。
+const HeroLook = preload("res://scripts/game/hero_look.gd")
 const GameHUD = preload("res://scripts/ui/game_hud.gd")
 const GameTheme = preload("res://scripts/ui/game_theme.gd")
 const InputAssist = preload("res://scripts/game/input_assist.gd")
@@ -4649,7 +4651,11 @@ func _spawn_skill_fx(request: Dictionary) -> void:
 	var color: Color = SkillFx.summoner_color(spell) if spell != "" else _hero_vfx_color(str(request.get("hero_type", "blade")))
 	if spell == "":
 		# 英雄色负责身份，技能强调色负责区分同英雄的 Q/W/E/R。
-		color = SkillFx.blend_color(color, str(request.get("kind", "")))
+		# 强调色走 `accent_for`：英雄级变体可以覆盖它（星璃/墨鸦都是紫系，
+		# 不覆盖的话同一个 burst 两人放出来同色）。
+		var hero_type := str(request.get("hero_type", "blade"))
+		var kind := str(request.get("kind", ""))
+		color = color.lerp(SkillFx.accent_for(hero_type, kind), 0.45)
 	var from_point: Vector2 = request.get("from", Vector2.ZERO)
 	var aim_point: Vector2 = request.get("aim", Vector2.ZERO)
 	var from := Vector3(from_point.x, 1.0, from_point.y)
@@ -5666,20 +5672,16 @@ func _explosion(pos: Vector3, color: Color, amount: int, priority := 1) -> void:
 	_spawn_particles(pos, Color(1.0, 0.85, 0.55), int(amount * 0.5), 4.0, 0.1, 0.5, "", priority)
 	_spawn_ring(Vector3(pos.x, 0.12, pos.z), color, 0.6, 4.5, 0.55, 0.65, false, priority)
 
-# 英雄特效色：谱系色只认这几个英雄。static 是为了让纯函数
-# hero_attack_fx_plan() 也能取到同一份颜色（测试要断言「不同英雄颜色不同」）。
+# 英雄特效色：**唯一来源是 HeroLook 的 palette.glow**。
+#
+# 以前这里硬编码一份谱系色，模型那边的立绘对齐了、特效还是旧色（铁壁模型改成
+# 锈橙，技能却还是青色），一个英雄身上出现两套身份色。现在模型、技能、HUD 图标
+# 全部读同一个 `HeroLook.glow()` —— 改配色只改一处。
+# static 是为了让纯函数 hero_attack_fx_plan() 也能取到同一份颜色
+# （测试要断言「不同英雄颜色不同」）。
 static func _hero_vfx_color(hero_type: String) -> Color:
-	match hero_type:
-		"blade":
-			return Color(1.0, 0.72, 0.3)
-		"mage":
-			return Color(0.62, 0.5, 1.0)
-		"tank":
-			return Color(0.4, 0.85, 0.8)
-		"archer":
-			return Color(0.55, 0.95, 0.5)
-		"assassin":
-			return Color(0.88, 0.42, 0.72)
+	if HeroLook.has_look(hero_type):
+		return HeroLook.glow(hero_type)
 	return GOLD
 
 func _build_ambient_particles() -> void:

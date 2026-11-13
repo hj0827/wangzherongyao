@@ -32,6 +32,32 @@ static var _materials: Dictionary = {}
 static var _meshes: Dictionary = {}
 static var _shader: Shader = null
 static var _flat: Texture2D = null
+# 本次装配已经建过的骨骼挂点：一根骨骼只留一个挂点。
+# 见 `shared_pivot()` 的注释（这是 draw call 数量的一半）。
+static var _pivot_cache: Dictionary = {}
+
+## 同一次装配内，一根骨骼只建一个挂点。
+##
+## 为什么重要：袖子、护肩、肩盖、臂环都挂在 upperarm 上，各建一个
+## BoneAttachment3D 就是 4 次 draw call —— 但它们的父骨骼完全相同，
+## 每帧变换也完全相同，合并成一份网格后没有任何视觉差别。
+## 10 个英雄同屏时，这一条能把配件 draw call 从 ~32/人 压到 ~16/人。
+##
+## `aligned=false`（沿骨骼轴）优先：只要需要沿骨轴的件先建，这个挂点就是沿骨轴的；
+## 反过来的情况各建一个，绝不混用（混用会让「正立」的件横过来）。
+static func shared_pivot(skeleton: Skeleton3D, bone_name: String, aligned := true) -> Node3D:
+	var key := "%d|%s|%s" % [skeleton.get_instance_id(), bone_name, str(aligned)]
+	var cached: Node3D = _pivot_cache.get(key, null)
+	if cached != null and is_instance_valid(cached):
+		return cached
+	var pivot := attach(skeleton, bone_name, "Shared_" + bone_name, aligned)
+	if pivot != null:
+		_pivot_cache[key] = pivot
+	return pivot
+
+## 每次装配开始前调用：清掉上一个英雄的挂点缓存，避免跨英雄复用。
+static func begin_build() -> void:
+	_pivot_cache.clear()
 
 # ---------------------------------------------------------------------------
 # 材质
@@ -89,6 +115,8 @@ static func skin_material(params: Dictionary, texture: Texture2D, team: String) 
 	material.set_shader_parameter("specular_value", float(params.get("specular", 0.35)))
 	material.set_shader_parameter("team_tint", HeroLook.team_tint(team))
 	material.set_shader_parameter("team_amount", HeroLook.team_amount())
+	material.set_shader_parameter("team_rim_color", HeroLook.team_rim(team))
+	material.set_shader_parameter("team_rim_strength", HeroLook.team_rim_strength())
 	_materials[key] = material
 	return material
 
@@ -537,14 +565,17 @@ static func limb_tube(
 	length: float,
 	material: Material,
 	sides := 10,
-	node_name := ""
+	node_name := "",
+	start_offset := 0.0
 ) -> Node3D:
-	var pivot := attach(skeleton, bone, node_name if node_name != "" else "Limb_" + bone, false)
+	# 沿骨轴挂：袖管/护胫本来就要跟着骨长方向走。
+	# 走 shared_pivot：同一根骨上的袖管、护臂、肩盖共用一份挂点，
+	# 最后跨层合并成 1 个网格（10 人同屏省一半配件 draw call）。
+	var pivot := shared_pivot(skeleton, bone, false)
 	if pivot == null:
 		return null
 	var mesh := cylinder_mesh(bottom_radius, length, sides, top_radius)
-	# 圆台默认沿 Y：中心放在 half 处，顶端贴在骨原点。
-	part(pivot, mesh, material, Vector3(0.0, length * 0.5, 0.0))
+	part(pivot, mesh, material, Vector3(0.0, start_offset + length * 0.5, 0.0))
 	return pivot
 
 ## 贴在骨骼上的一圈「甲环」（护腕 / 护胫口 / 臂环）：短圆台，比肢体粗。
@@ -557,7 +588,7 @@ static func limb_band(
 	material: Material,
 	sides := 12
 ) -> void:
-	var pivot := attach(skeleton, bone, "Band_" + bone, false)
+	var pivot := shared_pivot(skeleton, bone, false)
 	if pivot == null:
 		return
 	part(pivot, cylinder_mesh(radius, height, sides), material, Vector3(0.0, offset, 0.0))
@@ -597,6 +628,19 @@ static func surface_kind(material: Material, role: String) -> String:
 		return "outfit"
 	return "hair" if role == "hair" else ("outfit" if role == "outfit" else "body")
 
+## 网格节点属于哪个装配槽（Body / Outfit / Hair / Weapon）。
+## apply_skin 的换色档位靠它区分「这是衣服还是头发」—— 判错会把头发染成衣服色。
+static func _role_of(mesh_instance: MeshInstance3D) -> String:
+	var node: Node = mesh_instance
+	while node != null:
+		var node_name := str(node.name)
+		if node_name == "WeaponSlot":
+			return "weapon"
+		if node_name == "Body" or node_name == "Outfit" or node_name == "Hair":
+			return node_name.to_lower()
+		node = node.get_parent()
+	return "body"
+
 ## 把整套英雄网格换成英雄专属的皮肤材质。
 ## 返回被改写的面数（测试用它证明「真的改了」，而不是静默跳过）。
 static func apply_skin(root: Node3D, hero_type: String, team: String) -> int:
@@ -632,17 +676,39 @@ static func apply_skin(root: Node3D, hero_type: String, team: String) -> int:
 			changed += 1
 	return changed
 
-## 网格节点属于哪个装配槽（Body / Outfit / Hair / Weapon）。
-static func _role_of(mesh_instance: MeshInstance3D) -> String:
-	var node: Node = mesh_instance
-	while node != null:
+## 通用角色包自带的两件「兜帽」网格（不是我们加的配件）。
+##
+## 实测（tools/probe_hero_head.gd）：`Male_Ranger_Head_Hood` / `Female_Ranger_Head_Hood`
+## 是包 outfit 里自带的兜帽，盖住整个头（模型坐标 y≈1.47~1.87）。默认是深褐皮革，
+## 重上色之后变成一顶跟衣服同色的布袋 —— 实拍里五个英雄头顶都是它。
+##
+## 处理口径：
+##   - 苍刃 / 星璃 / 翎羽：**保留**（立绘里本来就有兜帽或披风帽），跟衣服同色；
+##   - 墨鸦：立绘是高马尾 + 无帽，**把这件网格藏起来**（visible=false）。
+##     藏而不是删：它的蒙皮挂在骨架上，删了会在原地留一个洞。
+const HEAD_HOOD_MESHES := ["Male_Ranger_Head_Hood", "Female_Ranger_Head_Hood"]
+
+## 保留自带兜帽的英雄。
+##
+## 现在是**空的**：5 张立绘（assets/ui/portraits/*.png）里没有一个人戴兜帽 ——
+## 苍刃短发、星璃长发 + 月冠、铁壁光头 + 发髻、翎羽双丸子 + 羽饰、墨鸦高马尾。
+## 通用包那顶兜帽会盖住整张脸，实拍就是「五个绿布袋」。
+## 剪影改由各英雄自己的配件承担（披风 / 披肩 / 兜帽配件 / 战旗）。
+## 想给某个英雄恢复兜帽，把 hero_type 加进这个数组即可。
+const KEEP_HEAD_HOOD: Array[String] = []
+
+## 按英雄决定自带兜帽出不出现。必须在 apply_skin 之后调用
+## （先把它染成衣服色，再决定是否显示）。
+static func apply_head_hood(root: Node3D, hero_type: String) -> void:
+	if root == null:
+		return
+	var keep := KEEP_HEAD_HOOD.has(hero_type)
+	for node in root.find_children("*", "MeshInstance3D", true, false):
 		var node_name := str(node.name)
-		if node_name == "WeaponSlot":
-			return "weapon"
-		if node_name == "Body" or node_name == "Outfit" or node_name == "Hair":
-			return node_name.to_lower()
-		node = node.get_parent()
-	return "body"
+		for hood_name in HEAD_HOOD_MESHES:
+			if node_name.begins_with(str(hood_name)):
+				(node as MeshInstance3D).visible = keep
+				break
 
 ## 武器：除了重上色，再挂一条刃口发光（鞘/柄不发光，靠几何挑选）。
 ## 不新建节点也能读到「这把武器是橙金色系」。
@@ -663,7 +729,7 @@ static func highlight_weapon(root: Node3D, hero_type: String) -> void:
 # ---------------------------------------------------------------------------
 
 ## 给英雄装上专属服饰。返回 {"parts": [...], "sway": {...}}。
-## `HeroCostumeParts` 只负责几何，这里负责找骨架、挂骨骼、记账。
+## `HeroCostumeParts` 只负责几何，这里负责找骨架、挂骨骼、记账、最后合并网格。
 static func build_costume(root: Node3D, hero_type: String) -> Dictionary:
 	var empty := {"parts": [], "sway": {}}
 	var skeleton := skeleton_of(root)
@@ -672,7 +738,256 @@ static func build_costume(root: Node3D, hero_type: String) -> Dictionary:
 	var parts_script = load("res://scripts/game/hero_costume_parts.gd")
 	if parts_script == null:
 		return empty
-	return parts_script.build(hero_type, skeleton)
+	begin_build()
+	var result: Dictionary = parts_script.build(hero_type, skeleton)
+	# 合并必须在**全部建完之后**做，否则后面新建的件又不会进合并组。
+	for anchor in skeleton.find_children("HeroCostume_*", "BoneAttachment3D", true, false):
+		merge_anchor(anchor as Node3D)
+	return result
+
+# ---------------------------------------------------------------------------
+# 网格合并（draw call）
+# ---------------------------------------------------------------------------
+
+## 合并一个挂点下的所有静态网格（自底向上）。
+##
+## 为什么必须做：一套配件大约 38 个 MeshInstance3D，10 个英雄同屏实测
+## 614 draw call / 686 mesh —— 移动端预算（≤400）直接被配件吃穿。
+##
+## 三条安全约束：
+##   1. **只在 `HeroCostume_*` 挂点里合并**：身体网格有蒙皮权重，烘成静态网格
+##      会立刻变成「脱了骨架的一坨」；
+##   2. **按材质分桶**：不同材质的网格合并后会共享一份 material_override，
+##      金边和布料会糊成同色；
+##   3. **自底向上**：先并叶子组（ClothPanel 里的三片布），再并父层，
+##      这样摆动组的节点本身还在，`sway()` 写的 rotation 依然有效。
+static func _merge_static_meshes(root: Node) -> void:
+	for child in root.get_children():
+		_merge_static_meshes(child)
+	if not (root is Node3D) or root is MeshInstance3D:
+		return
+	var buckets: Dictionary = {}
+	for child in root.get_children():
+		if not (child is MeshInstance3D):
+			continue
+		var mesh_instance := child as MeshInstance3D
+		if mesh_instance.mesh == null:
+			continue
+		if mesh_instance.get_child_count() > 0:
+			continue
+		var key := str(mesh_instance.material_override)
+		var list: Array = buckets.get(key, [])
+		list.append(mesh_instance)
+		buckets[key] = list
+	for key in buckets:
+		var list: Array = buckets[key]
+		if list.size() < 2:
+			continue
+		var merged := _merge_meshes(list)
+		if merged == null:
+			continue
+		var first: MeshInstance3D = list[0]
+		first.mesh = merged
+		first.position = Vector3.ZERO
+		first.rotation = Vector3.ZERO
+		first.scale = Vector3.ONE
+		for i in range(1, list.size()):
+			var extra: MeshInstance3D = list[i]
+			root.remove_child(extra)
+			extra.free()
+
+## 跨层合并：把一个挂点下**所有不在摆动组里**的网格按材质烘成一份。
+##
+## 上面的逐层合并只能把「同一个组的三个零件」并成一个；一套配件真正的浪费在于
+## 「披风挂点下 5 个组，每组 1~2 个网格」，逐层合并一个都并不掉。
+## 这里按「材质」跨层并，一个挂点通常只剩 2~4 个网格。
+##
+## 摆动组整棵子树跳过：它们的 rotation 每帧被 sway() 改写，烘进静态网格就摆不动了，
+## 而且不报错 —— 表现为「跑起来披风是焊死的」。
+## 跨层合并：把一个挂点下的网格按材质烘成尽可能少的几份。
+##
+## 为什么必须做：一套配件约 30~44 个 MeshInstance3D，10 个英雄同屏实测
+## 554 draw call / 626 mesh —— 移动端预算（≤400）直接被配件吃穿。
+##
+## 三条安全约束（每条都对应一次实际踩坑）：
+##   1. **摆动节点必须保留自己那一层**：它们的 rotation 每帧被 `sway()` 改写。
+##      把子网格烘到挂点根上的话，披风的旋转就再也影响不到那些几何，
+##      表现是「跑起来披风焊死在背上」——而且不报错。
+##      做法是：**在每个摆动节点自己名下就地合并**（holder 挂在它下面），
+##      剩下的再跨层合并到挂点根；
+##   2. **只在 `HeroCostume_*` 挂点里合并**：身体网格带蒙皮权重，烘成静态网格
+##      会立刻变成「脱了骨架的一坨」；
+##   3. **按材质分桶**：不同材质合并后会共享一份 material_override，
+##      金边和布料会糊成同色。
+static func merge_anchor(anchor: Node3D) -> void:
+	# 先就地合并每个摆动节点自己的子树（保留它们各自的变换层）。
+	for marked in _sway_nodes_under(anchor):
+		_merge_subtree_into(marked, marked)
+	# 再把剩下的（不含已合并的摆动节点）并到挂点根。
+	_merge_subtree_into(anchor, anchor)
+
+static func _merge_subtree_into(root: Node3D, holder_parent: Node3D) -> void:
+	var buckets: Dictionary = {}
+	_collect_merged_meshes(root, Transform3D.IDENTITY, buckets, root)
+	for key in buckets:
+		var entries: Array = buckets[key]
+		if entries.size() < 2:
+			continue
+		var merged := _merge_transformed(entries)
+		if merged == null:
+			continue
+		var source: MeshInstance3D = entries[0]["node"]
+		var holder := MeshInstance3D.new()
+		holder.name = "Merged"
+		holder.mesh = merged
+		holder.material_override = source.material_override
+		holder.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		holder_parent.add_child(holder)
+		for entry in entries:
+			var node: MeshInstance3D = entry["node"]
+			if node.get_parent() != null:
+				node.get_parent().remove_child(node)
+			node.free()
+
+## 收集 `root` 子树里的静态网格。`root` 自己若是摆动节点，不因此跳过自己的子网格
+## （它们相对于 root 的变换是固定的，烘进挂在 root 下的 holder 仍然正确）。
+static func _collect_merged_meshes(
+	node: Node,
+	xform: Transform3D,
+	buckets: Dictionary,
+	root: Node3D
+) -> void:
+	for child in node.get_children():
+		if child is MeshInstance3D:
+			var mesh_instance := child as MeshInstance3D
+			if mesh_instance.mesh != null:
+				var key := str(mesh_instance.material_override)
+				var list: Array = buckets.get(key, [])
+				list.append({"node": mesh_instance, "xform": xform * mesh_instance.transform})
+				buckets[key] = list
+			continue
+		if child is Node3D:
+			# 别的摆动节点：它的变换由 sway() 负责，保持独立。
+			if child != root and _is_sway_node(child):
+				continue
+			_collect_merged_meshes(child, xform * (child as Node3D).transform, buckets, root)
+		else:
+			_collect_merged_meshes(child, xform, buckets, root)
+
+static func _merge_transformed(entries: Array) -> ArrayMesh:
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+	for entry in entries:
+		var mesh_instance: MeshInstance3D = entry["node"]
+		var xform: Transform3D = entry["xform"]
+		var normal_basis := xform.basis.inverse().transposed()
+		var mesh := mesh_instance.mesh
+		for surface in mesh.get_surface_count():
+			var arrays := mesh.surface_get_arrays(surface)
+			if arrays.size() <= Mesh.ARRAY_VERTEX or arrays[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var base := vertices.size()
+			var src_verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var src_normals: PackedVector3Array = PackedVector3Array()
+			if arrays.size() > Mesh.ARRAY_NORMAL and arrays[Mesh.ARRAY_NORMAL] != null:
+				src_normals = arrays[Mesh.ARRAY_NORMAL]
+			for i in src_verts.size():
+				vertices.append(xform * src_verts[i])
+				normals.append((normal_basis * src_normals[i]).normalized() if i < src_normals.size() else Vector3.UP)
+			if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] != null:
+				for index in (arrays[Mesh.ARRAY_INDEX] as PackedInt32Array):
+					indices.append(base + index)
+			else:
+				for i in src_verts.size():
+					indices.append(base + i)
+	if vertices.is_empty():
+		return null
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = vertices
+	out[Mesh.ARRAY_NORMAL] = normals
+	out[Mesh.ARRAY_INDEX] = indices
+	var merged := ArrayMesh.new()
+	merged.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out)
+	return merged
+
+## 摆动组的名字前缀：与 HeroCostumeParts 里被 `_record(..., sway_kind)` 登记的节点一致。
+## 漏一个 → 那个组被烘进静态网格 → 跑动时它不摆（静默失效）。
+## 多一个（把不摆的组也排除在合并外）→ 只是多几个 draw call，不会错。
+##
+## 注意 `Sash` / `Tasset` / `Skirt` 同时也是**躯干配件**的组名：它们在
+## `_record(..., "skirt")` 里被登记成摆动组，所以必须整组保留。
+const SWAY_PREFIXES := ["CapePanel", "CloakPanel", "Skirt", "FeatherBundle", "Tasset",
+	"ScarfTail", "BannerFlag", "HaloRing", "BladeSash", "Sash0", "Tasset0"]
+
+static func _is_sway_node(node: Node) -> bool:
+	var node_name := str(node.name)
+	for prefix in SWAY_PREFIXES:
+		if node_name.begins_with(str(prefix)):
+			return true
+	return false
+
+## 挂点下所有摆动节点（用于「就地合并」）。自顶向下，遇到就收，不深入。
+static func _sway_nodes_under(anchor: Node3D) -> Array[Node3D]:
+	var out: Array[Node3D] = []
+	for child in anchor.get_children():
+		if child is Node3D:
+			_collect_sway_nodes(child as Node3D, out)
+	return out
+
+static func _collect_sway_nodes(node: Node3D, out: Array[Node3D]) -> void:
+	if _is_sway_node(node):
+		out.append(node)
+		return
+	for child in node.get_children():
+		if child is Node3D:
+			_collect_sway_nodes(child as Node3D, out)
+
+## 把若干 MeshInstance3D（各自带 position/rotation/scale）烘成一个 ArrayMesh。
+## 法线用逆转置矩阵变换，非等比缩放（护肩 dome 压扁到 0.38）才不会把光照算歪。
+static func _merge_meshes(meshes: Array) -> ArrayMesh:
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+	var material: Material = null
+	for entry in meshes:
+		var mesh_instance := entry as MeshInstance3D
+		var mesh := mesh_instance.mesh
+		if material == null:
+			material = mesh_instance.material_override
+		var xform := mesh_instance.transform
+		var normal_basis := xform.basis.inverse().transposed()
+		for surface in mesh.get_surface_count():
+			var arrays := mesh.surface_get_arrays(surface)
+			if arrays.size() <= Mesh.ARRAY_VERTEX or arrays[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var base := vertices.size()
+			var src_verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var src_normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL] if arrays.size() > Mesh.ARRAY_NORMAL and arrays[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
+			for i in src_verts.size():
+				vertices.append(xform * src_verts[i])
+				if i < src_normals.size():
+					normals.append((normal_basis * src_normals[i]).normalized())
+				else:
+					normals.append(Vector3.UP)
+			if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] != null:
+				for index in (arrays[Mesh.ARRAY_INDEX] as PackedInt32Array):
+					indices.append(base + index)
+			else:
+				for i in src_verts.size():
+					indices.append(base + i)
+	if vertices.is_empty():
+		return null
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = vertices
+	out[Mesh.ARRAY_NORMAL] = normals
+	out[Mesh.ARRAY_INDEX] = indices
+	var merged := ArrayMesh.new()
+	merged.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out)
+	# 材质统一由调用方的 MeshInstance3D 提供（material_override），这里不烧进 surface。
+	return merged
 
 ## 布料摆动：没有骨骼，靠每帧给「下摆 / 披风 / 围巾」写一个小角度。
 ##   - `moving` 决定幅度（站桩只呼吸，移动时后飘）；
