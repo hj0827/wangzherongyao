@@ -1009,17 +1009,15 @@ func _tick_channels(entity: Dictionary, input: Dictionary, dt: float) -> bool:
 			})
 	return false
 
-<<<<<<< HEAD
 # --- 技能前摇 / 后摇（项 3.3）----------------------------------------------
 # cast_slot 非空 = 正在起手，cast_left 是剩余前摇；前摇走完后写 cast_recover
 # 作为后摇（禁施法 / 禁普攻，但**不禁移动**——移动惩罚交给 ControlRules 之外的表现层）。
 #
 # 两段计时是**串联**的：前摇还在走时后摇不动，否则"起手 0.3 秒"会被后摇同时吃掉。
-# 之前这里只有一个悬空调用、没有实现，match_sim 解析失败 → arena / main 连锁编译
-# 失败 → 开窗纯黑。守卫见 tests/test_cast_timing.gd。
-
-func _tick_casts(state_ref: Dictionary, dt: float) -> void:
-	_tick_casts_for(dt, state_ref.entities)
+# 这里分成两层，别合并回一个：
+#   `_tick_casts_for` 只推计时器（不结算、不打断），给 rules 单测直调；
+#   `_tick_casts` 才是 tick() 里的真身，负责控制打断 + 前摇结算 + 后摇。
+# 守卫见 tests/test_cast_timing.gd 与 tests/test_skill_windup.gd。
 
 ## 纯计时推进，脱离 state 单独可测。
 func _tick_casts_for(dt: float, entities: Array) -> void:
@@ -1038,7 +1036,7 @@ func _tick_casts_for(dt: float, entities: Array) -> void:
 				entity["cast_slot"] = ""
 			continue  # 串联：前摇没走完，后摇不动
 		entity["cast_recover"] = maxf(0.0, recover - dt)
-=======
+
 # --- 技能前摇 / 后摇（项 3.3，验收 3.3）----------------------------------
 # 时序规则（对标王者"按下进 CD、起手可被控断"）：
 #   1. 起手 tick 即扣蓝、进 CD；前摇结束才结算伤害/控制/位移。
@@ -1113,8 +1111,8 @@ func _execute_skill(hero: Dictionary, slot: String, aim: Vector2, paid: bool) ->
 			return SkillSystem.cast_skill(hero, slot, aim, self, paid)
 	return false
 
-func _tick_casts(dt: float) -> void:
-	for entity in state.entities:
+func _tick_casts(state_ref: Dictionary, dt: float) -> void:
+	for entity in state_ref.entities:
 		if entity.type != "hero":
 			continue
 		if not _is_casting(entity):
@@ -1152,7 +1150,6 @@ func _cancel_cast(hero: Dictionary, reason: String) -> void:
 		"x": float(hero.pos.x),
 		"y": float(hero.pos.y),
 	})
->>>>>>> 643e4f0d468f38b3e32adc4a7b2ac6ef21d4fc4c
 
 func _update_hero_timers(dt: float) -> void:
 	for entity in state.entities:
