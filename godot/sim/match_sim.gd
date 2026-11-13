@@ -803,7 +803,7 @@ func tick(dt: float) -> void:
 	for spot in River.tick(state, dt):
 		_spawn_monster(River.spirit_stats(spot))
 	_update_hero_timers(dt)
-	_tick_casts(dt)
+	_tick_casts(state, dt)
 	_apply_human_inputs(dt)
 	_update_bots(dt)
 	_update_minions(dt)
@@ -1003,6 +1003,35 @@ func _tick_channels(entity: Dictionary, input: Dictionary, dt: float) -> bool:
 				"y": float(recall_from.y),
 			})
 	return false
+
+# --- 技能前摇 / 后摇（项 3.3）----------------------------------------------
+# cast_slot 非空 = 正在起手，cast_left 是剩余前摇；前摇走完后写 cast_recover
+# 作为后摇（禁施法 / 禁普攻，但**不禁移动**——移动惩罚交给 ControlRules 之外的表现层）。
+#
+# 两段计时是**串联**的：前摇还在走时后摇不动，否则"起手 0.3 秒"会被后摇同时吃掉。
+# 之前这里只有一个悬空调用、没有实现，match_sim 解析失败 → arena / main 连锁编译
+# 失败 → 开窗纯黑。守卫见 tests/test_cast_timing.gd。
+
+func _tick_casts(state_ref: Dictionary, dt: float) -> void:
+	_tick_casts_for(dt, state_ref.entities)
+
+## 纯计时推进，脱离 state 单独可测。
+func _tick_casts_for(dt: float, entities: Array) -> void:
+	for entity in entities:
+		if not entity.has("cast_left"):
+			continue
+		var left := float(entity.get("cast_left", 0.0))
+		var recover := float(entity.get("cast_recover", 0.0))
+		if left <= 0.0 and recover <= 0.0:
+			continue  # 空转实体保持原样，不做任何写入
+		if left > 0.0:
+			left = maxf(0.0, left - dt)
+			entity["cast_left"] = left
+			if left <= 0.0:
+				# 前摇结束：清掉施法槽位，后摇从这一刻起算。
+				entity["cast_slot"] = ""
+			continue  # 串联：前摇没走完，后摇不动
+		entity["cast_recover"] = maxf(0.0, recover - dt)
 
 func _update_hero_timers(dt: float) -> void:
 	for entity in state.entities:
